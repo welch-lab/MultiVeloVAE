@@ -4,7 +4,15 @@ from .model_util_chrom import pred_exp_numpy
 from .TransitionGraph import encode_type
 
 
-def rna_velocity_vae(adata, adata_atac, key, batch_key=None, use_raw=False, use_scv_genes=False, sigma=None, approx=False, full_vb=False):
+def rna_velocity_vae(adata,
+                     adata_atac,
+                     key,
+                     batch_key=None,
+                     use_raw=False,
+                     use_scv_genes=False,
+                     sigma=None,
+                     approx=False,
+                     full_vb=False):
     n_batch = 0
     batch = None
     if batch_key is not None and batch_key in adata.obs:
@@ -19,13 +27,19 @@ def rna_velocity_vae(adata, adata_atac, key, batch_key=None, use_raw=False, use_
     kc = adata.layers[f"{key}_kc"]
     rho = adata.layers[f"{key}_rho"]
     if batch_key is not None:
-        alpha_c, alpha, beta, gamma = np.zeros((n_batch, adata.n_vars)), np.zeros((n_batch, adata.n_vars)), np.zeros((n_batch, adata.n_vars)), np.zeros((n_batch, adata.n_vars))
+        alpha_c = np.zeros((n_batch, adata.n_vars))
+        alpha = np.zeros((n_batch, adata.n_vars))
+        beta = np.zeros((n_batch, adata.n_vars))
+        gamma = np.zeros((n_batch, adata.n_vars))
         for i in range(n_batch):
             alpha_c[i, :] = adata.var[f"{key}_alpha_c_{i}"].to_numpy()
             alpha[i, :] = adata.var[f"{key}_alpha_{i}"].to_numpy()
             beta[i, :] = adata.var[f"{key}_beta_{i}"].to_numpy()
             gamma[i, :] = adata.var[f"{key}_gamma_{i}"].to_numpy()
-        alpha_c, alpha, beta, gamma = np.dot(onehot, alpha_c), np.dot(onehot, alpha), np.dot(onehot, beta), np.dot(onehot, gamma)
+        alpha_c = np.dot(onehot, alpha_c)
+        alpha = np.dot(onehot, alpha)
+        beta = np.dot(onehot, beta)
+        gamma = np.dot(onehot, gamma)
     else:
         alpha_c = adata.var[f"{key}_alpha_c"].to_numpy()
         alpha = adata.var[f"{key}_alpha"].to_numpy()

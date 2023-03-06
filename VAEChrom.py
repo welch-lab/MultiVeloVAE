@@ -175,19 +175,22 @@ class Decoder(nn.Module):
             self.alpha = nn.Parameter(torch.empty(self.params_shape, device=self.device).float())
             self.beta = nn.Parameter(torch.empty(self.params_shape, device=self.device).float())
             self.gamma = nn.Parameter(torch.empty(self.params_shape, device=self.device).float())
-            self.scaling_c = nn.Parameter(torch.empty(self.params_shape, device=self.device).float())
-            self.scaling = nn.Parameter(torch.empty(self.params_shape, device=self.device).float())
-            self.ton = nn.Parameter(torch.empty(self.params_shape, device=self.device).float())
-            self.sigma_c = nn.Parameter(torch.empty(self.params_shape, device=self.device).float())
-            self.sigma_u = nn.Parameter(torch.empty(self.params_shape, device=self.device).float())
-            self.sigma_s = nn.Parameter(torch.empty(self.params_shape, device=self.device).float())
-            self.c0 = nn.Parameter(torch.empty(self.params_shape, device=self.device).float())
-            self.u0 = nn.Parameter(torch.empty(self.params_shape, device=self.device).float())
-            self.s0 = nn.Parameter(torch.empty(self.params_shape, device=self.device).float())
+
+            self.scaling_c = nn.Parameter(torch.empty(G, device=self.device).float())
+            self.scaling = nn.Parameter(torch.empty(G, device=self.device).float())
+            self.sigma_c = nn.Parameter(torch.empty(G, device=self.device).float())
+            self.sigma_u = nn.Parameter(torch.empty(G, device=self.device).float())
+            self.sigma_s = nn.Parameter(torch.empty(G, device=self.device).float())
+            self.ton = nn.Parameter(torch.empty(G, device=self.device).float())
+            self.c0 = nn.Parameter(torch.empty(G, device=self.device).float())
+            self.u0 = nn.Parameter(torch.empty(G, device=self.device).float())
+            self.s0 = nn.Parameter(torch.empty(G, device=self.device).float())
 
             self.load_state_dict(torch.load(self.checkpoint, map_location=self.device))
         else:
-            C, U, S = self.adata_atac.layers['Mc'][self.train_idx], self.adata.layers['Mu'][self.train_idx], self.adata.layers['Ms'][self.train_idx]
+            C = self.adata_atac.layers['Mc'][self.train_idx]
+            U = self.adata.layers['Mu'][self.train_idx]
+            S = self.adata.layers['Ms'][self.train_idx]
             self.init_weights()
             self.init_ode(C, U, S, p, tmax)
             self.init_x0(C, U, S)
@@ -217,7 +220,7 @@ class Decoder(nn.Module):
             if self.cvae:
                 return torch.tensor(np.tile(np.stack([self.params_mult[0]*np.log(x), self.params_mult[1]*np.ones(self.params_shape[2])]), (self.params_shape[0], 1, 1)), device=self.device).float()
             else:
-                return torch.tensor(np.stack([self.params_mult[0]*np.log(x), self.params_mult[1]*np.ones(self.params_shape[2])]), device=self.device).float()
+                return torch.tensor(np.stack([self.params_mult[0]*np.log(x), self.params_mult[1]*np.ones(self.params_shape[1])]), device=self.device).float()
         else:
             if self.cvae:
                 return torch.tensor(np.tile(self.params_mult[0]*np.log(x), (self.params_shape[0], 1)), device=self.device).float()
@@ -267,17 +270,19 @@ class Decoder(nn.Module):
             nn.init.constant_(m.bias, 0.0)
 
     def init_ode(self, C, U, S, p, tmax):
+        G = self.adata.n_vars
         X = np.concatenate((C, U, S), 1)
         device = self.device
 
         if self.init_method == "random":
             print("Random Initialization.")
-            alpha_c, alpha, beta, gamma, scaling_c, scaling, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, T = init_params(X, p, fit_scaling=True)
+            out = init_params(X, p, fit_scaling=True)
+            alpha_c, alpha, beta, gamma, scaling_c, scaling, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, T = out
             self.alpha_c = nn.Parameter(torch.normal(0.0, 0.5, size=self.params_shape, device=device).float())
             self.alpha = nn.Parameter(torch.normal(0.0, 1.0, size=self.params_shape, device=device).float())
             self.beta = nn.Parameter(torch.normal(0.0, 0.5, size=self.params_shape, device=device).float())
             self.gamma = nn.Parameter(torch.normal(0.0, 0.5, size=self.params_shape, device=device).float())
-            self.ton = torch.nn.Parameter(torch.ones(self.params_shape, device=self.device).float()*(-10))
+            self.ton = torch.nn.Parameter(torch.ones(G, device=self.device).float()*(-10))
             self.scaling_c = nn.Parameter(torch.tensor(np.log(scaling_c), device=device).float())
             self.scaling = nn.Parameter(torch.tensor(np.log(scaling), device=device).float())
             self.sigma_c = nn.Parameter(torch.tensor(np.log(sigma_c), device=device).float())
@@ -285,7 +290,8 @@ class Decoder(nn.Module):
             self.sigma_s = nn.Parameter(torch.tensor(np.log(sigma_s), device=device).float())
         elif self.init_method == "tprior":
             print("Initialization using prior time.")
-            alpha_c, alpha, beta, gamma, scaling_c, scaling, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, T = init_params(X, p, fit_scaling=True)
+            out = init_params(X, p, fit_scaling=True)
+            alpha_c, alpha, beta, gamma, scaling_c, scaling, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, T = out
             self.alpha_c_ = alpha_c
             self.alpha_ = alpha
             self.beta_ = beta
@@ -316,10 +322,11 @@ class Decoder(nn.Module):
             self.alpha = nn.Parameter(self.get_tensor(alpha))
             self.beta = nn.Parameter(self.get_tensor(beta))
             self.gamma = nn.Parameter(self.get_tensor(gamma))
+
             if self.init_ton_zero or (not self.reinit):
-                self.ton = nn.Parameter((torch.ones(self.params_shape, device=device)*(-10)).float())
+                self.ton = nn.Parameter((torch.ones(G, device=device)*(-10)).float())
             else:
-                self.ton = nn.Parameter(self.get_tensor(ton+1e-10))
+                self.ton = nn.Parameter(torch.tensor(np.log(ton+1e-10), device=device).float())
 
             self.scaling_c = nn.Parameter(torch.tensor(np.log(scaling_c), device=device).float())
             self.scaling = nn.Parameter(torch.tensor(np.log(scaling), device=device).float())
@@ -328,7 +335,8 @@ class Decoder(nn.Module):
             self.sigma_s = nn.Parameter(torch.tensor(np.log(sigma_s), device=device).float())
         else:
             print("Initialization using the steady-state and dynamical models.")
-            alpha_c, alpha, beta, gamma, scaling_c, scaling, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, T = init_params(X, p, fit_scaling=True, tmax=tmax)
+            out = init_params(X, p, fit_scaling=True, tmax=tmax)
+            alpha_c, alpha, beta, gamma, scaling_c, scaling, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, T = out
             self.alpha_c_ = alpha_c
             self.alpha_ = alpha
             self.beta_ = beta
@@ -361,10 +369,11 @@ class Decoder(nn.Module):
             self.alpha = nn.Parameter(self.get_tensor(alpha))
             self.beta = nn.Parameter(self.get_tensor(beta))
             self.gamma = nn.Parameter(self.get_tensor(gamma))
+
             if self.init_ton_zero or (not self.reinit):
-                self.ton = nn.Parameter((torch.ones(self.params_shape, device=device)*(-10)).float())
+                self.ton = nn.Parameter((torch.ones(G, device=device)*(-10)).float())
             else:
-                self.ton = nn.Parameter(self.get_tensor(ton+1e-10))
+                self.ton = nn.Parameter(torch.tensor(np.log(ton+1e-10), device=device).float())
 
             self.scaling_c = nn.Parameter(torch.tensor(np.log(scaling_c), device=self.device).float())
             self.scaling = nn.Parameter(torch.tensor(np.log(scaling), device=self.device).float())
@@ -376,9 +385,9 @@ class Decoder(nn.Module):
         G = self.adata.n_vars
         device = self.device
         if self.init_type is None:
-            self.c0 = nn.Parameter(torch.ones(self.params_shape, device=device).float()*(-10))
-            self.u0 = nn.Parameter(torch.ones(self.params_shape, device=device).float()*(-10))
-            self.s0 = nn.Parameter(torch.ones(self.params_shape, device=device).float()*(-10))
+            self.c0 = nn.Parameter(torch.ones(G, device=device).float()*(-10))
+            self.u0 = nn.Parameter(torch.ones(G, device=device).float()*(-10))
+            self.s0 = nn.Parameter(torch.ones(G, device=device).float()*(-10))
         elif self.init_type == "random":
             rv_c = stats.gamma(1.0, 0, 4.0)
             rv_u = stats.gamma(1.0, 0, 4.0)
@@ -392,17 +401,16 @@ class Decoder(nn.Module):
             c_top = np.quantile(C, 0.99, 0)
             u_top = np.quantile(U, 0.99, 0)
             s_top = np.quantile(S, 0.99, 0)
-
             c0, u0, s0 = c_top*r_c_gamma*r_c_bern, u_top*r_u_gamma*r_u_bern, s_top*r_s_gamma*r_s_bern
-            self.c0 = nn.Parameter(self.get_tensor(c0+1e-10))
-            self.u0 = nn.Parameter(self.get_tensor(u0+1e-10))
-            self.s0 = nn.Parameter(self.get_tensor(s0+1e-10))
+            self.c0 = nn.Parameter(torch.tensor(np.log(c0+1e-10), device=device).float())
+            self.u0 = nn.Parameter(torch.tensor(np.log(u0+1e-10), device=device).float())
+            self.s0 = nn.Parameter(torch.tensor(np.log(s0+1e-10), device=device).float())
         else:
             cell_labels = self.adata.obs[self.cluster_key].to_numpy()[self.train_idx]
             cell_mask = cell_labels == self.init_type
-            self.c0 = nn.Parameter(self.get_tensor(C[cell_mask].mean(0)+1e-10))
-            self.u0 = nn.Parameter(self.get_tensor(U[cell_mask].mean(0)+1e-10))
-            self.s0 = nn.Parameter(self.get_tensor(S[cell_mask].mean(0)+1e-10))
+            self.c0 = nn.Parameter(torch.tensor(np.log(C[cell_mask].mean(0)+1e-10), device=device).float())
+            self.u0 = nn.Parameter(torch.tensor(np.log(U[cell_mask].mean(0)+1e-10), device=device).float())
+            self.s0 = nn.Parameter(torch.tensor(np.log(S[cell_mask].mean(0)+1e-10), device=device).float())
 
     def get_param(self, x):
         if x == 'ton':
@@ -422,82 +430,49 @@ class Decoder(nn.Module):
         elif x == 'gamma':
             return self.gamma
 
-    def reparameterize(self, condition=None, sample=True, compute_x0=True):
+    def reparameterize(self, condition=None, sample=True):
         if len(self.params_mult) > 1:
             if sample:
                 G = self.adata.n_vars
-                eps = torch.normal(mean=torch.zeros((8, G)), std=torch.ones((8, G))).to(self.device)
+                eps = torch.normal(mean=torch.zeros((4, G)), std=torch.ones((4, G))).to(self.device)
                 if self.cvae:
-                    if compute_x0:
-                        ton = torch.exp(self.ton[:, 0] + eps[0]*(self.ton[:, 1].exp()))
-                        c0 = torch.exp(self.c0[:, 0] + eps[1]*(self.c0[:, 1].exp()))
-                        u0 = torch.exp(self.u0[:, 0] + eps[2]*(self.u0[:, 1].exp()))
-                        s0 = torch.exp(self.s0[:, 0] + eps[3]*(self.s0[:, 1].exp()))
-                    alpha_c = torch.exp(self.alpha_c[:, 0] + eps[4]*(self.alpha_c[:, 1].exp()))
-                    alpha = torch.exp(self.alpha[:, 0] + eps[5]*(self.alpha[:, 1].exp()))
-                    beta = torch.exp(self.beta[:, 0] + eps[6]*(self.beta[:, 1].exp()))
-                    gamma = torch.exp(self.gamma[:, 0] + eps[7]*(self.gamma[:, 1].exp()))
+                    alpha_c = torch.exp(self.alpha_c[:, 0] + eps[0]*(self.alpha_c[:, 1].exp()))
+                    alpha = torch.exp(self.alpha[:, 0] + eps[1]*(self.alpha[:, 1].exp()))
+                    beta = torch.exp(self.beta[:, 0] + eps[2]*(self.beta[:, 1].exp()))
+                    gamma = torch.exp(self.gamma[:, 0] + eps[3]*(self.gamma[:, 1].exp()))
                 else:
-                    if compute_x0:
-                        ton = torch.exp(self.ton[0] + eps[0]*(self.ton[1].exp()))
-                        c0 = torch.exp(self.c0[0] + eps[1]*(self.c0[1].exp()))
-                        u0 = torch.exp(self.u0[0] + eps[2]*(self.u0[1].exp()))
-                        s0 = torch.exp(self.s0[0] + eps[3]*(self.s0[1].exp()))
-                    alpha_c = torch.exp(self.alpha_c[0] + eps[4]*(self.alpha_c[1].exp()))
-                    alpha = torch.exp(self.alpha[0] + eps[5]*(self.alpha[1].exp()))
-                    beta = torch.exp(self.beta[0] + eps[6]*(self.beta[1].exp()))
-                    gamma = torch.exp(self.gamma[0] + eps[7]*(self.gamma[1].exp()))
+                    alpha_c = torch.exp(self.alpha_c[0] + eps[0]*(self.alpha_c[1].exp()))
+                    alpha = torch.exp(self.alpha[0] + eps[1]*(self.alpha[1].exp()))
+                    beta = torch.exp(self.beta[0] + eps[2]*(self.beta[1].exp()))
+                    gamma = torch.exp(self.gamma[0] + eps[3]*(self.gamma[1].exp()))
             else:
                 if self.cvae:
-                    if compute_x0:
-                        ton = self.ton[:, 0].exp()
-                        c0 = self.c0[:, 0].exp()
-                        u0 = self.u0[:, 0].exp()
-                        s0 = self.s0[:, 0].exp()
                     alpha_c = self.alpha_c[:, 0].exp()
                     alpha = self.alpha[:, 0].exp()
                     beta = self.beta[:, 0].exp()
                     gamma = self.gamma[:, 0].exp()
                 else:
-                    if compute_x0:
-                        ton = self.ton[0].exp()
-                        c0 = self.c0[0].exp()
-                        u0 = self.u0[0].exp()
-                        s0 = self.s0[0].exp()
                     alpha_c = self.alpha_c[0].exp()
                     alpha = self.alpha[0].exp()
                     beta = self.beta[0].exp()
                     gamma = self.gamma[0].exp()
         else:
-            if compute_x0:
-                ton = self.ton.exp()
-                c0 = self.c0.exp()
-                u0 = self.u0.exp()
-                s0 = self.s0.exp()
             alpha_c = self.alpha_c.exp()
             alpha = self.alpha.exp()
             beta = self.beta.exp()
             gamma = self.gamma.exp()
 
         if condition is not None:
-            if compute_x0:
-                ton = torch.mm(condition, ton)
-                c0 = torch.mm(condition, c0)
-                u0 = torch.mm(condition, u0)
-                s0 = torch.mm(condition, s0)
             alpha_c = torch.mm(condition, alpha_c)
             alpha = torch.mm(condition, alpha)
             beta = torch.mm(condition, beta)
             gamma = torch.mm(condition, gamma)
 
-        if compute_x0:
-            return ton, c0, u0, s0, alpha_c, alpha, beta, gamma
-        else:
-            return alpha_c, alpha, beta, gamma
+        return alpha_c, alpha, beta, gamma
 
     def forward(self, t, z, condition=None, c0=None, u0=None, s0=None, t0=None, neg_slope=0.0, sample=True):
+        alpha_c, alpha, beta, gamma = self.reparameterize(condition, sample)
         if (c0 is None) or (u0 is None) or (s0 is None) or (t0 is None):
-            ton, c0_, u0_, s0_, alpha_c, alpha, beta, gamma = self.reparameterize(condition, sample)
             if condition is None:
                 self.rho = torch.sigmoid(self.fc_out1(self.net_rho(z)))
                 self.kc = torch.sigmoid(self.fc_out3(self.net_kc(z if self.indicator_arch == 'parallel' else self.rho)))
@@ -508,11 +483,11 @@ class Decoder(nn.Module):
                 t_ = F.softplus(self.net_t(torch.cat((t, condition), 1))) if self.t_network else t
 
             chat, uhat, shat = pred_exp(t_,
-                                        ton,
+                                        self.ton,
                                         neg_slope,
-                                        c0_/self.scaling_c.exp(),
-                                        u0_/self.scaling.exp(),
-                                        s0_,
+                                        self.c0.exp()/self.scaling_c.exp(),
+                                        self.u0.exp()/self.scaling.exp(),
+                                        self.s0.exp(),
                                         self.kc,
                                         alpha_c,
                                         self.rho,
@@ -520,7 +495,6 @@ class Decoder(nn.Module):
                                         beta,
                                         gamma)
         else:
-            alpha_c, alpha, beta, gamma = self.reparameterize(condition, sample, False)
             if condition is None:
                 self.rho = torch.sigmoid(self.fc_out2(self.net_rho2(z)))
                 self.kc = torch.sigmoid(self.fc_out4(self.net_kc2(z if self.indicator_arch == 'parallel' else self.rho)))
@@ -576,7 +550,7 @@ class VAEChrom():
                  gene_plot=[],
                  cluster_key='clusters',
                  figure_path='figures'):
-        if ('Mc' not in adata.atac.layers) or ('Mu' not in adata.layers) or ('Ms') not in adata.layers:
+        if ('Mc' not in adata_atac.layers) or ('Mu' not in adata.layers) or ('Ms') not in adata.layers:
             print('Chromatin/Unspliced/Spliced count matrices not found in the layers! Exit the program...')
             return
 
@@ -617,6 +591,8 @@ class VAEChrom():
             "lambda_rho": 1e-3,
             "kl_t": 1.0,
             "kl_z": 1.0,
+            "kl_param": 1.0,
+            "reg_param": 1.0,
             "test_iter": None,
             "save_epoch": 100,
             "n_warmup": 5,
@@ -710,15 +686,11 @@ class VAEChrom():
             self.scale_s = torch.tensor(np.clip(np.std(adata.layers['Ms'][self.train_idx, :], 0), 1e-6, None)).float().to(self.device)
 
         if mode == 'fullvb':
-            self.p_log_ton = torch.tensor([[0.0], [0.1]]).to(self.device)
-            self.p_log_c0 = torch.tensor([[0.0], [0.1]]).to(self.device)
-            self.p_log_u0 = torch.tensor([[0.0], [0.1]]).to(self.device)
-            self.p_log_s0 = torch.tensor([[0.0], [0.1]]).to(self.device)
             self.p_log_alpha_c = torch.tensor([[0.0], [0.5]]).to(self.device)
             self.p_log_alpha = torch.tensor([[0.0], [1.0]]).to(self.device)
             self.p_log_beta = torch.tensor([[0.0], [0.5]]).to(self.device)
             self.p_log_gamma = torch.tensor([[0.0], [0.5]]).to(self.device)
-            self.p_params = [self.p_log_ton, self.p_log_c0, self.p_log_u0, self.p_log_s0, self.p_log_alpha_c, self.p_log_alpha, self.p_log_beta, self.p_log_gamma]
+            self.p_params = [self.p_log_alpha_c, self.p_log_alpha, self.p_log_beta, self.p_log_gamma]
 
         if plot_init:
             self.plot_initial(adata, adata_atac, gene_plot, cluster_key, figure_path)
@@ -780,17 +752,17 @@ class VAEChrom():
             else:
                 print('Using informative time prior.')
                 t = adata.obs[tprior].to_numpy()
-                t = t/t.max()*tmax
+                t = t / t.max() * tmax
                 t_cap = np.sort(np.unique(t))
                 t_start = np.zeros((len(t)))
                 t_end = np.zeros((len(t)))
                 for i in range(len(t_cap)-1):
-                    t_end[t == t_cap[i]] = t_cap[i] + (t_cap[i+1] - t_cap[i])*(0.5+0.5*self.config["time_overlap"])
-                t_end[t == t_cap[-1]] = t_cap[-1] + (t_cap[-1] - t_cap[-2])*(0.5+0.5*self.config["time_overlap"])
+                    t_end[t == t_cap[i]] = t_cap[i] + (t_cap[i+1] - t_cap[i]) * (0.5 + 0.5*self.config["time_overlap"])
+                t_end[t == t_cap[-1]] = t_cap[-1] + (t_cap[-1] - t_cap[-2]) * (0.5 + 0.5*self.config["time_overlap"])
 
                 for i in range(1, len(t_cap)):
-                    t_start[t == t_cap[i]] = max(0, t_cap[i] - (t_cap[i] - t_cap[i-1])*(0.5+0.5*self.config["time_overlap"]))
-                t_start[t == t_cap[0]] = max(0, t_cap[0] - (t_cap[1] - t_cap[0])*(0.5+0.5*self.config["time_overlap"]))
+                    t_start[t == t_cap[i]] = max(0, t_cap[i] - (t_cap[i] - t_cap[i-1]) * (0.5 + 0.5*self.config["time_overlap"]))
+                t_start[t == t_cap[0]] = max(0, t_cap[0] - (t_cap[1] - t_cap[0]) * (0.5 + 0.5*self.config["time_overlap"]))
 
                 self.p_t = torch.stack([torch.tensor(t).unsqueeze(-1), torch.tensor(t_end).unsqueeze(-1)]).float().to(self.device)
 
@@ -806,7 +778,9 @@ class VAEChrom():
         gind, gene_plot = get_gene_index(adata.var_names, gene_plot)
         os.makedirs(figure_path, exist_ok=True)
 
-        C, U, S = adata_atac.layers['Mc'][self.train_idx, :][:, gind], adata.layers['Mu'][self.train_idx, :][:, gind], adata.layers['Ms'][self.train_idx, :][:, gind]
+        C = adata_atac.layers['Mc'][self.train_idx, :][:, gind]
+        U = adata.layers['Mu'][self.train_idx, :][:, gind]
+        S = adata.layers['Ms'][self.train_idx, :][:, gind]
 
         alpha_c = self.decoder.alpha_c_[gind]
         alpha = self.decoder.alpha_[gind]
@@ -926,18 +900,19 @@ class VAEChrom():
                  sigma_s,
                  S_knn=None,
                  onehot=None,
-                 weight=None):
+                 weight=None,
+                 sample=True):
 
         kldt = self.kl_time(q_tx[0], q_tx[1], p_t[0], p_t[1], tail=self.config["tail"])
         kldz = kl_gaussian(q_zx[0], q_zx[1], p_z[0], p_z[1])
         kld_params = torch.tensor(0).float().to(self.device)
         if self.config['mode'] == 'fullvb':
-            for x in ['alpha_c', 'alpha', 'beta', 'gamma'] if self.use_knn else ['ton', 'c0', 'u0', 's0', 'alpha_c', 'alpha', 'beta', 'gamma']:
+            for i, x in enumerate(['alpha_c', 'alpha', 'beta', 'gamma']):
                 if self.enable_cvae:
-                    for i in range(self.n_batch):
-                        kld_params += kl_gaussian(self.decoder.get_param(x)[i, 0].view(1, -1), self.decoder.get_param(x)[i, 1].exp().view(1, -1), self.p_log_ton[0], self.p_log_ton[1])
+                    for j in range(self.n_batch):
+                        kld_params += kl_gaussian(self.decoder.get_param(x)[j, 0].view(1, -1), self.decoder.get_param(x)[j, 1].exp().view(1, -1), self.p_params[i][0], self.p_params[i][1])
                 else:
-                    kld_params += kl_gaussian(self.decoder.get_param(x)[0].view(1, -1), self.decoder.get_param(x)[1].exp().view(1, -1), self.p_log_ton[0], self.p_log_ton[1])
+                    kld_params += kl_gaussian(self.decoder.get_param(x)[0].view(1, -1), self.decoder.get_param(x)[1].exp().view(1, -1), self.p_params[i][0], self.p_params[i][1])
             kld_params /= U.shape[0]
 
         logp = -0.5*((C-chat)/sigma_c).pow(2)
@@ -953,7 +928,8 @@ class VAEChrom():
         err_rec = torch.mean(torch.sum(logp, 1))
 
         if S_knn is not None:
-            cos_sim = cosine_similarity(uhat/self.decoder.scaling.exp(), shat, self.decoder.beta.exp(), self.decoder.gamma.exp(), S_knn, onehot)
+            _, _, beta, gamma = self.decoder.reparameterize(onehot, sample)
+            cos_sim = cosine_similarity(uhat/self.decoder.scaling.exp(), shat, beta, gamma, S_knn)
             loss = - err_rec + self.config["kl_t"]*kldt + self.config["kl_z"]*kldz + self.config["kl_param"]*kld_params - cos_sim
         else:
             loss = - err_rec + self.config["kl_t"]*kldt + self.config["kl_z"]*kldz + self.config["kl_param"]*kld_params
@@ -1028,7 +1004,8 @@ class VAEChrom():
                                  torch.exp(self.decoder.sigma_s),
                                  torch.tensor(self.S_knn[self.train_idx[idx]], dtype=torch.float, device=self.device, requires_grad=False) if self.reg_velocity else None,
                                  F.one_hot(torch.tensor(self.batch[self.train_idx[idx]], dtype=int, device=self.device), self.n_batch).float() if self.enable_cvae else None,
-                                 None)
+                                 weight=None,
+                                 sample=True)
 
             loss.backward()
             if K == 0:
@@ -1171,7 +1148,7 @@ class VAEChrom():
         param_nn += list(self.decoder.net_kc.parameters())+list(self.decoder.fc_out3.parameters())
         if self.config['t_network']:
             param_nn += list(self.decoder.net_t.parameters())
-        param_ode = [self.decoder.alpha_c, self.decoder.alpha, self.decoder.beta, self.decoder.gamma, self.decoder.c0, self.decoder.u0, self.decoder.s0]  #
+        param_ode = [self.decoder.alpha_c, self.decoder.alpha, self.decoder.beta, self.decoder.gamma, self.decoder.c0, self.decoder.u0, self.decoder.s0]
         if self.config['train_ton']:
             param_ode.append(self.decoder.ton)
         if self.config['train_scaling']:
@@ -1218,7 +1195,6 @@ class VAEChrom():
             if stop_training:
                 print(f"*********       Stage 1: Early Stop Triggered at epoch {epoch+1}.       *********")
                 break
-        self.save_model("checkpoints/HSPC/FullVB3Stage", "encoder_fullvb", "decoder_fullvb")
 
         print("*********                      Stage  2                       *********")
         n_stage1 = epoch+1
@@ -1269,7 +1245,7 @@ class VAEChrom():
         self.s0 = torch.tensor(self.s0, dtype=torch.float, device=self.device, requires_grad=True)
         self.t0 = torch.tensor(self.t0, dtype=torch.float, device=self.device, requires_grad=True)
         if self.config["train_x0"]:
-            optimizer_x0 = torch.optim.Adam([self.s0, self.u0, self.c0, self.t0], lr=self.config["learning_rate_ode"])
+            optimizer_x0 = torch.optim.Adam([self.c0, self.u0, self.s0, self.t0], lr=self.config["learning_rate_ode"])
         else:
             optimizer_x0 = None
 
@@ -1409,11 +1385,11 @@ class VAEChrom():
         if batch is None:
             batch = self.batch
         if "chat" in output:
-            chat = None if gene_idx is None else np.zeros((N, len(gene_idx)))
+            chat_res = None if gene_idx is None else np.zeros((N, len(gene_idx)))
         if "uhat" in output:
-            uhat = None if gene_idx is None else np.zeros((N, len(gene_idx)))
+            uhat_res = None if gene_idx is None else np.zeros((N, len(gene_idx)))
         if "shat" in output:
-            shat = None if gene_idx is None else np.zeros((N, len(gene_idx)))
+            shat_res = None if gene_idx is None else np.zeros((N, len(gene_idx)))
         if "t" in output:
             t_out = np.zeros((N))
             std_t_out = np.zeros((N))
@@ -1476,14 +1452,15 @@ class VAEChrom():
                                      torch.exp(self.decoder.sigma_s),
                                      S_knn_sub,
                                      y_onehot,
-                                     None)
+                                     weight=None,
+                                     sample=False)
                 elbo = elbo - (B/N)*loss
                 if "chat" in output and gene_idx is not None:
-                    chat[i:j] = chat[:, gene_idx].cpu().numpy()
+                    chat_res[i:j] = chat[:, gene_idx].cpu().numpy()
                 if "uhat" in output and gene_idx is not None:
-                    uhat[i:j] = uhat[:, gene_idx].cpu().numpy()
+                    uhat_res[i:j] = uhat[:, gene_idx].cpu().numpy()
                 if "shat" in output and gene_idx is not None:
-                    shat[i:j] = shat[:, gene_idx].cpu().numpy()
+                    shat_res[i:j] = shat[:, gene_idx].cpu().numpy()
                 if "t" in output:
                     t_out[i:j] = mu_tx.cpu().squeeze().numpy()
                     std_t_out[i:j] = std_tx.cpu().squeeze().numpy()
@@ -1493,11 +1470,11 @@ class VAEChrom():
                     std_z_out[i:j] = std_zx.cpu().numpy()
         out = []
         if "chat" in output:
-            out.append(chat)
+            out.append(chat_res)
         if "uhat" in output:
-            out.append(uhat)
+            out.append(uhat_res)
         if "shat" in output:
-            out.append(shat)
+            out.append(shat_res)
         if "t" in output:
             out.append(t_out)
             out.append(std_t_out)
@@ -1572,6 +1549,11 @@ class VAEChrom():
 
         return elbo
 
+    def save_model(self, file_path, enc_name='encoder', dec_name='decoder'):
+        os.makedirs(file_path, exist_ok=True)
+        torch.save(self.encoder.state_dict(), f"{file_path}/{enc_name}.pt")
+        torch.save(self.decoder.state_dict(), f"{file_path}/{dec_name}.pt")
+
     def save_anndata(self, adata, adata_atac, key, file_path, file_name=None):
         self.set_mode('eval')
         os.makedirs(file_path, exist_ok=True)
@@ -1583,23 +1565,19 @@ class VAEChrom():
                     adata.var[f"{key}_alpha_{i}"] = np.exp(self.decoder.alpha[i, 0].detach().cpu().numpy())
                     adata.var[f"{key}_beta_{i}"] = np.exp(self.decoder.beta[i, 0].detach().cpu().numpy())
                     adata.var[f"{key}_gamma_{i}"] = np.exp(self.decoder.gamma[i, 0].detach().cpu().numpy())
-                    adata.var[f"{key}_ton_{i}"] = np.exp(self.decoder.ton[i, 0].detach().cpu().numpy())
                     adata.var[f"{key}_logstd_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i, 1].detach().cpu().numpy())
                     adata.var[f"{key}_logstd_alpha_{i}"] = np.exp(self.decoder.alpha[i, 1].detach().cpu().numpy())
                     adata.var[f"{key}_logstd_beta_{i}"] = np.exp(self.decoder.beta[i, 1].detach().cpu().numpy())
                     adata.var[f"{key}_logstd_gamma_{i}"] = np.exp(self.decoder.gamma[i, 1].detach().cpu().numpy())
-                    adata.var[f"{key}_logstd_ton_{i}"] = np.exp(self.decoder.ton[i, 1].detach().cpu().numpy())
             else:
                 adata.var[f"{key}_alpha_c"] = np.exp(self.decoder.alpha_c[0].detach().cpu().numpy())
                 adata.var[f"{key}_alpha"] = np.exp(self.decoder.alpha[0].detach().cpu().numpy())
                 adata.var[f"{key}_beta"] = np.exp(self.decoder.beta[0].detach().cpu().numpy())
                 adata.var[f"{key}_gamma"] = np.exp(self.decoder.gamma[0].detach().cpu().numpy())
-                adata.var[f"{key}_ton"] = np.exp(self.decoder.ton[0].detach().cpu().numpy())
                 adata.var[f"{key}_logstd_alpha_c"] = np.exp(self.decoder.alpha_c[1].detach().cpu().numpy())
                 adata.var[f"{key}_logstd_alpha"] = np.exp(self.decoder.alpha[1].detach().cpu().numpy())
                 adata.var[f"{key}_logstd_beta"] = np.exp(self.decoder.beta[1].detach().cpu().numpy())
                 adata.var[f"{key}_logstd_gamma"] = np.exp(self.decoder.gamma[1].detach().cpu().numpy())
-                adata.var[f"{key}_logstd_ton"] = np.exp(self.decoder.ton[1].detach().cpu().numpy())
         else:
             if self.enable_cvae:
                 for i in range(self.n_batch):
@@ -1607,13 +1585,12 @@ class VAEChrom():
                     adata.var[f"{key}_alpha_{i}"] = np.exp(self.decoder.alpha[i].detach().cpu().numpy())
                     adata.var[f"{key}_beta_{i}"] = np.exp(self.decoder.beta[i].detach().cpu().numpy())
                     adata.var[f"{key}_gamma_{i}"] = np.exp(self.decoder.gamma[i].detach().cpu().numpy())
-                    adata.var[f"{key}_ton_{i}"] = np.exp(self.decoder.ton[i].detach().cpu().numpy())
             else:
                 adata.var[f"{key}_alpha_c"] = np.exp(self.decoder.alpha_c.detach().cpu().numpy())
                 adata.var[f"{key}_alpha"] = np.exp(self.decoder.alpha.detach().cpu().numpy())
                 adata.var[f"{key}_beta"] = np.exp(self.decoder.beta.detach().cpu().numpy())
                 adata.var[f"{key}_gamma"] = np.exp(self.decoder.gamma.detach().cpu().numpy())
-                adata.var[f"{key}_ton"] = np.exp(self.decoder.ton.detach().cpu().numpy())
+        adata.var[f"{key}_ton"] = np.exp(self.decoder.ton.detach().cpu().numpy())
         adata.var[f"{key}_scaling_c"] = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
         adata.var[f"{key}_scaling"] = np.exp(self.decoder.scaling.detach().cpu().numpy())
         adata.var[f"{key}_sigma_c"] = np.exp(self.decoder.sigma_c.detach().cpu().numpy())

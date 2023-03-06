@@ -32,7 +32,10 @@ def spliced(tau, s0, u0, c0, alpha_c, alpha, beta, gamma):
     expu = exp(-beta * tau)
     exps = exp(-gamma * tau)
     const = (1 - c0) * alpha * inv(beta - alpha_c)
-    return s0 * exps + (alpha / gamma) * (1 - exps) + (beta * inv(gamma - beta)) * ((alpha / beta) - u0 - const) * (exps - expu) + (beta * inv(gamma - alpha_c)) * const * (exps - expc)
+    out = s0 * exps + (alpha / gamma) * (1 - exps)
+    out += (beta * inv(gamma - beta)) * ((alpha / beta) - u0 - const) * (exps - expu)
+    out += (beta * inv(gamma - alpha_c)) * const * (exps - expc)
+    return out
 
 
 def compute_exp(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
@@ -114,7 +117,7 @@ def linreg(u, s):
 
 def assign_time(c, u, s, c0_, u0_, s0_, alpha_c, alpha, beta, gamma, std_c_=None, std_s=None, t_num=1000, t_max=20):
     tau = np.linspace(0, t_max, t_num)
-    ct, ut, st = compute_exp(tau, 0, 0, 0, 1, alpha_c, alpha, beta, gamma)
+    ct, ut, st = compute_exp(tau, 0, 0, 0, 1, alpha_c, 1, alpha, beta, gamma)
     anchor_mat = np.hstack((np.reshape(ct, (-1, 1))/std_c_*std_s, np.reshape(ut, (-1, 1)), np.reshape(st, (-1, 1))))
     exp_mat = np.hstack((np.reshape(c, (-1, 1))/std_c_*std_s, np.reshape(u, (-1, 1)), np.reshape(s, (-1, 1))))
     tree = KDTree(anchor_mat)
@@ -125,9 +128,9 @@ def assign_time(c, u, s, c0_, u0_, s0_, alpha_c, alpha, beta, gamma, std_c_=None
     exp_ss = np.array([[c0_/std_c_*std_s, u0_, s0_]])
     ii_ss = tree.query(exp_ss, k=1)[1]
     t_ = tau[ii_ss][0]
-    c0_pred, u0_pred, s0_pred = compute_exp(t_, 0, 0, 0, 1, alpha_c, alpha, beta, gamma)
+    c0_pred, u0_pred, s0_pred = compute_exp(t_, 0, 0, 0, 1, alpha_c, 1, alpha, beta, gamma)
 
-    ct_, ut_, st_ = compute_exp(tau, c0_pred, u0_pred, s0_pred, 0, alpha_c, 0, beta, gamma)
+    ct_, ut_, st_ = compute_exp(tau, c0_pred, u0_pred, s0_pred, 0, alpha_c, 0, 0, beta, gamma)
     anchor_mat_ = np.hstack((np.reshape(ct_, (-1, 1))/std_c_*std_s, np.reshape(ut_, (-1, 1)), np.reshape(st_, (-1, 1))))
     tree_ = KDTree(anchor_mat_)
     dd_, ii_ = tree_.query(exp_mat, k=1)
@@ -214,9 +217,12 @@ def init_params(data, percent, fit_scaling=True, tmax=1):
 
     for i in range(ngene):
         si, ui, ci = s[:, i], u[:, i], c[:, i]
-        sfilt, ufilt, cfilt = si[(si > 0) & (ui > 0) & (ci > 0)], ui[(si > 0) & (ui > 0) & (ci > 0)], ci[(si > 0) & (ui > 0) & (ci > 0)]
+        sfilt = si[(si > 0) & (ui > 0) & (ci > 0)]
+        ufilt = ui[(si > 0) & (ui > 0) & (ci > 0)]
+        cfilt = ci[(si > 0) & (ui > 0) & (ci > 0)]
         if (len(sfilt) > 3) and (len(ufilt) > 3) and (len(cfilt) > 3):
-            alpha_c, alpha, beta, gamma, t, c0_, u0_, s0_, ts_, scaling_c, scaling = init_gene(sfilt, ufilt, cfilt, percent, fit_scaling, tmax)
+            out = init_gene(sfilt, ufilt, cfilt, percent, fit_scaling, tmax)
+            alpha_c, alpha, beta, gamma, t, c0_, u0_, s0_, ts_, scaling_c, scaling = out
             params[i, :] = np.array([alpha_c, alpha, beta, gamma, scaling_c, scaling])
             T[i, (si > 0) & (ui > 0) & (ci > 0)] = t
             c0[i] = c0_
@@ -230,7 +236,14 @@ def init_params(data, percent, fit_scaling=True, tmax=1):
 
     dist_c, dist_u, dist_s = np.zeros(c.shape), np.zeros(u.shape), np.zeros(s.shape)
     for i in range(ngene):
-        cpred, upred, spred = pred_single(T[i], params[i, 0], params[i, 1], params[i, 2], params[i, 3], ts[i], params[i, 4], params[i, 5])  # upred has the original scale
+        cpred, upred, spred = pred_single(T[i],
+                                          params[i, 0],
+                                          params[i, 1],
+                                          params[i, 2],
+                                          params[i, 3],
+                                          ts[i],
+                                          params[i, 4],
+                                          params[i, 5])  # upred has the original scale
         dist_c[:, i] = c[:, i] - cpred
         dist_u[:, i] = u[:, i] - upred
         dist_s[:, i] = s[:, i] - spred
@@ -242,7 +255,10 @@ def init_params(data, percent, fit_scaling=True, tmax=1):
     sigma_u[np.isnan(sigma_u)] = 0.1
     sigma_s[np.isnan(sigma_s)] = 0.1
 
-    return params[:, 0], params[:, 1], params[:, 2], params[:, 3], params[:, 4], params[:, 5], ts, c0, u0, s0, sigma_c, sigma_u, sigma_s, T.T
+    alpha_c, alpha, beta, gamma = params[:, 0], params[:, 1], params[:, 2], params[:, 3]
+    scaling_c, scaling, = params[:, 4], params[:, 5]
+
+    return alpha_c, alpha, beta, gamma, scaling_c, scaling, ts, c0, u0, s0, sigma_c, sigma_u, sigma_s, T.T
 
 
 def get_ts_global(tgl, C, U, S, perc):
@@ -313,7 +329,10 @@ def reinit_params(C, U, S, t, ts):
 
 
 def pred_steady_numpy(ts, alpha_c, alpha, beta, gamma):
-    alpha_c_, alpha_, beta_, gamma_ = np.clip(alpha_c, a_min=0, a_max=None), np.clip(alpha, a_min=0, a_max=None), np.clip(beta, a_min=0, a_max=None), np.clip(gamma, a_min=0, a_max=None)
+    alpha_c_ = np.clip(alpha_c, a_min=0, a_max=None)
+    alpha_ = np.clip(alpha, a_min=0, a_max=None)
+    beta_ = np.clip(beta, a_min=0, a_max=None)
+    gamma_ = np.clip(gamma, a_min=0, a_max=None)
     eps = 1e-6
     ts_ = ts.squeeze()
     expac, expb, expg = np.exp(-alpha_c_*ts_), np.exp(-beta_*ts_), np.exp(-gamma_*ts_)
@@ -329,7 +348,8 @@ def pred_steady(tau_s, alpha_c, alpha, beta, gamma):
     expac, expb, expg = torch.exp(-alpha_c*tau_s), torch.exp(-beta*tau_s), torch.exp(-gamma*tau_s)
     c0 = torch.tensor([1.0]).to(alpha.device)-expac
     u0 = alpha/(beta+eps)*(torch.tensor([1.0]).to(alpha.device)-expb) + alpha/(beta-alpha_c+eps)*(expb-expac)
-    s0 = alpha/(gamma+eps)*(torch.tensor([1.0]).to(alpha.device)-expg) + (alpha/beta-alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
+    s0 = alpha/(gamma+eps)*(torch.tensor([1.0]).to(alpha.device)-expg)
+    s0 += (alpha/beta-alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     s0 += alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
     return c0, u0, s0
 
@@ -374,7 +394,8 @@ def ode(t, alpha_c, alpha, beta, gamma, to, ts, neg_slope=0.0):
     expac, expb, expg = torch.exp(-alpha_c*tau_on), torch.exp(-beta*tau_on), torch.exp(-gamma*tau_on)
     chat_on = torch.tensor([1.0]).to(alpha.device)-expac
     uhat_on = alpha/(beta+eps)*(torch.tensor([1.0]).to(alpha.device)-expb) + alpha/(beta-alpha_c+eps)*(expb-expac)
-    shat_on = alpha/(gamma+eps)*(torch.tensor([1.0]).to(alpha.device)-expg) + (alpha/beta-alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
+    shat_on = alpha/(gamma+eps)*(torch.tensor([1.0]).to(alpha.device)-expg)
+    shat_on += (alpha/beta-alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     shat_on += alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
 
     c0_, u0_, s0_ = pred_steady(F.relu(ts-to), alpha_c, alpha, beta, gamma)
@@ -404,7 +425,8 @@ def kl_uniform(mu_t, std_t, t_start, t_end, **kwargs):
 
 
 def kl_gaussian(mu1, std1, mu2, std2, **kwargs):
-    return torch.mean(torch.sum(torch.log(std2/std1) + std1.pow(2)/(2*std2.pow(2)) - 0.5 + (mu1-mu2).pow(2)/(2*std2.pow(2)), 1))
+    kl = torch.sum(torch.log(std2/std1)+std1.pow(2)/(2*std2.pow(2))-0.5+(mu1-mu2).pow(2)/(2*std2.pow(2)), 1)
+    return torch.mean(kl)
 
 
 def knn_approx(C, U, S, c0, u0, s0, k):
@@ -506,8 +528,14 @@ def knnx0_bin(C,
             continue
         if k is None:
             k = max(1, len(indices)//20)
-        knn_model = pynndescent.NNDescent(z[indices], n_neighbors=k+1, pruning_degree_multiplier=pruning_degree_multiplier, diversify_prob=diversify_prob)
-        indices_query = np.where((t_query >= t_ub) & (t_query < t_ub+delta_t))[0] if (i < n_graph-1) else np.where(t_query >= t_ub)[0]
+        knn_model = pynndescent.NNDescent(z[indices],
+                                          n_neighbors=k+1,
+                                          pruning_degree_multiplier=pruning_degree_multiplier,
+                                          diversify_prob=diversify_prob)
+        if i < (n_graph - 1):
+            indices_query = np.where((t_query >= t_ub) & (t_query < t_ub+delta_t))[0]
+        else:
+            indices_query = np.where(t_query >= t_ub)[0]
         if len(indices_query) == 0:
             continue
         try:
@@ -536,11 +564,8 @@ def knnx0_bin(C,
     return c0, u0, s0, t0, knn_ind_.astype(int)
 
 
-def cosine_similarity(U, S, beta, gamma, S_knn, onehot=None):
-    if onehot is not None:
-        V = (torch.mm(onehot, beta) * U - torch.mm(onehot, gamma) * S) + 1e-6
-    else:
-        V = (beta * U - gamma * S) + 1e-6
+def cosine_similarity(U, S, beta, gamma, S_knn):
+    V = (beta * U - gamma * S) + 1e-6
     dS = torch.reshape(S, (S.size(0), 1, S.size(1))) - S_knn + 1e-6  # cell x knn x gene
     ds_norm = torch.linalg.norm(dS, dim=2)
     dS = dS / ds_norm[:, :, None]
