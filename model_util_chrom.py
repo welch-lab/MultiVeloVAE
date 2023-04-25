@@ -5,8 +5,12 @@ import torch.nn.functional as F
 from .scvelo_util import tau_inv, test_bimodality
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
-from tqdm.notebook import tqdm_notebook
+from sklearn.cluster import AgglomerativeClustering, KMeans
 from scipy.spatial import KDTree
+from scipy.sparse import csr_matrix
+from scipy.stats import dirichlet, kstest
+import scanpy as sc
+from .model_util import find_dirichlet_param, sample_dir_mix, assign_gene_mode_binary
 
 
 def inv(x):
@@ -15,36 +19,36 @@ def inv(x):
 
 
 def chromatin(tau, c0, alpha_c):
-    expc = np.exp(-alpha_c * tau)
-    return c0 * expc + 1 * (1 - expc)
+    expac = np.exp(-alpha_c * tau)
+    return c0 * expac + 1 * (1 - expac)
 
 
 def unspliced(tau, u0, c0, alpha_c, alpha, beta):
-    expc = np.exp(-alpha_c * tau)
+    expac = np.exp(-alpha_c * tau)
     expu = np.exp(-beta * tau)
     const = (1 - c0) * alpha * inv(beta - alpha_c)
-    return u0 * expu + alpha / beta * (1 - expu) + const * (expu - expc)
+    return u0 * expu + alpha * inv(beta) * (1 - expu) + const * (expu - expac)
 
 
 def spliced(tau, s0, u0, c0, alpha_c, alpha, beta, gamma):
-    expc = np.exp(-alpha_c * tau)
+    expac = np.exp(-alpha_c * tau)
     expu = np.exp(-beta * tau)
     exps = np.exp(-gamma * tau)
     const = (1 - c0) * alpha * inv(beta - alpha_c)
-    out = s0 * exps + (alpha / gamma) * (1 - exps)
-    out += (beta * inv(gamma - beta)) * ((alpha / beta) - u0 - const) * (exps - expu)
-    out += (beta * inv(gamma - alpha_c)) * const * (exps - expc)
+    out = s0 * exps + (alpha * inv(gamma)) * (1 - exps)
+    out += (beta * inv(gamma - beta)) * ((alpha * inv(beta)) - u0 - const) * (exps - expu)
+    out += (beta * inv(gamma - alpha_c)) * const * (exps - expac)
     return out
 
 
 def compute_exp(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
-    expc, expu, exps = np.exp(-alpha_c * tau), np.exp(-beta * tau), np.exp(-gamma * tau)
+    expac, expu, exps = np.exp(-alpha_c * tau), np.exp(-beta * tau), np.exp(-gamma * tau)
     const = (kc - c0) * rho * alpha * inv(beta - alpha_c)
-    c = kc - (kc - c0) * expc
-    u = u0 * expu + (rho * alpha * kc / beta) * (1 - expu) + const * (expu - expc)
-    s = s0 * exps + (rho * alpha * kc / gamma) * (1 - exps)
-    s += (beta * inv(gamma - beta)) * ((rho * alpha * kc / beta) - u0 - const) * (exps - expu)
-    s += (beta * inv(gamma - alpha_c)) * const * (exps - expc)
+    c = c0 * expac + kc * (1 - expac)
+    u = u0 * expu + (rho * alpha * kc * inv(beta)) * (1 - expu) + const * (expu - expac)
+    s = s0 * exps + (rho * alpha * kc * inv(gamma)) * (1 - exps)
+    s += (beta * inv(gamma - beta)) * ((rho * alpha * kc * inv(beta)) - u0 - const) * (exps - expu)
+    s += (beta * inv(gamma - alpha_c)) * const * (exps - expac)
     return c, u, s
 
 
@@ -69,13 +73,10 @@ def vectorize(t, t_, alpha_c, alpha, beta, gamma=None, c0=0, u0=0, s0=0, sorted=
     return tau, rho, kc, c0, u0, s0
 
 
-def pred_single(t, alpha_c, alpha, beta, gamma, ts, scaling_c=1.0, scaling=1.0, cinit=0, uinit=0, sinit=0):
-    beta = beta*scaling
+def pred_single(t, alpha_c, alpha, beta, gamma, ts, cinit=0, uinit=0, sinit=0):
     tau, rho, kc, c0, u0, s0 = vectorize(t, ts, alpha_c, alpha, beta, gamma, c0=cinit, u0=uinit, s0=sinit)
     tau = np.clip(tau, a_min=0, a_max=None)
     ct, ut, st = compute_exp(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma)
-    ct = ct*scaling_c
-    ut = ut*scaling
     return ct.squeeze(), ut.squeeze(), st.squeeze()
 
 
@@ -88,14 +89,14 @@ def pred_exp(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
     spred = s0*expg + rho*alpha*kc/gamma*(1-expg)
     spred += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     spred += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
-    return nn.functional.sigmoid(cpred), nn.functional.relu(upred), nn.functional.relu(spred)
+    return nn.functional.relu(cpred), nn.functional.relu(upred), nn.functional.relu(spred)
 
 
 def pred_exp_numpy(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
     expac, expb, expg = np.exp(-alpha_c*tau), np.exp(-beta*tau), np.exp(-gamma*tau)
     eps = 1e-6
 
-    cpred = c0*expac+kc*(1-expac)
+    cpred = c0*expac + kc*(1-expac)
     upred = u0*expb + rho*alpha*kc/beta*(1-expb) + (kc-c0)*rho*alpha/(beta-alpha_c+eps)*(expb-expac)
     spred = s0*expg + rho*alpha*kc/gamma*(1-expg)
     spred += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
@@ -142,7 +143,7 @@ def assign_time(c, u, s, c0_, u0_, s0_, alpha_c, alpha, beta, gamma, std_c_=None
     return t_latent, t_
 
 
-def init_gene(s, u, c, percent, fit_scaling=False, tmax=1):
+def init_gene(s, u, c, percent, fit_scaling=True, tmax=1):
     std_u, std_s = np.std(u), np.std(s)
     scaling = std_u / std_s if fit_scaling else 1.0
     u = u/scaling
@@ -190,6 +191,7 @@ def init_gene(s, u, c, percent, fit_scaling=False, tmax=1):
     if alpha_c == gamma:
         gamma += 1e-3
     t_latent, t_ = assign_time(c, u, s, c0_, u0_, s0_, alpha_c, alpha, beta, gamma, std_c_, std_s)
+
     realign_ratio = tmax / np.max(t_latent)
     alpha_c, alpha, beta, gamma = alpha_c/realign_ratio, alpha/realign_ratio, beta/realign_ratio, gamma/realign_ratio
     t_ *= realign_ratio
@@ -205,12 +207,13 @@ def init_params(data, percent, fit_scaling=True, tmax=1):
 
     params = np.ones((ngene, 6))
     params[:, 0] = 0.1
-    params[:, 1] = np.random.rand((ngene))*np.clip(np.max(u, 0), 0.001, None)
-    params[:, 3] = np.random.rand((ngene))*np.clip(np.max(u, 0), 0.001, None)/np.clip(np.max(s, 0), 0.001, None)
+    params[:, 1] = np.clip(np.max(u, 0), 0.001, None)
+    params[:, 3] = np.clip(np.max(u, 0), 0.001, None)/np.clip(np.max(s, 0), 0.001, None)
     params[:, 4] = np.clip(np.max(c, 0), 0.001, None)
     t = np.zeros((ngene, len(s)))
     ts = np.zeros((ngene))
     c0, u0, s0 = np.zeros((ngene)), np.zeros((ngene)), np.zeros((ngene))
+    cpred, upred, spred = np.zeros_like(u), np.zeros_like(u), np.zeros_like(u)
 
     for i in range(ngene):
         si, ui, ci = s[:, i], u[:, i], c[:, i]
@@ -231,31 +234,30 @@ def init_params(data, percent, fit_scaling=True, tmax=1):
             u0[i] = np.max(u)
             s0[i] = np.max(s)
 
-    dist_c, dist_u, dist_s = np.zeros(c.shape), np.zeros(u.shape), np.zeros(s.shape)
-    for i in range(ngene):
-        cpred, upred, spred = pred_single(t[i],
-                                          params[i, 0],
-                                          params[i, 1],
-                                          params[i, 2],
-                                          params[i, 3],
-                                          ts[i],
-                                          params[i, 4],
-                                          params[i, 5])  # upred has the original scale
-        dist_c[:, i] = c[:, i] - cpred
-        dist_u[:, i] = u[:, i] - upred
-        dist_s[:, i] = s[:, i] - spred
+        cpred_i, upred_i, spred_i = pred_single(t[i],
+                                                params[i, 0],
+                                                params[i, 1],
+                                                params[i, 2],
+                                                params[i, 3],
+                                                ts[i])
+        cpred[:, i] = cpred_i * params[i, 4]
+        upred[:, i] = upred_i * params[i, 5]
+        spred[:, i] = spred_i
 
-    sigma_c = np.clip(np.std(dist_c, 0), 0.1, None)
-    sigma_u = np.clip(np.std(dist_u, 0), 0.1, None)
-    sigma_s = np.clip(np.std(dist_s, 0), 0.1, None)
-    sigma_c[np.isnan(sigma_c)] = 0.1
-    sigma_u[np.isnan(sigma_u)] = 0.1
-    sigma_s[np.isnan(sigma_s)] = 0.1
+    dist_c = c - cpred
+    dist_u = u - upred
+    dist_s = s - spred
+    sigma_c = np.clip(np.std(dist_c, 0), 0.01, None)
+    sigma_u = np.clip(np.std(dist_u, 0), 0.01, None)
+    sigma_s = np.clip(np.std(dist_s, 0), 0.01, None)
+    sigma_c[np.isnan(sigma_c)] = 0.01
+    sigma_u[np.isnan(sigma_u)] = 0.01
+    sigma_s[np.isnan(sigma_s)] = 0.01
 
     alpha_c, alpha, beta, gamma = params[:, 0], params[:, 1], params[:, 2], params[:, 3]
     scaling_c, scaling, = params[:, 4], params[:, 5]
 
-    return alpha_c, alpha, beta, gamma, scaling_c, scaling, ts, c0, u0, s0, sigma_c, sigma_u, sigma_s, t.T
+    return alpha_c, alpha, beta, gamma, scaling_c, scaling, ts, c0, u0, s0, sigma_c, sigma_u, sigma_s, t.T, cpred, upred, spred
 
 
 def get_ts_global(tgl, c, u, s, perc):
@@ -414,114 +416,52 @@ def reparameterize(mu, std):
     return std*eps + mu
 
 
-def knn_approx(C, U, S, c0, u0, s0, k):
-    X = np.concatenate((C, U, S), 1)
+def knn_approx(c, u, s, c0, u0, s0, k):
+    x = np.concatenate((c, u, s), 1)
     x0 = np.concatenate((c0, u0, s0), 1)
     pca = PCA(n_components=30, svd_solver='arpack', random_state=2022)
-    X0_pca = pca.fit_transform(x0)
-    X_pca = pca.transform(X)
+    x0_pca = pca.fit_transform(x0)
+    x_pca = pca.transform(x)
     knn_model = NearestNeighbors(n_neighbors=k)
-    knn_model.fit(X_pca)
-    knn = knn_model.kneighbors(X0_pca, return_distance=False)
+    knn_model.fit(x_pca)
+    knn = knn_model.kneighbors(x0_pca, return_distance=False)
     return knn.astype(int)
 
 
-def _hist_equal(t, t_query, perc=0.95, n_bin=101):
-    # Perform histogram equalization across all local times.
-    tmax = t.max() - t.min()
-    t_ub = np.quantile(t, perc)
-    t_lb = t.min()
-    delta_t = (t_ub - t_lb)/(n_bin-1)
-    bins = [t_lb+i*delta_t for i in range(n_bin)]+[t.max()]
-    pdf_t, edges = np.histogram(t, bins, density=True)
-    pt, edges = np.histogram(t, bins, density=False)
-
-    # Perform histogram equalization
-    cdf_t = np.concatenate(([0], np.cumsum(pt)))
-    cdf_t = cdf_t/cdf_t[-1]
-    t_out = np.zeros((len(t)))
-    t_out_query = np.zeros((len(t_query)))
-    for i in range(n_bin):
-        mask = (t >= bins[i]) & (t < bins[i+1])
-        t_out[mask] = (cdf_t[i] + (t[mask]-bins[i])*pdf_t[i])*tmax
-        mask_q = (t_query >= bins[i]) & (t_query < bins[i+1])
-        t_out_query[mask_q] = (cdf_t[i] + (t_query[mask_q]-bins[i])*pdf_t[i])*tmax
-    return t_out, t_out_query
-
-
-def knnx0(c,
-          u,
-          s,
-          t,
-          z,
-          t_query,
-          z_query,
-          dt,
-          k,
-          c0_init=None,
-          u0_init=None,
-          s0_init=None,
-          adaptive=0.0,
-          std_t=None,
-          forward=False,
-          hist_eq=False):
-    Nq = len(t_query)
-    c0 = np.zeros((Nq, c.shape[1])) if c0_init is None else np.tile(c0_init, (Nq, 1))
-    u0 = np.zeros((Nq, u.shape[1])) if u0_init is None else np.tile(u0_init, (Nq, 1))
-    s0 = np.zeros((Nq, s.shape[1])) if s0_init is None else np.tile(s0_init, (Nq, 1))
-    t0 = np.ones((Nq))*(t.min() - dt[0])
-
-    n1 = 0
-    len_avg = 0
-    if hist_eq:
-        t, t_query = _hist_equal(t, t_query)
+def get_x0(c,
+           u,
+           s,
+           t,
+           dt,
+           neighbor_index,
+           c0_init=None,
+           u0_init=None,
+           s0_init=None,
+           forward=False):
+    N = len(neighbor_index)  # training + validation
+    c0 = np.zeros((N, c.shape[1])) if c0_init is None else np.tile(c0_init, (N, 1))
+    u0 = np.zeros((N, u.shape[1])) if u0_init is None else np.tile(u0_init, (N, 1))
+    s0 = np.zeros((N, s.shape[1])) if s0_init is None else np.tile(s0_init, (N, 1))
+    t0 = np.ones((N))*(t.min() - dt[0])
+    # Used as the default u/s counts at the final time point
     t_98 = np.quantile(t, 0.98)
     p = 0.98
     while not np.any(t >= t_98) and p > 0.01:
         p = p - 0.01
         t_98 = np.quantile(t, p)
     c_end, u_end, s_end = c[t >= t_98].mean(0), u[t >= t_98].mean(0), s[t >= t_98].mean(0)
-    for i in tqdm_notebook(range(Nq)):  # iterate through every cell
-        if adaptive > 0:
-            dt_r, dt_l = adaptive*std_t[i], adaptive*std_t[i] + (dt[1]-dt[0])
-        else:
-            dt_r, dt_l = dt[0], dt[1]
-        if forward:
-            t_ub, t_lb = t_query[i] + dt_l, t_query[i] + dt_r
-        else:
-            t_ub, t_lb = t_query[i] - dt_r, t_query[i] - dt_l
-        indices = np.where((t >= t_lb) & (t < t_ub))[0]  # filter out cells in the bin
-        k_ = len(indices)
-        delta_t = t.std() * 0.25  # increment / decrement of the time window boundary
-        while k_ < k and t_lb > t.min() - dt_r and t_ub < t.max() + dt_r:
-            if forward:
-                t_lb = t_query[i]
-                t_ub = t_ub + delta_t
-            else:
-                t_lb = t_lb - delta_t
-                t_ub = t_query[i]
-            indices = np.where((t >= t_lb) & (t < t_ub))[0]  # filter out cells in the bin
-            k_ = len(indices)
-        len_avg = len_avg+k_
-        if k_ > 0:
-            k_neighbor = k if k_ > k else max(1, k_//2)
-            knn_model = NearestNeighbors(n_neighbors=k_neighbor)
-            knn_model.fit(z[indices])
-            _, ind = knn_model.kneighbors(z_query[i:i+1])
-            ind_ = indices[ind.squeeze()].astype(int)
-            c0[i] = np.mean(c[ind_], 0)
-            u0[i] = np.mean(u[ind_], 0)
-            s0[i] = np.mean(s[ind_], 0)
-            t0[i] = np.mean(t[ind_])
-        else:
-            if forward:
-                c0[i] = c_end
-                u0[i] = u_end
-                s0[i] = s_end
-                t0[i] = t_98 + (t_98-t.min()) * 0.01
-            n1 = n1+1
-    print(f"Percentage of Invalid Sets: {n1/Nq:.3f}")
-    print(f"Average Set Size: {len_avg//Nq}")
+
+    for i in range(N):
+        if len(neighbor_index[i]) > 0:
+            c0[i] = c[neighbor_index[i]].mean(0)
+            u0[i] = u[neighbor_index[i]].mean(0)
+            s0[i] = s[neighbor_index[i]].mean(0)
+            t0[i] = t[neighbor_index[i]].mean()
+        elif forward:
+            c0[i] = c_end
+            u0[i] = u_end
+            s0[i] = s_end
+            t0[i] = t_98 + (t_98-t.min()) * 0.01
     return c0, u0, s0, t0
 
 
@@ -536,3 +476,181 @@ def cosine_similarity(u, s, beta, gamma, s_knn):
         else:
             res += cos_sim(ds[:, i, :], V).mean()
     return res
+
+
+def elipse_axis(x, y, xc, yc, slope):
+    return (y - yc) - (slope * (x - xc))
+
+
+def compute_quantile_scores(adata, n_pcs=30, n_neighbors=30):
+    if 'connectivities' not in adata.obsp:
+        neighbors = sc.Neighbors(adata)
+        neighbors.compute_neighbors(n_neighbors=n_neighbors, knn=True, n_pcs=n_pcs)
+        conn = neighbors.connectivities
+    else:
+        conn = adata.obsp['connectivities'].copy()
+    conn.setdiag(1)
+    conn_norm = conn.multiply(1.0 / conn.sum(1)).tocsr()
+
+    quantile_scores = np.zeros(adata.shape)
+    quantile_scores_2bit = np.zeros((adata.shape[0], adata.shape[1], 2))
+    quantile_gene = np.full(adata.n_vars, False)
+    for idx, gene in enumerate(adata.var_names):
+        u = np.array(adata[:, gene].layers['Mu'])
+        s = np.array(adata[:, gene].layers['Ms'])
+        non_zero = (u > 0) & (s > 0)
+        if np.sum(non_zero) < 10:
+            continue
+
+        mean_u, mean_s = np.mean(u[non_zero]), np.mean(s[non_zero])
+        std_u, std_s = np.std(u[non_zero]), np.std(s[non_zero])
+        u_ = (u - mean_u)/std_u
+        s_ = (s - mean_s)/std_s
+        X = np.reshape(s_[non_zero], (-1, 1))
+        Y = np.reshape(u_[non_zero], (-1, 1))
+
+        # Ax^2 + Bxy + Cy^2 + Dx + Ey + 1 = 0
+        A = np.hstack([X**2, X * Y, Y**2, X, Y])
+        b = -np.ones_like(X)
+        x, _, _, _ = np.linalg.lstsq(A, b)
+        x = x.squeeze()
+        A, B, C, D, E = x
+        good_fit = B**2 - 4*A*C < 0
+        theta = np.arctan(B/(A - C))/2 if x[0] > x[2] else np.pi/2 + np.arctan(B/(A - C))/2
+        good_fit = good_fit & (theta < np.pi/2) & (theta > 0)
+
+        xc = (B*E - 2*C*D)/(4*A*C - B**2)
+        yc = (B*D - 2*A*E)/(4*A*C - B**2)
+        slope_major = np.tan(theta)
+        theta2 = np.pi/2 + theta
+        slope_minor = np.tan(theta2)
+
+        major_bit = elipse_axis(s_, u_, xc, yc, slope_major)
+        minor_bit = elipse_axis(s_, u_, xc, yc, slope_minor)
+        quant1 = (major_bit > 0) & (minor_bit < 0)
+        quant2 = (major_bit > 0) & (minor_bit > 0)
+        quant3 = (major_bit < 0) & (minor_bit > 0)
+        quant4 = (major_bit < 0) & (minor_bit < 0)
+
+        quantile_scores[:, idx:idx+1] = (-3.) * quant1 + (-1.) * quant2 + 1. * quant3 + 3. * quant4
+        quantile_scores_2bit[:, idx:idx+1, 0] = 1. * (quant1 | quant2)
+        quantile_scores_2bit[:, idx:idx+1, 1] = 1. * (quant2 | quant3)
+        quantile_gene[idx] = good_fit
+
+    quantile_scores = csr_matrix.dot(conn_norm, quantile_scores)
+    quantile_scores_2bit[:, :, 0] = csr_matrix.dot(conn_norm, quantile_scores_2bit[:, :, 0])
+    quantile_scores_2bit[:, :, 1] = csr_matrix.dot(conn_norm, quantile_scores_2bit[:, :, 1])
+
+    if np.any(np.isnan(quantile_scores_2bit)):
+        print('nan found')
+    if np.any(quantile_scores_2bit == np.inf):
+        print('inf found')
+
+    adata.layers['quantile_scores'] = quantile_scores
+    adata.layers['quantile_scores_1st_bit'] = quantile_scores_2bit[:, :, 0]
+    adata.layers['quantile_scores_2nd_bit'] = quantile_scores_2bit[:, :, 1]
+
+    perc_good = np.sum(quantile_gene) / adata.n_vars * 100
+    print(f'{np.sum(quantile_gene)} out of {adata.n_vars} = {perc_good:.3g}% genes have good ellipse fits.')
+
+    adata.obs['quantile_score_sum'] = np.sum(adata[:, quantile_gene].layers['quantile_scores'], axis=1)
+    adata.var['quantile_genes'] = quantile_gene
+
+
+def cluster_by_quantile(adata,
+                        n_clusters=7,
+                        affinity='euclidean',
+                        linkage='ward'):
+    compute_quantile_scores(adata)
+
+    n_clusters = int(n_clusters)
+    cluster = AgglomerativeClustering(n_clusters=n_clusters, affinity=affinity, linkage=linkage)
+    cluster = cluster.fit_predict(np.vstack((adata.layers['quantile_scores_1st_bit'],
+                                             adata.layers['quantile_scores_2nd_bit'])).transpose())
+    return cluster
+
+
+def assign_gene_mode_auto(adata,
+                          w_noisy,
+                          thred=0.05,
+                          std_prior=0.1,
+                          n_clusters=7):
+    y = cluster_by_quantile(adata, n_clusters=n_clusters)
+    adata.var['quantile_cluster'] = y
+
+    # Sample weights from Dirichlet(mu=0.5, std=std_prior)
+    alpha_neutral = find_dirichlet_param(0.5, std_prior)
+    q_neutral = dirichlet.rvs(alpha_neutral, size=adata.n_vars)[:, 0]
+    w = np.empty((adata.n_vars))
+    pval_ind = []
+    pval_rep = []
+    cluster_type = np.zeros((y.max()+1))
+    alpha_ind, alpha_rep = find_dirichlet_param(0.6, std_prior), find_dirichlet_param(0.4, std_prior)
+
+    # Perform Komogorov-Smirnov Test
+    for i in range(y.max()+1):
+        n = np.sum(y == i)
+        _, pval_1 = kstest(w_noisy[y == i], q_neutral, alternative='greater', method='asymp')
+        _, pval_2 = kstest(w_noisy[y == i], q_neutral, alternative='less', method='asymp')
+        pval_ind.append(pval_1)
+        pval_rep.append(pval_2)
+        if pval_1 < thred and pval_2 < thred:  # uni/bi-modal dirichlet
+            cluster_type[i] = 0
+            _, pval_3 = kstest(w_noisy[y == i], q_neutral)
+            if pval_3 < thred:
+                km = KMeans(2, n_init='auto')
+                yw = km.fit_predict(w_noisy[y == i].reshape(-1, 1))
+                w[y == i] = sample_dir_mix(w_noisy[y == i], yw, std_prior)
+            else:
+                np.random.seed(42)
+                w[y == i] = dirichlet.rvs(alpha_neutral, size=n)[:, 0]
+
+        elif pval_1 >= 0.05:  # induction
+            cluster_type[i] = 1
+            np.random.seed(42)
+            w[y == i] = dirichlet.rvs(alpha_ind, size=n)[:, 0]
+        elif pval_2 >= 0.05:  # repression
+            cluster_type[i] = 2
+            np.random.seed(42)
+            w[y == i] = dirichlet.rvs(alpha_rep, size=n)[:, 0]
+
+    pval_ind = np.array(pval_ind)
+    pval_rep = np.array(pval_rep)
+    print(f'KS-test result: {cluster_type}')
+    # If no repressive cluster is found, pick the one with the highest p value
+    if np.all(cluster_type == 1):
+        ymax = np.argmax(pval_rep)
+        print(f'Assign cluster {ymax} to repressive')
+        np.random.seed(42)
+        w[y == ymax] = dirichlet.rvs(alpha_rep, size=np.sum(y == ymax))[:, 0]
+
+    # If no inductive cluster is found, pick the one with the highest p value
+    if np.all(cluster_type == 2):
+        ymax = np.argmax(pval_ind)
+        print(f'Assign cluster {ymax} to inductive')
+        np.random.seed(42)
+        w[y == ymax] = dirichlet.rvs(alpha_ind, size=np.sum(y == ymax))[:, 0]
+
+    return w
+
+
+def assign_gene_mode(adata,
+                     w_noisy,
+                     assign_type='binary',
+                     thred=0.05,
+                     std_prior=0.1,
+                     n_cluster_thred=3):
+    # Assign one of ('inductive', 'repressive', 'mixture') to gene clusters
+    # `assign_type' specifies which strategy to use
+    if assign_type == 'binary':
+        return assign_gene_mode_binary(adata, w_noisy, thred)
+    elif assign_type == 'auto':
+        return assign_gene_mode_auto(adata, w_noisy, thred, std_prior, n_cluster_thred)
+    elif assign_type == 'inductive':
+        alpha_ind = find_dirichlet_param(0.8, std_prior)
+        np.random.seed(42)
+        return dirichlet.rvs(alpha_ind, size=adata.n_vars)[:, 0]
+    elif assign_type == 'repressive':
+        alpha_rep = find_dirichlet_param(0.2, std_prior)
+        np.random.seed(42)
+        return dirichlet.rvs(alpha_rep, size=adata.n_vars)[:, 0]

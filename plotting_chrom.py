@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 
 
@@ -318,14 +319,14 @@ def plot_vel(t,
              t0,
              c0, u0, s0,
              dt=0.2,
-             n_sample=10,
+             n_sample=20,
              title="Gene",
              save=None):
     fig, ax = plt.subplots(1, 3, figsize=(28, 6), facecolor='white')
 
     ax[0].plot(t, chat, '.', color='grey', alpha=0.1)
     ax[1].plot(t, uhat, '.', color='grey', alpha=0.1)
-    ax[1].plot(t, shat, '.', color='grey', alpha=0.1)
+    ax[2].plot(t, shat, '.', color='grey', alpha=0.1)
     plot_indices = np.random.choice(len(t), n_sample, replace=False)
     if dt > 0:
         ax[0].quiver(t[plot_indices],
@@ -420,3 +421,198 @@ def plot_phase(c, u, s,
     fig.suptitle(title)
 
     save_fig(fig, save, (lgd,))
+
+
+def _plot_heatmap(ax,
+                  vals,
+                  X_embed,
+                  colorbar_name,
+                  colorbar_ticklabels=None,
+                  markersize=5,
+                  cmap='plasma',
+                  axis_off=True):
+    ax.scatter(X_embed[:, 0],
+               X_embed[:, 1],
+               s=markersize,
+               c=vals,
+               cmap=cmap,
+               edgecolors='none')
+    vmin = np.quantile(vals, 0.01)
+    vmax = np.quantile(vals, 0.99)
+    norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
+    sm = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
+    cbar = plt.colorbar(sm, ax=ax)
+    cbar.ax.get_yaxis().labelpad = 15
+    cbar.ax.set_ylabel(colorbar_name, rotation=270, fontsize=15)
+    if colorbar_ticklabels is not None:
+        if len(colorbar_ticklabels) == 2:
+            cbar.ax.get_yaxis().labelpad = 5
+        cbar.set_ticks(np.linspace(vmin, vmax, len(colorbar_ticklabels)))
+        cbar.ax.set_yticklabels(colorbar_ticklabels, fontsize=12)
+    if axis_off:
+        ax.axis("off")
+
+    return ax
+
+
+def plot_time(t_latent,
+              X_embed,
+              cmap='plasma',
+              save=None):
+    """Plots mean cell time as a heatmap.
+
+    Arguments
+    ---------
+
+    t_latent : `numpy array`
+        Mean latent time, (N,)
+    X_embed : `numpy array`
+        2D coordinates for visualization, (N,2)
+    cmap : str, optional
+        Colormap name
+    save : str, optional
+        Figure name for saving (including path)
+    """
+    fig, ax = plt.subplots(figsize=(8, 6))
+    _plot_heatmap(ax, t_latent, X_embed, "Latent Time", None, cmap=cmap, axis_off=True)
+    save_fig(fig, save)
+
+
+def elipse_axis(x, y, xc, yc, slope):
+    return (y - yc) - (slope * (x - xc))
+
+
+def ellipse_fit(adata,
+                genes,
+                color_by='quantile',
+                n_cols=8,
+                title=None,
+                figsize=None,
+                axis_on=False,
+                pointsize=2,
+                linewidth=2
+                ):
+    by_quantile = color_by == 'quantile'
+    by_quantile_score = color_by == 'quantile_scores'
+    if not by_quantile and not by_quantile_score:
+        types = adata.obs[color_by].cat.categories
+        colors = adata.uns[f'{color_by}_colors']
+    gn = len(genes)
+    if gn < n_cols:
+        n_cols = gn
+    fig, axs = plt.subplots(-(-gn // n_cols), n_cols, figsize=(2 * n_cols, 2.4 * (-(-gn // n_cols))) if figsize is None else figsize)
+    count = 0
+    for gene in genes:
+        u = np.array(adata[:, gene].layers['Mu'])
+        s = np.array(adata[:, gene].layers['Ms'])
+        row = count // n_cols
+        col = count % n_cols
+        non_zero = (u > 0) & (s > 0)
+        if np.sum(non_zero) < 10:
+            count += 1
+            fig.delaxes(axs[row, col])
+            continue
+
+        mean_u, mean_s = np.mean(u[non_zero]), np.mean(s[non_zero])
+        std_u, std_s = np.std(u[non_zero]), np.std(s[non_zero])
+        u_ = (u - mean_u)/std_u
+        s_ = (s - mean_s)/std_s
+        X = np.reshape(s_[non_zero], (-1, 1))
+        Y = np.reshape(u_[non_zero], (-1, 1))
+
+        # Ax^2 + Bxy + Cy^2 + Dx + Ey + 1 = 0
+        A = np.hstack([X**2, X * Y, Y**2, X, Y])
+        b = -np.ones_like(X)
+        x, res, _, _ = np.linalg.lstsq(A, b)
+        x = x.squeeze()
+        A, B, C, D, E = x
+        good_fit = B**2 - 4*A*C < 0
+        theta = np.arctan(B/(A - C))/2 if x[0] > x[2] else np.pi/2 + np.arctan(B/(A - C))/2
+        good_fit = good_fit & (theta < np.pi/2) & (theta > 0)
+        if not good_fit:
+            count += 1
+            fig.delaxes(axs[row, col])
+            continue
+        x_coord = np.linspace((-mean_s)/std_s, (np.max(s)-mean_s)/std_s, 500)
+        y_coord = np.linspace((-mean_u)/std_u, (np.max(u)-mean_u)/std_u, 500)
+        X_coord, Y_coord = np.meshgrid(x_coord, y_coord)
+        Z_coord = A * X_coord**2 + B * X_coord * Y_coord + C * Y_coord**2 + D * X_coord + E * Y_coord + 1
+
+        M0 = np.array([
+             A, B/2, D/2,
+             B/2, C, E/2,
+             D/2, E/2, 1,
+        ]).reshape(3, 3)
+        M = np.array([
+            A, B/2,
+            B/2, C,
+        ]).reshape(2, 2)
+        l1, l2 = np.sort(np.linalg.eigvals(M))
+        xc = (B*E - 2*C*D)/(4*A*C - B**2)
+        yc = (B*D - 2*A*E)/(4*A*C - B**2)
+        slope_major = np.tan(theta)
+        theta2 = np.pi/2 + theta
+        slope_minor = np.tan(theta2)
+        a = np.sqrt(-np.linalg.det(M0)/np.linalg.det(M)/l2)
+        b = np.sqrt(-np.linalg.det(M0)/np.linalg.det(M)/l1)
+        xtop = xc + a*np.cos(theta)
+        ytop = yc + a*np.sin(theta)
+        xbot = xc - a*np.cos(theta)
+        ybot = yc - a*np.sin(theta)
+        xtop2 = xc + b*np.cos(theta2)
+        ytop2 = yc + b*np.sin(theta2)
+        xbot2 = xc - b*np.cos(theta2)
+        ybot2 = yc - b*np.sin(theta2)
+        mse = res[0] / np.sum(non_zero)
+        major_bit = elipse_axis(s_, u_, xc, yc, slope_major)
+        minor_bit = elipse_axis(s_, u_, xc, yc, slope_minor)
+        quant1 = (major_bit > 0) & (minor_bit < 0)
+        quant2 = (major_bit > 0) & (minor_bit > 0)
+        quant3 = (major_bit < 0) & (minor_bit > 0)
+        quant4 = (major_bit < 0) & (minor_bit < 0)
+        if (np.sum(quant1 | quant4) < 10) or (np.sum(quant2 | quant3) < 10):
+            count += 1
+            continue
+
+        if by_quantile:
+            axs[row, col].scatter(s_[quant1], u_[quant1], s=pointsize, c='tab:red', alpha=0.6)
+            axs[row, col].scatter(s_[quant2], u_[quant2], s=pointsize, c='tab:orange', alpha=0.6)
+            axs[row, col].scatter(s_[quant3], u_[quant3], s=pointsize, c='tab:green', alpha=0.6)
+            axs[row, col].scatter(s_[quant4], u_[quant4], s=pointsize, c='tab:blue', alpha=0.6)
+        elif by_quantile_score:
+            if 'quantile_scores' not in adata.layers:
+                raise ValueError('Please run multivelo.compute_quantile_scores first to compute quantile scores.')
+            axs[row, col].scatter(s_, u_, s=pointsize, c=adata[:, gene].layers['quantile_scores'], cmap='RdBu_r', alpha=0.7)
+        else:
+            for i in range(len(types)):
+                filt = adata.obs[color_by] == types[i]
+                axs[row, col].scatter(s_[filt], u_[filt], s=pointsize, c=colors[i], alpha=0.7)
+        axs[row, col].contour(X_coord, Y_coord, Z_coord, levels=[0], colors=('r'), linewidths=linewidth, alpha=0.7)
+        axs[row, col].scatter([xc], [yc], c='black', s=5, zorder=2)
+        axs[row, col].scatter([0], [0], c='black', s=5, zorder=2)
+        axs[row, col].plot([xtop, xbot], [ytop, ybot], color='b', linestyle='dashed', linewidth=linewidth, alpha=0.7)
+        axs[row, col].plot([xtop2, xbot2], [ytop2, ybot2], color='g', linestyle='dashed', linewidth=linewidth, alpha=0.7)
+
+        axs[row, col].set_title(f'{gene} {mse:.3g}')
+        axs[row, col].set_xlabel('s')
+        axs[row, col].set_ylabel('u')
+        common_range = [np.min([(-mean_s)/std_s, (-mean_u)/std_u])-(0.05*np.max(s)/std_s), np.max([(np.max(s)-mean_s)/std_s, (np.max(u)-mean_u)/std_u])+(0.05*np.max(s)/std_s)]
+        axs[row, col].set_xlim(common_range)
+        axs[row, col].set_ylim(common_range)
+        if not axis_on:
+            axs[row, col].xaxis.set_ticks_position('none')
+            axs[row, col].yaxis.set_ticks_position('none')
+            axs[row, col].get_xaxis().set_visible(False)
+            axs[row, col].get_yaxis().set_visible(False)
+            axs[row, col].xaxis.set_ticks_position('none')
+            axs[row, col].yaxis.set_ticks_position('none')
+            axs[row, col].set_frame_on(False)
+        count += 1
+
+    for i in range(col+1, n_cols):
+        fig.delaxes(axs[row, i])
+    if title is not None:
+        fig.suptitle(title, fontsize=15)
+    else:
+        fig.suptitle('Ellipse Fit', fontsize=15)
+    fig.tight_layout(rect=[0, 0.1, 1, 0.98])
