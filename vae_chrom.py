@@ -238,7 +238,7 @@ class Decoder(nn.Module):
         print(f"Initial induction: {np.sum(w >= 0.5)}, repression: {np.sum(w < 0.5)} out of {G}.")
         self.adata.var["w_init"] = w
         logit_pw = 0.5*(np.log(w+1e-10) - np.log(1-w-1e-10))
-        logit_pw = np.stack([logit_pw, -logit_pw], 1)
+        logit_pw = np.stack([logit_pw, -0.5*logit_pw, 0.5*logit_pw, -logit_pw], 1)
         self.logit_pw = nn.Parameter(torch.tensor(logit_pw))
 
         if self.init_method == "random":
