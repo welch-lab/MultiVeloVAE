@@ -8,9 +8,9 @@ import torch.nn.functional as F
 from velovae.plotting import plot_train_loss, plot_test_loss
 from velovae.plotting_chrom import plot_sig_, plot_sig, plot_vel, plot_phase, plot_time
 from .model_util import hist_equal, convert_time, get_gene_index
-from .model_util import elbo_collapsed_categorical, find_dirichlet_param, knnx0_index, assign_gene_mode_tprior
+from .model_util import elbo_collapsed_categorical, knnx0_index, assign_gene_mode_tprior
 from .model_util_chrom import pred_exp, init_params, get_ts_global, reinit_params
-from .model_util_chrom import kl_gaussian, reparameterize, knn_approx, get_x0, cosine_similarity, assign_gene_mode
+from .model_util_chrom import kl_gaussian, reparameterize, knn_approx, get_x0, cosine_similarity, find_dirichlet_param, assign_gene_mode
 from .transition_graph import encode_type
 from .training_data_chrom import SCData
 from .velocity_chrom import rna_velocity_vae
@@ -43,12 +43,11 @@ class Encoder(nn.Module):
                                  )
 
         self.fc_mu_t = nn.Linear(N2, 1)
-        self.spt1 = nn.Softplus()
         self.fc_std_t = nn.Linear(N2, 1)
-        self.spt2 = nn.Softplus()
+        self.spt1 = nn.Softplus()
         self.fc_mu_z = nn.Linear(N2, dim_z)
         self.fc_std_z = nn.Linear(N2, dim_z)
-        self.spt3 = nn.Softplus()
+        self.spt2 = nn.Softplus()
 
         if checkpoint is not None:
             self.load_state_dict(torch.load(checkpoint))
@@ -71,8 +70,8 @@ class Encoder(nn.Module):
         if condition is not None:
             data_in = torch.cat((data_in, condition), 1)
         h = self.net(data_in)
-        mu_tx, std_tx = self.spt1(self.fc_mu_t(h)), self.spt2(self.fc_std_t(h))
-        mu_zx, std_zx = self.fc_mu_z(h), self.spt3(self.fc_std_z(h))
+        mu_tx, std_tx = self.fc_mu_t(h), self.spt1(self.fc_std_t(h))
+        mu_zx, std_zx = self.fc_mu_z(h), self.spt2(self.fc_std_z(h))
         return mu_tx, std_tx, mu_zx, std_zx
 
 
@@ -236,11 +235,11 @@ class Decoder(nn.Module):
             dyn_mask = (t > self.tmax*0.01) & (np.abs(t-toff) > self.tmax*0.01)
             w = np.sum(((t < toff) & dyn_mask), 0) / (np.sum(dyn_mask, 0) + 1e-10)
             w = assign_gene_mode(self.adata, w, 'auto', 0.05, 0.1, 7)
-            self.adata.var["w_init"] = w
-            logit_pw = 0.5*(np.log(w+1e-10) - np.log(1-w-1e-10))
-            logit_pw = np.stack([logit_pw, -logit_pw], 1)
-            self.logit_pw = nn.Parameter(torch.tensor(logit_pw))
         print(f"Initial induction: {np.sum(w >= 0.5)}, repression: {np.sum(w < 0.5)} out of {G}.")
+        self.adata.var["w_init"] = w
+        logit_pw = 0.5*(np.log(w+1e-10) - np.log(1-w-1e-10))
+        logit_pw = np.stack([logit_pw, -logit_pw], 1)
+        self.logit_pw = nn.Parameter(torch.tensor(logit_pw))
 
         if self.init_method == "random":
             print("Random Initialization.")
@@ -413,12 +412,18 @@ class Decoder(nn.Module):
         if (c0 is None) or (u0 is None) or (s0 is None) or (t0 is None):
             if two_basis:
                 zero_mtx = torch.zeros_like(self.rho)
-                kc = torch.stack([self.kc, zero_mtx], 1)
-                rho = torch.stack([self.rho, zero_mtx], 1)
-                c0 = torch.stack([self.zero_vec, self.c0.exp()])
-                u0 = torch.stack([self.zero_vec, self.u0.exp()])
-                s0 = torch.stack([self.zero_vec, self.s0.exp()])
-                tau = torch.stack([F.leaky_relu(t_ - self.ton.exp(), neg_slope) for i in range(2)], 1)
+                # kc = torch.stack([self.kc, zero_mtx], 1)
+                # rho = torch.stack([self.rho, zero_mtx], 1)
+                # c0 = torch.stack([self.zero_vec, self.c0.exp()])
+                # u0 = torch.stack([self.zero_vec, self.u0.exp()])
+                # s0 = torch.stack([self.zero_vec, self.s0.exp()])
+                # tau = torch.stack([F.leaky_relu(t_ - self.ton.exp(), neg_slope) for i in range(2)], 1)
+                kc = torch.stack([self.kc, self.kc, zero_mtx, zero_mtx], 1)
+                rho = torch.stack([self.rho, zero_mtx, self.rho, zero_mtx], 1)
+                c0 = torch.stack([self.zero_vec, self.zero_vec, self.c0.exp(), self.c0.exp()])
+                u0 = torch.stack([self.zero_vec, self.u0.exp(), self.zero_vec, self.u0.exp()])
+                s0 = torch.stack([self.zero_vec, self.s0.exp(), self.zero_vec, self.s0.exp()])
+                tau = torch.stack([F.leaky_relu(t_ - self.ton.exp(), neg_slope) for i in range(4)], 1)
             else:
                 kc = self.kc
                 rho = self.rho
@@ -533,12 +538,12 @@ class VAEChrom():
             "learning_rate_final": None,
             "lambda": 1e-3,
             "lambda_rho": 1e-3,
-            "kl_t": 1.0,
+            "kl_t": 1.0*dim_z,
             "kl_z": 1.0,
             "kl_w": 0.01,
             "kl_param": 1.0,
             "reg_forward": 10.0,
-            "reg_cos": 0.1,
+            "reg_cos": 0.0,
             "test_iter": None,
             "save_epoch": 100,
             "n_warmup": 5,
@@ -591,7 +596,8 @@ class VAEChrom():
                                init_key=init_key,
                                checkpoint=checkpoints[1]).float().to(self.device)
 
-        self.alpha_w = torch.tensor(find_dirichlet_param(0.5, 0.05), dtype=torch.float, device=self.device)
+        # self.alpha_w = torch.tensor(find_dirichlet_param(0.5, 0.05), dtype=torch.float, device=self.device)
+        self.alpha_w = torch.tensor(find_dirichlet_param(0.5, 0.05, 4), dtype=torch.float, device=self.device)
 
         self.use_knn = False
         self.reg_velocity = False
@@ -888,7 +894,8 @@ class VAEChrom():
         kldt = kl_gaussian(q_tx[0], q_tx[1], p_t[0], p_t[1])
         kldz = kl_gaussian(q_zx[0], q_zx[1], p_z[0], p_z[1])
 
-        kldw = elbo_collapsed_categorical(self.decoder.logit_pw, self.alpha_w, 2, self.decoder.scaling.shape[0]) if not self.use_knn and self.config["two_basis"] else 0.0
+        # kldw = elbo_collapsed_categorical(self.decoder.logit_pw, self.alpha_w, 2, self.decoder.scaling.shape[0]) if not self.use_knn and self.config["two_basis"] else 0.0
+        kldw = elbo_collapsed_categorical(self.decoder.logit_pw, self.alpha_w, 4, self.decoder.scaling.shape[0]) if not self.use_knn and self.config["two_basis"] else 0.0
 
         sigma_c = self.decoder.sigma_c
         sigma_u = self.decoder.sigma_u
@@ -1382,7 +1389,7 @@ class VAEChrom():
                 s0_prev = self.s0.cpu().numpy()
 
             if plot and self.config['n_refine'] > 1:
-                plot_time(self.t0.detach().cpu().numpy().squeeze(), Xembed, save=f"{figure_path}/time-t0-supdated.png")
+                plot_time(self.t0.detach().cpu().numpy().squeeze(), Xembed, save=f"{figure_path}/time-t0-updated.png")
                 t0_plot = self.t0[self.train_idx].detach().cpu().numpy().squeeze()
                 for i in range(len(gind)):
                     idx = gind[i]
@@ -1536,7 +1543,8 @@ class VAEChrom():
             if Nb*B < N:
                 Nb += 1
 
-            w_hard = F.one_hot(torch.argmax(self.decoder.logit_pw, 1), num_classes=2).T
+            # w_hard = F.one_hot(torch.argmax(self.decoder.logit_pw, 1), num_classes=2).T
+            w_hard = F.one_hot(torch.argmax(self.decoder.logit_pw, 1), num_classes=4).T
             for n in range(Nb):
                 i = n*B
                 j = min([(n+1)*B, N])

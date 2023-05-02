@@ -10,7 +10,7 @@ from scipy.spatial import KDTree
 from scipy.sparse import csr_matrix
 from scipy.stats import dirichlet, kstest
 import scanpy as sc
-from .model_util import find_dirichlet_param, sample_dir_mix, assign_gene_mode_binary
+from .model_util import sample_dir_mix, assign_gene_mode_binary
 
 
 def inv(x):
@@ -89,6 +89,7 @@ def pred_exp(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
     spred = s0*expg + rho*alpha*kc/gamma*(1-expg)
     spred += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     spred += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
+
     return nn.functional.relu(cpred), nn.functional.relu(upred), nn.functional.relu(spred)
 
 
@@ -630,8 +631,14 @@ def assign_gene_mode_auto(adata,
         print(f'Assign cluster {ymax} to inductive')
         np.random.seed(42)
         w[y == ymax] = dirichlet.rvs(alpha_ind, size=np.sum(y == ymax))[:, 0]
-
     return w
+
+
+def find_dirichlet_param(mu, std, n_basis=2):
+    alpha_i = ((mu/std)*((1-mu)/std) - 1) * mu
+    params = [alpha_i for i in range(n_basis-1)]
+    params.append((1-mu)/mu*alpha_i)
+    return np.array(params)
 
 
 def assign_gene_mode(adata,
