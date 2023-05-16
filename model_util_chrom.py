@@ -25,30 +25,30 @@ def chromatin(tau, c0, alpha_c):
 
 def unspliced(tau, u0, c0, alpha_c, alpha, beta):
     expac = np.exp(-alpha_c * tau)
-    expu = np.exp(-beta * tau)
+    expb = np.exp(-beta * tau)
     const = (1 - c0) * alpha * inv(beta - alpha_c)
-    return u0 * expu + alpha * inv(beta) * (1 - expu) + const * (expu - expac)
+    return u0 * expb + alpha * inv(beta) * (1 - expb) + const * (expb - expac)
 
 
 def spliced(tau, s0, u0, c0, alpha_c, alpha, beta, gamma):
     expac = np.exp(-alpha_c * tau)
-    expu = np.exp(-beta * tau)
-    exps = np.exp(-gamma * tau)
+    expb = np.exp(-beta * tau)
+    expg = np.exp(-gamma * tau)
     const = (1 - c0) * alpha * inv(beta - alpha_c)
-    out = s0 * exps + (alpha * inv(gamma)) * (1 - exps)
-    out += (beta * inv(gamma - beta)) * ((alpha * inv(beta)) - u0 - const) * (exps - expu)
-    out += (beta * inv(gamma - alpha_c)) * const * (exps - expac)
+    out = s0 * expg + (alpha * inv(gamma)) * (1 - expg)
+    out += (beta * inv(gamma - beta)) * ((alpha * inv(beta)) - u0 - const) * (expg - expb)
+    out += (beta * inv(gamma - alpha_c)) * const * (expg - expac)
     return out
 
 
 def compute_exp(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
-    expac, expu, exps = np.exp(-alpha_c * tau), np.exp(-beta * tau), np.exp(-gamma * tau)
+    expac, expb, expg = np.exp(-alpha_c * tau), np.exp(-beta * tau), np.exp(-gamma * tau)
     const = (kc - c0) * rho * alpha * inv(beta - alpha_c)
     c = c0 * expac + kc * (1 - expac)
-    u = u0 * expu + (rho * alpha * kc * inv(beta)) * (1 - expu) + const * (expu - expac)
-    s = s0 * exps + (rho * alpha * kc * inv(gamma)) * (1 - exps)
-    s += (beta * inv(gamma - beta)) * ((rho * alpha * kc * inv(beta)) - u0 - const) * (exps - expu)
-    s += (beta * inv(gamma - alpha_c)) * const * (exps - expac)
+    u = u0 * expb + (rho * alpha * kc * inv(beta)) * (1 - expb) + const * (expb - expac)
+    s = s0 * expg + (rho * alpha * kc * inv(gamma)) * (1 - expg)
+    s += (beta * inv(gamma - beta)) * ((rho * alpha * kc * inv(beta)) - u0 - const) * (expg - expb)
+    s += (beta * inv(gamma - alpha_c)) * const * (expg - expac)
     return c, u, s
 
 
@@ -89,8 +89,20 @@ def pred_exp(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
     spred = s0*expg + rho*alpha*kc/gamma*(1-expg)
     spred += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     spred += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
+    return F.relu(cpred), F.relu(upred), F.relu(spred)
 
-    return nn.functional.relu(cpred), nn.functional.relu(upred), nn.functional.relu(spred)
+
+def pred_exp_backward(tau, c, u, s, kc, alpha_c, rho, alpha, beta, gamma):
+    expac, expb, expg = torch.exp(alpha_c*tau), torch.exp(beta*tau), torch.exp(gamma*tau)
+    eps = 1e-6
+    expbac, expgb, expgac = torch.exp((beta-alpha_c+eps)*tau), torch.exp((gamma-beta+eps)*tau), torch.exp((gamma-alpha_c+eps)*tau)
+
+    c0 = F.hardtanh(c*expac + kc*(1-expac), 0, 1)
+    u0 = F.hardtanh(u*expb + rho*alpha*kc/beta*(1-expb) + (kc-c0)*rho*alpha/(beta-alpha_c+eps)*(expbac-1), 0, u.max()*1.2)
+    s0 = s*expg + rho*alpha*kc/gamma*(1-expg)
+    s0 += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expgb-1)
+    s0 += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expgac-1)
+    return u0, u0, F.hardtanh(s0, 0, s.max()*1.2)
 
 
 def pred_exp_numpy(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
@@ -105,6 +117,19 @@ def pred_exp_numpy(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
     return np.clip(cpred, a_min=0, a_max=1), np.clip(upred, a_min=0, a_max=None), np.clip(spred, a_min=0, a_max=None)
 
 
+def pred_exp_backward_numpy(tau, c, u, s, kc, alpha_c, rho, alpha, beta, gamma):
+    expac, expb, expg = np.exp(alpha_c*tau), np.exp(beta*tau), np.exp(gamma*tau)
+    eps = 1e-6
+    expbac, expgb, expgac = np.exp((beta-alpha_c+eps)*tau), np.exp((gamma-beta+eps)*tau), np.exp((gamma-alpha_c+eps)*tau)
+
+    c0 = np.clip(c*expac + kc*(1-expac), a_min=0, a_max=1)
+    u0 = np.clip(u*expb + rho*alpha*kc/beta*(1-expb) + (kc-c0)*rho*alpha/(beta-alpha_c+eps)*(expbac-1), a_min=0, a_max=np.max(u)*1.2)
+    s0 = s*expg + rho*alpha*kc/gamma*(1-expg)
+    s0 += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expgb-1)
+    s0 += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expgac-1)
+    return c0, u0, np.clip(s0, a_min=0, a_max=np.max(s)*1.2)
+
+
 def linreg(u, s):
     q = np.sum(s*s)
     r = np.sum(u*s)
@@ -114,30 +139,31 @@ def linreg(u, s):
     return k
 
 
-def assign_time(c, u, s, c0_, u0_, s0_, alpha_c, alpha, beta, gamma, std_c_=None, std_s=None, t_num=1000, t_max=20):
+def assign_time(c, u, s, c0_, u0_, s0_, alpha_c, alpha, beta, gamma, std_c_=None, std_s=None, weight_c=0.6, t_num=1000, t_max=20):
     tau = np.linspace(0, t_max, t_num)
+    exp_mat = np.hstack((np.reshape(c, (-1, 1))/std_c_*std_s*weight_c, np.reshape(u, (-1, 1)), np.reshape(s, (-1, 1))))
     ct, ut, st = compute_exp(tau, 0, 0, 0, 1, alpha_c, 1, alpha, beta, gamma)
-    anchor_mat = np.hstack((np.reshape(ct, (-1, 1))/std_c_*std_s, np.reshape(ut, (-1, 1)), np.reshape(st, (-1, 1))))
-    exp_mat = np.hstack((np.reshape(c, (-1, 1))/std_c_*std_s, np.reshape(u, (-1, 1)), np.reshape(s, (-1, 1))))
+    anchor_mat = np.hstack((np.reshape(ct, (-1, 1))/std_c_*std_s*weight_c, np.reshape(ut, (-1, 1)), np.reshape(st, (-1, 1))))
     tree = KDTree(anchor_mat)
     dd, ii = tree.query(exp_mat, k=1)
     dd = dd**2
     t_pred = tau[ii]
 
-    exp_ss = np.array([[c0_/std_c_*std_s, u0_, s0_]])
+    exp_ss = np.array([[c0_/std_c_*std_s*weight_c, u0_, s0_]])
     ii_ss = tree.query(exp_ss, k=1)[1]
     t_ = tau[ii_ss][0]
     c0_pred, u0_pred, s0_pred = compute_exp(t_, 0, 0, 0, 1, alpha_c, 1, alpha, beta, gamma)
 
-    ct_, ut_, st_ = compute_exp(tau, c0_pred, u0_pred, s0_pred, 0, alpha_c, 0, 0, beta, gamma)
-    anchor_mat_ = np.hstack((np.reshape(ct_, (-1, 1))/std_c_*std_s, np.reshape(ut_, (-1, 1)), np.reshape(st_, (-1, 1))))
+    ct_, ut_, st_ = compute_exp(tau, c0_pred, u0_pred, s0_pred, 0, alpha_c, 0, alpha, beta, gamma)
+    anchor_mat_ = np.hstack((np.reshape(ct_, (-1, 1))/std_c_*std_s*weight_c, np.reshape(ut_, (-1, 1)), np.reshape(st_, (-1, 1))))
     tree_ = KDTree(anchor_mat_)
     dd_, ii_ = tree_.query(exp_mat, k=1)
     dd_ = dd_**2
     t_pred_ = tau[ii_]
 
     res = np.array([dd, dd_])
-    t = np.array([t_pred, t_pred_+np.ones((len(t_pred_)))*t_])
+    # t = np.array([t_pred, t_pred_+np.ones((len(t_pred_)))*t_])
+    t = np.array([t_pred, t_pred_+t_])
     o = np.argmin(res, axis=0)
     t_latent = np.array([t[o[i], i] for i in range(len(t_pred))])
 
@@ -159,9 +185,9 @@ def init_gene(s, u, c, percent, fit_scaling=True, tmax=1):
     mask_s = s >= np.percentile(s_, percent, axis=0)
     mask_u = u >= np.percentile(u_, percent, axis=0)
     mask = mask_s & mask_u & mask_c
-    if not np.any(mask):
+    if np.sum(mask) < 10:
         mask = mask_s & mask_c
-    if not np.any(mask):
+    if np.sum(mask) < 10:
         mask = mask_s
 
     # initialize alpha, beta and gamma
@@ -200,7 +226,7 @@ def init_gene(s, u, c, percent, fit_scaling=True, tmax=1):
     return alpha_c, alpha, beta, gamma, t_latent, c0_, u0_, s0_, t_, scaling_c, scaling
 
 
-def init_params(data, percent, fit_scaling=True, tmax=1):
+def init_params(data, percent, fit_scaling=True, global_std=False, tmax=1):
     ngene = data.shape[1]//3
     c = data[:, :ngene]
     u = data[:, ngene:ngene*2]
@@ -217,11 +243,11 @@ def init_params(data, percent, fit_scaling=True, tmax=1):
     cpred, upred, spred = np.zeros_like(u), np.zeros_like(u), np.zeros_like(u)
 
     for i in range(ngene):
-        si, ui, ci = s[:, i], u[:, i], c[:, i]
-        sfilt = si[(si > 0) & (ui > 0) & (ci > 0)]
-        ufilt = ui[(si > 0) & (ui > 0) & (ci > 0)]
+        ci, ui, si = c[:, i], u[:, i], s[:, i]
         cfilt = ci[(si > 0) & (ui > 0) & (ci > 0)]
-        if (len(sfilt) > 3) and (len(ufilt) > 3) and (len(cfilt) > 3):
+        ufilt = ui[(si > 0) & (ui > 0) & (ci > 0)]
+        sfilt = si[(si > 0) & (ui > 0) & (ci > 0)]
+        if (len(sfilt) > 5):
             out = init_gene(sfilt, ufilt, cfilt, percent, fit_scaling, tmax)
             alpha_c, alpha, beta, gamma, t_, c0_, u0_, s0_, ts_, scaling_c, scaling = out
             params[i, :] = np.array([alpha_c, alpha, beta, gamma, scaling_c, scaling])
@@ -241,19 +267,28 @@ def init_params(data, percent, fit_scaling=True, tmax=1):
                                                 params[i, 2],
                                                 params[i, 3],
                                                 ts[i])
+
         cpred[:, i] = cpred_i * params[i, 4]
         upred[:, i] = upred_i * params[i, 5]
         spred[:, i] = spred_i
 
-    dist_c = c - cpred
-    dist_u = u - upred
-    dist_s = s - spred
-    sigma_c = np.clip(np.std(dist_c, 0), 0.01, None)
-    sigma_u = np.clip(np.std(dist_u, 0), 0.01, None)
-    sigma_s = np.clip(np.std(dist_s, 0), 0.01, None)
-    sigma_c[np.isnan(sigma_c)] = 0.01
-    sigma_u[np.isnan(sigma_u)] = 0.01
-    sigma_s[np.isnan(sigma_s)] = 0.01
+    if global_std:
+        # c[c == 0] = np.nan
+        # u[u == 0] = np.nan
+        # s[s == 0] = np.nan
+        sigma_c = np.clip(np.nanstd(c, 0), 0.1, None)
+        sigma_u = np.clip(np.nanstd(u, 0), 0.1, None)
+        sigma_s = np.clip(np.nanstd(s, 0), 0.1, None)
+    else:
+        dist_c = c - cpred
+        dist_u = u - upred
+        dist_s = s - spred
+        sigma_c = np.clip(np.std(dist_c, 0), 0.1, None)
+        sigma_u = np.clip(np.std(dist_u, 0), 0.1, None)
+        sigma_s = np.clip(np.std(dist_s, 0), 0.1, None)
+    sigma_c[np.isnan(sigma_c)] = 0.1
+    sigma_u[np.isnan(sigma_u)] = 0.1
+    sigma_s[np.isnan(sigma_s)] = 0.1
 
     alpha_c, alpha, beta, gamma = params[:, 0], params[:, 1], params[:, 2], params[:, 3]
     scaling_c, scaling, = params[:, 4], params[:, 5]
@@ -543,9 +578,9 @@ def compute_quantile_scores(adata, n_pcs=30, n_neighbors=30):
     quantile_scores_2bit[:, :, 1] = csr_matrix.dot(conn_norm, quantile_scores_2bit[:, :, 1])
 
     if np.any(np.isnan(quantile_scores_2bit)):
-        print('nan found')
-    if np.any(quantile_scores_2bit == np.inf):
-        print('inf found')
+        print('nan found during ellipse fit')
+    if np.any(np.isinf(quantile_scores_2bit)):
+        print('inf found during ellipse fit')
 
     adata.layers['quantile_scores'] = quantile_scores
     adata.layers['quantile_scores_1st_bit'] = quantile_scores_2bit[:, :, 0]

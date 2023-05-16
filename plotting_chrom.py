@@ -366,11 +366,13 @@ def plot_phase(c, u, s,
                cpred, upred, spred,
                title,
                by='us',
+               t=None,
                track_idx=None,
                labels=None,
                types=None,
                save=None,
-               plot_pred=True):
+               plot_pred=True,
+               show=False):
     fig, ax = plt.subplots(figsize=(6, 6), facecolor='white')
     if labels is None or types is None:
         if by == 'us':
@@ -381,13 +383,25 @@ def plot_phase(c, u, s,
         colors = get_colors(len(types), None)
         for i, type_ in enumerate(types):
             if by == 'us':
-                ax.scatter(s[labels == i], u[labels == i], color=colors[i % len(colors)], alpha=0.3, label=type_)
+                if t is not None:
+                    ax.scatter(s[labels == i], u[labels == i], color=colors[i % len(colors)], alpha=0.2, label=type_, s=10)
+                else:
+                    ax.scatter(s[labels == i], u[labels == i], color=colors[i % len(colors)], alpha=0.4, label=type_)
             else:
-                ax.scatter(u[labels == i], c[labels == i], color=colors[i % len(colors)], alpha=0.3, label=type_)
+                if t is not None:
+                    ax.scatter(u[labels == i], c[labels == i], color=colors[i % len(colors)], alpha=0.2, label=type_, s=10)
+                else:
+                    ax.scatter(u[labels == i], c[labels == i], color=colors[i % len(colors)], alpha=0.4, label=type_)
     if by == 'us':
-        ax.plot(spred, upred, 'k.', label="ode")
+        if t is None:
+            ax.scatter(spred, upred, c='black', label="ode", s=20)
+        else:
+            ax.scatter(spred, upred, c=t, label="ode", cmap='RdBu_r', s=20)
     else:
-        ax.plot(upred, cpred, 'k.', label="ode")
+        if t is None:
+            ax.scatter(upred, cpred, c='black', label="ode", s=20)
+        else:
+            ax.scatter(upred, cpred, c=t, label="ode", cmap='RdBu_r', s=20)
 
     if plot_pred:
         if track_idx is None:
@@ -404,9 +418,9 @@ def plot_phase(c, u, s,
 
         for i in range(0, len(s_comb), 2):
             if by == 'us':
-                ax.plot(s_comb[i:i+2], u_comb[i:i+2], 'k-', linewidth=0.8)
+                ax.plot(s_comb[i:i+2], u_comb[i:i+2], 'k-', linewidth=0.5, alpha=0.5)
             else:
-                ax.plot(u_comb[i:i+2], c_comb[i:i+2], 'k-', linewidth=0.8)
+                ax.plot(u_comb[i:i+2], c_comb[i:i+2], 'k-', linewidth=0.5, alpha=0.5)
     ax.set_xlabel("S" if by == 'us' else "U", fontsize=18)
     ax.set_ylabel("U" if by == 'us' else "C", fontsize=18)
 
@@ -420,7 +434,10 @@ def plot_phase(c, u, s,
                      loc='center')
     fig.suptitle(title)
 
-    save_fig(fig, save, (lgd,))
+    if show:
+        plt.show()
+    else:
+        save_fig(fig, save, (lgd,))
 
 
 def _plot_heatmap(ax,
