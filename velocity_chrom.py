@@ -9,7 +9,6 @@ def rna_velocity_vae(adata,
                      key,
                      batch_key=None,
                      use_raw=False,
-                     use_scv_genes=False,
                      sigma=None,
                      approx=False,
                      return_copy=False):
@@ -31,20 +30,24 @@ def rna_velocity_vae(adata,
         alpha = np.zeros((n_batch, adata.n_vars))
         beta = np.zeros((n_batch, adata.n_vars))
         gamma = np.zeros((n_batch, adata.n_vars))
+        scaling_c = np.zeros((n_batch, adata.n_vars))
         for i in range(n_batch):
             alpha_c[i, :] = adata.var[f"{key}_alpha_c_{i}"].to_numpy()
             alpha[i, :] = adata.var[f"{key}_alpha_{i}"].to_numpy()
             beta[i, :] = adata.var[f"{key}_beta_{i}"].to_numpy()
             gamma[i, :] = adata.var[f"{key}_gamma_{i}"].to_numpy()
+            scaling_c[i, :] = adata.var[f"{key}_scaling_c_{i}"].to_numpy()
         alpha_c = np.dot(onehot, alpha_c)
         alpha = np.dot(onehot, alpha)
         beta = np.dot(onehot, beta)
         gamma = np.dot(onehot, gamma)
+        scaling_c = np.dot(onehot, scaling_c)
     else:
         alpha_c = adata.var[f"{key}_alpha_c"].to_numpy()
         alpha = adata.var[f"{key}_alpha"].to_numpy()
         beta = adata.var[f"{key}_beta"].to_numpy()
         gamma = adata.var[f"{key}_gamma"].to_numpy()
+        scaling_c = adata.var[f"{key}_scaling_c"].to_numpy()
     t = adata.obs[f"{key}_time"].to_numpy()
     t0 = adata.obs[f"{key}_t0"].to_numpy()
     c0 = adata.layers[f"{key}_c0"]
@@ -54,7 +57,6 @@ def rna_velocity_vae(adata,
     if use_raw:
         c, u, s = adata_atac.layers['Mc'], adata.layers['Mu'], adata.layers['Ms']
     else:
-        scaling_c = adata.var[f"{key}_scaling_c"].to_numpy()
         scaling = adata.var[f"{key}_scaling"].to_numpy()
         if f"{key}_chat" in adata.layers and f"{key}_uhat" in adata.layers and f"{key}_shat" in adata.layers:
             c, u, s = adata.layers[f"{key}_chat"], adata.layers[f"{key}_uhat"], adata.layers[f"{key}_shat"]
@@ -83,8 +85,6 @@ def rna_velocity_vae(adata,
     adata.layers[f"{key}_velocity"] = v
     adata.layers[f"{key}_velocity_u"] = vu
     adata.layers[f"{key}_velocity_c"] = vc
-    if use_scv_genes:
-        gene_mask = np.isnan(adata.var['fit_scaling'].to_numpy())
-        v[:, gene_mask] = np.nan
+    adata.var[f'{key}_velocity_genes'] = True
     if return_copy:
         return vc, vu, v, c, u, s

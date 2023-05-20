@@ -10,6 +10,7 @@ from scipy.spatial import KDTree
 from scipy.sparse import csr_matrix
 from scipy.stats import dirichlet, kstest
 import scanpy as sc
+from tqdm.notebook import tqdm_notebook
 from .model_util import sample_dir_mix, assign_gene_mode_binary
 
 
@@ -462,6 +463,87 @@ def knn_approx(c, u, s, c0, u0, s0, k):
     knn_model.fit(x_pca)
     knn = knn_model.kneighbors(x0_pca, return_distance=False)
     return knn.astype(int)
+
+
+def _hist_equal(t, t_query, perc=0.95, n_bin=51):
+    # Perform histogram equalization across all local times.
+    tmax = t.max() - t.min()
+    t_ub = np.quantile(t, perc)
+    t_lb = t.min()
+    delta_t = (t_ub - t_lb)/(n_bin-1)
+    bins = [t_lb+i*delta_t for i in range(n_bin)]+[t.max()+0.01]
+    pdf_t, edges = np.histogram(t, bins, density=True)
+    pt, edges = np.histogram(t, bins, density=False)
+
+    # Perform histogram equalization
+    cdf_t = np.concatenate(([0], np.cumsum(pt)))
+    cdf_t = cdf_t/cdf_t[-1]
+    t_out = np.zeros((len(t)))
+    t_out_query = np.zeros((len(t_query)))
+    for i in range(n_bin):
+        mask = (t >= bins[i]) & (t < bins[i+1])
+        t_out[mask] = (cdf_t[i] + (t[mask]-bins[i])*pdf_t[i])*tmax
+        mask_q = (t_query >= bins[i]) & (t_query < bins[i+1])
+        t_out_query[mask_q] = (cdf_t[i] + (t_query[mask_q]-bins[i])*pdf_t[i])*tmax
+    return t_out, t_out_query
+
+
+def knnx0_index(t,
+                z,
+                t_query,
+                z_query,
+                dt,
+                k,
+                adaptive=0.0,
+                std_t=None,
+                forward=False,
+                hist_eq=False):
+    ############################################################
+    # Same functionality as knnx0, but returns the neighbor index
+    ############################################################
+    Nq = len(t_query)
+    n1 = 0
+    len_avg = 0
+    if hist_eq:
+        t, t_query = _hist_equal(t, t_query)
+    neighbor_index = []
+    for i in tqdm_notebook(range(Nq)):
+        if adaptive > 0:
+            dt_r, dt_l = adaptive*std_t[i], adaptive*std_t[i] + (dt[1]-dt[0])
+        else:
+            dt_r, dt_l = dt[0], dt[1]
+        if forward:
+            t_ub, t_lb = t_query[i] + dt_l, t_query[i] + dt_r
+        else:
+            t_ub, t_lb = t_query[i] - dt_r, t_query[i] - dt_l
+        indices = np.where((t >= t_lb) & (t < t_ub))[0]
+        k_ = len(indices)
+        delta_t = dt[1] - dt[0]  # increment / decrement of the time window boundary
+        while k_ < k and t_lb > t.min() - (dt[1] - dt[0]) and t_ub < t.max() + (dt[1] - dt[0]):
+            if forward:
+                t_lb = t_query[i]
+                t_ub = t_ub + delta_t
+            else:
+                t_lb = t_lb - delta_t
+                t_ub = t_query[i]
+            indices = np.where((t >= t_lb) & (t < t_ub))[0]  # filter out cells in the bin
+            k_ = len(indices)
+        len_avg = len_avg + k_
+        if k_ > 0:
+            k_neighbor = k if k_ > k else max(1, k_//2)
+            knn_model = NearestNeighbors(n_neighbors=k_neighbor)
+            knn_model.fit(z[indices])
+            dist, ind = knn_model.kneighbors(z_query[i:i+1])
+            if k_neighbor > 1:
+                neighbor_index.append(indices[ind.squeeze()].astype(int))
+            else:
+                neighbor_index.append(np.array([indices[ind.squeeze()].astype(int)]))
+        else:
+            neighbor_index.append([])
+            n1 = n1+1
+    print(f"Percentage of Invalid Sets: {n1/Nq:.3f}")
+    print(f"Average Set Size: {len_avg//Nq}")
+    return neighbor_index
 
 
 def get_x0(c,

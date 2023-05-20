@@ -87,27 +87,36 @@ def plot_sig_(t,
                 order = np.argsort(tpred[mask_type])
                 ax[0].plot(tpred[mask_type][order],
                            cpred[mask_type][order],
-                           '-',
+                           '.',
                            color=colors[i % len(colors)],
-                           label=type_,
-                           linewidth=1.5)
+                           alpha=0.8,
+                           label=type_)
                 ax[1].plot(tpred[mask_type][order],
                            upred[mask_type][order],
-                           '-',
+                           '.',
                            color=colors[i % len(colors)],
-                           label=type_,
-                           linewidth=1.5)
+                           alpha=0.8,
+                           label=type_)
                 ax[2].plot(tpred[mask_type][order],
                            spred[mask_type][order],
-                           '-',
+                           '.',
                            color=colors[i % len(colors)],
-                           label=type_,
-                           linewidth=1.5)
+                           alpha=0.8,
+                           label=type_)
         else:
             order = np.argsort(tpred)
-            ax[0].plot(tpred[order], cpred[order], 'k-', linewidth=1.5)
-            ax[1].plot(tpred[order], upred[order], 'k-', linewidth=1.5)
-            ax[2].plot(tpred[order], spred[order], 'k-', linewidth=1.5)
+            ax[0].plot(tpred[order], cpred[order], 'k.')
+            ax[1].plot(tpred[order], upred[order], 'k.')
+            ax[2].plot(tpred[order], spred[order], 'k.')
+
+        perm = np.random.permutation(len(s))
+        Nsample = 100
+        idx = perm[:Nsample]
+
+        for i in idx:
+            ax[0].plot([tpred[i], t[i]], [cpred[i], c[i]], 'k-', linewidth=0.5, alpha=0.6)
+            ax[1].plot([tpred[i], t[i]], [upred[i], u[i]], 'k-', linewidth=0.5, alpha=0.6)
+            ax[2].plot([tpred[i], t[i]], [spred[i], s[i]], 'k-', linewidth=0.5, alpha=0.6)
 
     if 'ts' in kwargs and 't_trans' in kwargs:
         ts = kwargs['ts']
@@ -135,7 +144,7 @@ def plot_sig_(t,
     ax[2].set_title('Spliced, VAE')
 
     lgd = fig.legend(handles, labels, fontsize=15, markerscale=5, bbox_to_anchor=(1.0, 1.0), loc='upper left')
-    fig.suptitle(title, fontsize=28)
+    fig.suptitle(title, y=0.99, fontsize=20)
     plt.tight_layout()
 
     save_fig(fig, save, (lgd,))
@@ -405,8 +414,7 @@ def plot_phase(c, u, s,
 
     if plot_pred:
         if track_idx is None:
-            rng = np.random.default_rng()
-            perm = rng.permutation(len(s))
+            perm = np.random.permutation(len(s))
             Nsample = 50
             s_comb = np.stack([s[perm[:Nsample]], spred[perm[:Nsample]]]).ravel('F')
             u_comb = np.stack([u[perm[:Nsample]], upred[perm[:Nsample]]]).ravel('F')
