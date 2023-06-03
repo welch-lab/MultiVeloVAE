@@ -90,7 +90,7 @@ def pred_exp(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
     spred = s0*expg + rho*alpha*kc/gamma*(1-expg)
     spred += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     spred += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
-    return F.relu(cpred), F.relu(upred), F.relu(spred)
+    return F.sigmoid(cpred), F.relu(upred), F.relu(spred)
 
 
 def pred_exp_backward(tau, c, u, s, kc, alpha_c, rho, alpha, beta, gamma):
@@ -175,7 +175,7 @@ def init_gene(s, u, c, percent, fit_scaling=True, tmax=1):
     std_u, std_s = np.std(u), np.std(s)
     scaling = std_u / std_s if fit_scaling else 1.0
     u = u/scaling
-    scaling_c = np.max(c)
+    scaling_c = np.clip(np.max(c), 1e-3, None)
     c = c/scaling_c
     std_c_ = np.std(c)
 
@@ -227,12 +227,8 @@ def init_gene(s, u, c, percent, fit_scaling=True, tmax=1):
     return alpha_c, alpha, beta, gamma, t_latent, c0_, u0_, s0_, t_, scaling_c, scaling
 
 
-def init_params(data, percent, fit_scaling=True, global_std=False, tmax=1):
-    ngene = data.shape[1]//3
-    c = data[:, :ngene]
-    u = data[:, ngene:ngene*2]
-    s = data[:, ngene*2:]
-
+def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1):
+    ngene = u.shape[1]
     params = np.ones((ngene, 6))
     params[:, 0] = 0.1
     params[:, 1] = np.clip(np.max(u, 0), 0.001, None)

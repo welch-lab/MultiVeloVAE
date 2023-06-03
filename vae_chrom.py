@@ -1,6 +1,6 @@
 import os
 import time
-import scipy
+from scipy.sparse import issparse
 import numpy as np
 import torch
 import torch.nn as nn
@@ -33,33 +33,32 @@ class Encoder(nn.Module):
                  t_network=False,
                  checkpoint=None):
         super(Encoder, self).__init__()
+        self.t_network = t_network
         # self.fc1 = nn.Linear(Cin+dim_cond, N1)
-        # self.bn1 = nn.BatchNorm1d(num_features=N1)
+        # self.bn1 = nn.BatchNorm1d(N1)
         # self.dpt1 = nn.Dropout(p=0.2)
         # self.fc2 = nn.Linear(N1, N2)
-        # self.bn2 = nn.BatchNorm1d(num_features=N2)
+        # self.bn2 = nn.BatchNorm1d(N2)
         # self.dpt2 = nn.Dropout(p=0.2)
-
         # self.net = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1,
-        #                          self.fc2, self.bn2, nn.LeakyReLU(), self.dpt2,
-        #                          )
+        #                          self.fc2, self.bn2, nn.LeakyReLU(), self.dpt2)
         self.fc1 = nn.Linear(Cin+dim_cond, N1)
-        self.bn1 = nn.BatchNorm1d(num_features=N1)
+        self.bn1 = nn.BatchNorm1d(N1)
         self.dpt1 = nn.Dropout(p=0.2)
-
         self.net = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1)
 
         # self.fc_mu_t = nn.Linear(N2, dim_z if t_network else 1)
         # self.fc_std_t = nn.Linear(N2, dim_z if t_network else 1)
         self.fc_mu_t = nn.Linear(N1, dim_z if t_network else 1)
         self.fc_std_t = nn.Linear(N1, dim_z if t_network else 1)
-        # self.spt = nn.Softplus()
-        self.spt1 = nn.Softplus(0.5)
+        self.spt = nn.Softplus()
+        self.spt1 = nn.Softplus()
+
         # self.fc_mu_z = nn.Linear(N2, dim_z)
         # self.fc_std_z = nn.Linear(N2, dim_z)
         self.fc_mu_z = nn.Linear(N1, dim_z)
         self.fc_std_z = nn.Linear(N1, dim_z)
-        self.spt2 = nn.Softplus(0.5)
+        self.spt2 = nn.Softplus()
 
         if checkpoint is not None:
             self.load_state_dict(torch.load(checkpoint))
@@ -82,8 +81,10 @@ class Encoder(nn.Module):
         if condition is not None:
             data_in = torch.cat((data_in, condition), 1)
         h = self.net(data_in)
-        mu_tx, std_tx = self.fc_mu_t(h), self.spt1(self.fc_std_t(h))
-        mu_zx, std_zx = self.fc_mu_z(h), self.spt2(self.fc_std_z(h))
+        mu_tx = self.fc_mu_t(h) if self.t_network else self.spt(self.fc_mu_t(h))
+        std_tx = self.spt1(self.fc_std_t(h))
+        mu_zx = self.fc_mu_z(h)
+        std_zx = self.spt2(self.fc_std_z(h))
         return mu_tx, std_tx, mu_zx, std_zx
 
 
@@ -94,6 +95,7 @@ class Decoder(nn.Module):
                  train_idx,
                  dim_z,
                  dim_cond=0,
+                 batch_idx=None,
                  N1=256,
                  N2=512,
                  parallel_arch=True,
@@ -116,6 +118,7 @@ class Decoder(nn.Module):
         if dim_cond == 1:
             dim_cond = 0
         self.cvae = True if dim_cond > 1 else False
+        self.batch = batch_idx
         self.parallel_arch = parallel_arch
         self.t_network = t_network
         self.is_full_vb = full_vb
@@ -135,46 +138,42 @@ class Decoder(nn.Module):
 
         # self.fc1 = nn.Linear(dim_z+dim_cond, N1)
         # self.bn1 = nn.BatchNorm1d(num_features=N1)
-        # self.dpt1 = nn.Dropout(p=0.2)
+        # self.dpt1 = nn.Dropout(p=0.25)
         # self.fc2 = nn.Linear(N1, N2)
         # self.bn2 = nn.BatchNorm1d(num_features=N2)
-        # self.dpt2 = nn.Dropout(p=0.2)
+        # self.dpt2 = nn.Dropout(p=0.25)
         # self.fc_out1 = nn.Linear(N2, G)
-
         # self.net_rho = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1,
         #                              self.fc2, self.bn2, nn.LeakyReLU(), self.dpt2,
         #                              self.fc_out1, nn.Hardtanh(0, 1))
 
         # self.fc3 = nn.Linear(dim_z+dim_cond if self.parallel_arch else G, N1)
         # self.bn3 = nn.BatchNorm1d(num_features=N1)
-        # self.dpt3 = nn.Dropout(p=0.2)
+        # self.dpt3 = nn.Dropout(p=0.25)
         # self.fc4 = nn.Linear(N1, N2)
         # self.bn4 = nn.BatchNorm1d(num_features=N2)
-        # self.dpt4 = nn.Dropout(p=0.2)
+        # self.dpt4 = nn.Dropout(p=0.25)
         # self.fc_out2 = nn.Linear(N2, G)
-
         # self.net_kc = nn.Sequential(self.fc3, self.bn3, nn.LeakyReLU(), self.dpt3,
         #                             self.fc4, self.bn4, nn.LeakyReLU(), self.dpt4,
         #                             self.fc_out2, nn.Hardtanh(0, 1))
 
         self.fc1 = nn.Linear(dim_z+dim_cond, N2)
-        self.bn1 = nn.BatchNorm1d(num_features=N2)
+        self.bn1 = nn.BatchNorm1d(N2)
         self.dpt1 = nn.Dropout(p=0.2)
         self.fc_out1 = nn.Linear(N2, G)
-
         self.net_rho = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1,
                                      self.fc_out1, nn.Sigmoid())
 
         self.fc2 = nn.Linear(dim_z+dim_cond if self.parallel_arch else G, N2)
-        self.bn2 = nn.BatchNorm1d(num_features=N2)
+        self.bn2 = nn.BatchNorm1d(N2)
         self.dpt2 = nn.Dropout(p=0.2)
         self.fc_out2 = nn.Linear(N2, G)
-
         self.net_kc = nn.Sequential(self.fc2, self.bn2, nn.LeakyReLU(), self.dpt2,
                                     self.fc_out2, nn.Sigmoid())
 
         if self.t_network:
-            self.net_t = nn.Linear(dim_z+dim_cond, 1)
+            self.net_t = nn.Linear(dim_z, 1)
 
         self.rho, self.kc = None, None
 
@@ -183,7 +182,7 @@ class Decoder(nn.Module):
             self.alpha = nn.Parameter(torch.empty(self.params_shape))
             self.beta = nn.Parameter(torch.empty(self.params_shape))
             self.gamma = nn.Parameter(torch.empty(self.params_shape))
-            self.scaling_c = nn.Parameter(torch.empty(self.params_shape))
+            self.scaling_c = nn.Parameter(torch.empty(G))
 
             # self.register_buffer('scaling_c', torch.empty(G))
             self.register_buffer('scaling', torch.empty(G))
@@ -200,9 +199,18 @@ class Decoder(nn.Module):
 
             self.load_state_dict(torch.load(self.checkpoint))
         else:
-            c = self.adata_atac.layers['Mc'][self.train_idx]
-            u = self.adata.layers['Mu'][self.train_idx]
-            s = self.adata.layers['Ms'][self.train_idx]
+            if issparse(self.adata_atac.layers['Mc']):
+                c = self.adata_atac.layers['Mc'].A[self.train_idx]
+            else:
+                c = self.adata_atac.layers['Mc'][self.train_idx]
+            if issparse(self.adata.layers['Mu']):
+                u = self.adata.layers['Mu'].A[self.train_idx]
+            else:
+                u = self.adata.layers['Mu'][self.train_idx]
+            if issparse(self.adata.layers['Ms']):
+                s = self.adata.layers['Ms'].A[self.train_idx]
+            else:
+                s = self.adata.layers['Ms'][self.train_idx]
             self.init_weights()
             self.init_ode(c, u, s, p)
 
@@ -256,8 +264,7 @@ class Decoder(nn.Module):
 
     def init_ode(self, c, u, s, p):
         G = self.adata.n_vars
-        x = np.concatenate((c, u, s), 1)
-        out = init_params(x, p, fit_scaling=True, global_std=self.global_std, tmax=self.tmax)
+        out = init_params(c, u, s, p, fit_scaling=True, global_std=self.global_std, tmax=self.tmax)
         alpha_c, alpha, beta, gamma, scaling_c, scaling, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, t, cpred, upred, spred = out
 
         if self.init_method == 'tprior':
@@ -301,21 +308,6 @@ class Decoder(nn.Module):
                 toff = get_ts_global(self.t_init, u/scaling, s, 95)
                 alpha_c, alpha, beta, gamma, ton = reinit_params(c/scaling_c, u/scaling, s, self.t_init, toff)
 
-            self.alpha_c = self.to_param(alpha_c)
-            self.alpha = self.to_param(alpha)
-            self.beta = self.to_param(beta)
-            self.gamma = self.to_param(gamma)
-            self.scaling_c = self.to_param(scaling_c)
-
-            self.c0 = nn.Parameter(torch.tensor(np.log(c0+1e-10) if self.log_params else c0))
-            self.u0 = nn.Parameter(torch.tensor(np.log(u0+1e-10) if self.log_params else u0))
-            self.s0 = nn.Parameter(torch.tensor(np.log(s0+1e-10) if self.log_params else s0))
-
-            if self.init_ton_zero or (not self.reinit):
-                self.ton = nn.Parameter(torch.zeros(G))
-            else:
-                self.ton = nn.Parameter(torch.tensor(ton+1e-10))
-
         else:
             print("Initialization using the steady-state and dynamical models.")
             self.alpha_c_ = alpha_c
@@ -344,22 +336,29 @@ class Decoder(nn.Module):
                 toff = get_ts_global(self.t_init, c/scaling_c, u/scaling, s, 95)
                 alpha_c, alpha, beta, gamma, ton = reinit_params(c/scaling_c, u/scaling, s, self.t_init, toff)
 
-            self.alpha_c = self.to_param(alpha_c)
-            self.alpha = self.to_param(alpha)
-            self.beta = self.to_param(beta)
-            self.gamma = self.to_param(gamma)
-            self.scaling_c = self.to_param(scaling_c)
+        if self.cvae:
+            print("Computing scaling factors for each batch class.")
+            scaling_c = np.ones((self.dim_cond, G))
+            scaling = np.ones((self.dim_cond, G))
+            for i in range(self.dim_cond):
+                filt = self.batch[self.train_idx] == i
+                out = init_params(c[filt], u[filt], s[filt], p, fit_scaling=True, global_std=self.global_std, tmax=self.tmax)
+                scaling_c[i], scaling[i] = out[4], out[5]
 
-            self.c0 = nn.Parameter(torch.tensor(np.log(c0+1e-10) if self.log_params else c0))
-            self.u0 = nn.Parameter(torch.tensor(np.log(u0+1e-10) if self.log_params else u0))
-            self.s0 = nn.Parameter(torch.tensor(np.log(s0+1e-10) if self.log_params else s0))
+        self.alpha_c = self.to_param(alpha_c)
+        self.alpha = self.to_param(alpha)
+        self.beta = self.to_param(beta)
+        self.gamma = self.to_param(gamma)
+        self.scaling_c = nn.Parameter(torch.tensor(np.log(scaling_c) if self.log_params else scaling_c))
 
-            if self.init_ton_zero or (not self.reinit):
-                self.ton = nn.Parameter(torch.zeros(G))
-            else:
-                self.ton = nn.Parameter(torch.tensor(ton+1e-10))
+        self.c0 = nn.Parameter(torch.tensor(np.log(c0+1e-10) if self.log_params else c0))
+        self.u0 = nn.Parameter(torch.tensor(np.log(u0+1e-10) if self.log_params else u0))
+        self.s0 = nn.Parameter(torch.tensor(np.log(s0+1e-10) if self.log_params else s0))
 
-        self.register_buffer('scaling_c_', torch.tensor(scaling_c))
+        if self.init_ton_zero or (not self.reinit):
+            self.ton = nn.Parameter(torch.zeros(G))
+        else:
+            self.ton = nn.Parameter(torch.tensor(ton+1e-10))
         self.register_buffer('scaling', torch.tensor(scaling))
         self.register_buffer('sigma_c', torch.tensor(sigma_c))
         self.register_buffer('sigma_u', torch.tensor(sigma_u))
@@ -396,32 +395,29 @@ class Decoder(nn.Module):
                     alpha = self.alpha[:, 0] + eps[1]*(self.alpha[:, 1].exp())
                     beta = self.beta[:, 0] + eps[2]*(self.beta[:, 1].exp())
                     gamma = self.gamma[:, 0] + eps[3]*(self.gamma[:, 1].exp())
-                    scaling_c = self.scaling_c[:, 0] + eps[4]*(self.scaling_c[:, 1].exp())
                 else:
                     alpha_c = self.alpha_c[0] + eps[0]*(self.alpha_c[1].exp())
                     alpha = self.alpha[0] + eps[1]*(self.alpha[1].exp())
                     beta = self.beta[0] + eps[2]*(self.beta[1].exp())
                     gamma = self.gamma[0] + eps[3]*(self.gamma[1].exp())
-                    scaling_c = self.scaling_c[0] + eps[4]*(self.scaling_c[1].exp())
             else:
                 if self.cvae:
                     alpha_c = self.alpha_c[:, 0]
                     alpha = self.alpha[:, 0]
                     beta = self.beta[:, 0]
                     gamma = self.gamma[:, 0]
-                    scaling_c = self.scaling_c[:, 0]
                 else:
                     alpha_c = self.alpha_c[0]
                     alpha = self.alpha[0]
                     beta = self.beta[0]
                     gamma = self.gamma[0]
-                    scaling_c = self.scaling_c[0]
         else:
             alpha_c = self.alpha_c
             alpha = self.alpha
             beta = self.beta
             gamma = self.gamma
-            scaling_c = self.scaling_c
+        scaling_c = self.scaling_c
+        scaling = self.scaling
 
         if self.log_params:
             alpha_c = alpha_c.exp()
@@ -442,21 +438,23 @@ class Decoder(nn.Module):
             beta = torch.mm(condition, beta)
             gamma = torch.mm(condition, gamma)
             scaling_c = torch.mm(condition, scaling_c)
+            scaling = torch.mm(condition, scaling)
 
-        return alpha_c, alpha, beta, gamma, scaling_c
+        return alpha_c, alpha, beta, gamma, scaling_c, scaling
 
     def forward(self, t, z, c0=None, u0=None, s0=None, t0=None, condition=None, neg_slope=0.0, sample=True, four_basis=False, return_velocity=False, use_input_time=False, backward=False):
-        alpha_c, alpha, beta, gamma, scaling_c = self.reparameterize(condition, sample)
+        alpha_c, alpha, beta, gamma, scaling_c, scaling = self.reparameterize(condition, sample)
         if condition is None:
             self.rho = self.net_rho(z)
             self.kc = self.net_kc(z if self.parallel_arch else self.rho)
             # t_ = F.sigmoid(self.net_t(t) if self.t_network and (not use_input_time) else t) * self.tmax
-            t_ = self.net_t(t) if self.t_network and (not use_input_time) else t
+            # t_ = self.net_t(t) if self.t_network and (not use_input_time) else t
         else:
             self.rho = self.net_rho(torch.cat((z, condition), 1))
             self.kc = self.net_kc(torch.cat((z, condition), 1) if self.parallel_arch else self.rho)
             # t_ = F.sigmoid(self.net_t(torch.cat((t, condition), 1)) if self.t_network and (not use_input_time) else t) * self.tmax
-            t_ = self.net_t(torch.cat((t, condition), 1)) if self.t_network and (not use_input_time) else t
+            # t_ = self.net_t(torch.cat((t, condition), 1)) if self.t_network and (not use_input_time) else t
+        t_ = self.net_t(t) if self.t_network and (not use_input_time) else t
         if backward:
             pred_func = pred_exp_backward
         else:
@@ -498,7 +496,7 @@ class Decoder(nn.Module):
         else:
             chat, uhat, shat = pred_func(F.leaky_relu(t_ - t0, neg_slope),
                                          c0/scaling_c,
-                                         u0/self.scaling,
+                                         u0/scaling,
                                          s0,
                                          self.kc,
                                          alpha_c,
@@ -507,7 +505,7 @@ class Decoder(nn.Module):
                                          beta,
                                          gamma)
         chat = chat * scaling_c
-        uhat = uhat * self.scaling
+        uhat = uhat * scaling
 
         if return_velocity:
             vc = self.kc * alpha_c - alpha_c * chat
@@ -522,7 +520,7 @@ class VAEChrom():
     def __init__(self,
                  adata,
                  adata_atac,
-                 dim_z=20,
+                 dim_z=5,
                  batch_key=None,
                  ref_batch=None,
                  device='cpu',
@@ -532,7 +530,8 @@ class VAEChrom():
                  t_network=False,
                  velocity_continuity=False,
                  four_basis=False,
-                 refine_velocity=False,
+                 run_2nd_stage=True,
+                 refine_velocity=True,
                  tmax=1,
                  reinit_params=False,
                  init_method='steady',
@@ -540,7 +539,7 @@ class VAEChrom():
                  tprior=None,
                  init_ton_zero=True,
                  unit_scale=True,
-                 use_loss_std=True,
+                 use_loss_std=False,
                  log_params=False,
                  learning_rate=None,
                  checkpoints=[None, None],
@@ -549,9 +548,14 @@ class VAEChrom():
                  cluster_key='clusters',
                  figure_path='figures',
                  embed=None):
-        if ('Mc' not in adata_atac.layers) or ('Mu' not in adata.layers) or ('Ms') not in adata.layers:
-            print('Chromatin/Unspliced/Spliced count matrices not found in the layers! Exit the program...')
+        if ('Mc' not in adata_atac.layers) or ('Mu' not in adata.layers) or ('Ms' not in adata.layers):
+            print('Chromatin/Unspliced/Spliced count matrices not found in the layers! Exiting the program...')
             return
+        if np.any(adata_atac.layers['Mc'] < 0) or np.any(adata.layers['Mu'] < 0) or np.any(adata.layers['Ms'] < 0):
+            print('Warning: negative expression values detected. Please make sure all values are non-negative.')
+
+        self.adata = adata
+        self.adata_atac = adata_atac
 
         self.is_full_vb = full_vb
         self.parallel_arch = parallel_arch
@@ -603,14 +607,15 @@ class VAEChrom():
             "n_warmup": 6,
             "weight_c": 0.6,
             "early_stop": 6,
-            "early_stop_thred": adata.n_vars*1e-3,
+            "early_stop_thred": None,  # adata.n_vars*1e-3,
             "train_test_split": 0.7,
             "neg_slope": 0.0,
             "neg_slope2": 0.01,
             "k_alt": 0,
             "train_ton": False,
+            "train_scaling": True,
             "knn_use_pred": True,
-            "run_2nd_stage": True,
+            "run_2nd_stage": run_2nd_stage,
             "velocity_continuity": velocity_continuity,
             "four_basis": four_basis,
 
@@ -623,7 +628,7 @@ class VAEChrom():
         self.encode_batch(adata)
         self.get_prior(adata)
 
-        self.encoder = Encoder(3*adata.n_vars,
+        self.encoder = Encoder(3*self.adata.n_vars,
                                dim_z,
                                dim_cond=self.n_batch,
                                N1=hidden_size[0],
@@ -631,11 +636,12 @@ class VAEChrom():
                                t_network=t_network,
                                checkpoint=checkpoints[0]).float().to(self.device)
 
-        self.decoder = Decoder(adata,
-                               adata_atac,
+        self.decoder = Decoder(self.adata,
+                               self.adata_atac,
                                self.train_idx,
                                dim_z,
                                dim_cond=self.n_batch,
+                               batch_idx=self.batch_,
                                N1=hidden_size[2],
                                N2=hidden_size[3],
                                parallel_arch=parallel_arch,
@@ -679,11 +685,10 @@ class VAEChrom():
             self.p_log_alpha = torch.tensor([[4.0], [2.0]], dtype=torch.float, device=self.device)
             self.p_log_beta = torch.tensor([[2.0], [1.0]], dtype=torch.float, device=self.device)
             self.p_log_gamma = torch.tensor([[2.0], [1.0]], dtype=torch.float, device=self.device)
-            self.p_log_scaling_c = torch.tensor([[1.0], [1.0]], dtype=torch.float, device=self.device)
-            self.p_params = [self.p_log_alpha_c, self.p_log_alpha, self.p_log_beta, self.p_log_gamma, self.p_log_scaling_c]
+            self.p_params = [self.p_log_alpha_c, self.p_log_alpha, self.p_log_beta, self.p_log_gamma]
 
         if plot_init:
-            self.plot_initial(adata, adata_atac, gene_plot, cluster_key, figure_path, embed)
+            self.plot_initial(gene_plot, cluster_key, figure_path, embed)
 
     def set_device(self, device):
         if 'cuda' in device:
@@ -697,7 +702,7 @@ class VAEChrom():
 
     def set_lr(self, adata, learning_rate):
         if learning_rate is None:
-            if scipy.sparse.issparse(adata.layers["unspliced"]):
+            if issparse(adata.layers["unspliced"]):
                 p = np.sum(adata.layers["unspliced"].A > 0) + (np.sum(adata.layers["spliced"].A > 0))
             else:
                 p = np.sum(adata.layers["unspliced"] > 0) + (np.sum(adata.layers["spliced"] > 0))
@@ -747,8 +752,8 @@ class VAEChrom():
             batch_names_raw, batch_count = np.unique(batch_raw, return_counts=True)
             self.batch_dic, self.batch_dic_rev = encode_type(batch_names_raw)
             self.n_batch = len(batch_names_raw)
-            self.batch = np.array([self.batch_dic[x] for x in batch_raw])
-            self.batch = torch.tensor(self.batch, dtype=int, device=self.device)
+            self.batch_ = np.array([self.batch_dic[x] for x in batch_raw])
+            self.batch = torch.tensor(self.batch_, dtype=int, device=self.device)
             self.batch_names = np.array([self.batch_dic[batch_names_raw[i]] for i in range(self.n_batch)])
         if isinstance(self.config['ref_batch'], int):
             self.ref_batch = self.config['ref_batch']
@@ -769,6 +774,10 @@ class VAEChrom():
             self.ref_batch = self.batch_names[np.argmax(batch_count)]
             print(f'Reference batch set to {self.ref_batch} ({batch_names_raw[self.ref_batch]}).')
         self.enable_cvae = self.n_batch > 0
+        if self.enable_cvae and 2*self.n_batch > self.config['dim_z']:
+            print('Warning: number of batch classes is larger than half of dim_z. Consider increasing dim_z.')
+        if self.enable_cvae and 10*self.n_batch < self.config['dim_z']:
+            print('Warning: number of batch classes is smaller than 1/10 of dim_z. Consider decreasing dim_z.')
 
     def get_prior(self, adata):
         if self.config['tprior'] is None:
@@ -802,28 +811,40 @@ class VAEChrom():
                 self.config[key] = config[key]
                 print(f"Warning: unknown hyperparameter: {key}")
 
-    def plot_initial(self, adata, adata_atac, gene_plot, cluster_key="clusters", figure_path="figures", embed=None):
-        cell_labels_raw = adata.obs[cluster_key].to_numpy() if cluster_key in adata.obs else np.array(['Unknown' for i in range(adata.n_obs)])
+    def plot_initial(self, gene_plot, cluster_key="clusters", figure_path="figures", embed=None):
+        cell_labels_raw = self.adata.obs[cluster_key].to_numpy() if cluster_key in self.adata.obs else np.array(['Unknown' for i in range(self.adata.n_obs)])
         cell_types_raw = np.unique(cell_labels_raw)
         label_dic, _ = encode_type(cell_types_raw)
 
         cell_labels = np.array([label_dic[x] for x in cell_labels_raw])[self.train_idx]
 
-        gind, gene_plot = get_gene_index(adata.var_names, gene_plot)
+        gind, gene_plot = get_gene_index(self.adata.var_names, gene_plot)
         os.makedirs(figure_path, exist_ok=True)
 
-        scaling_c = self.decoder.scaling_c_[gind].detach().cpu().numpy()
-        scaling = self.decoder.scaling[gind].detach().cpu().numpy()
+        if self.enable_cvae:
+            onehot = F.one_hot(self.batch, self.n_batch).detach().cpu().numpy()[self.train_idx, :]
+            if self.config['log_params']:
+                scaling_c = np.dot(onehot, np.exp(self.decoder.scaling_c.detach().cpu().numpy()))
+            else:
+                scaling_c = np.dot(onehot, F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy())
+            scaling = np.dot(onehot, self.decoder.scaling.detach().cpu().numpy())
+        else:
+            if self.config['log_params']:
+                scaling_c = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
+            else:
+                scaling_c = F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy()
+            scaling = self.decoder.scaling.detach().cpu().numpy()
+
         t = self.decoder.t_[:, gind]
-        c = adata_atac.layers['Mc'][self.train_idx, :][:, gind] / scaling_c
-        u = adata.layers['Mu'][self.train_idx, :][:, gind] / scaling
-        s = adata.layers['Ms'][self.train_idx, :][:, gind]
-        chat = self.decoder.cpred_[:, gind] / scaling_c
-        uhat = self.decoder.upred_[:, gind] / scaling
+        c = self.adata_atac.layers['Mc'][self.train_idx, :][:, gind]
+        u = self.adata.layers['Mu'][self.train_idx, :][:, gind]
+        s = self.adata.layers['Ms'][self.train_idx, :][:, gind]
+        chat = self.decoder.cpred_[:, gind]
+        uhat = self.decoder.upred_[:, gind]
         shat = self.decoder.spred_[:, gind]
 
-        if embed is not None and f'X_{embed}' in adata.obsm:
-            Xembed = adata.obsm[f"X_{embed}"]
+        if embed is not None and f'X_{embed}' in self.adata.obsm:
+            Xembed = self.adata.obsm[f"X_{embed}"]
             Xembed_train = Xembed[self.train_idx]
             plot_time(np.quantile(self.decoder.t_, 0.5, 1), Xembed_train, save=f"{figure_path}/time-init.png")
         for i in range(len(gind)):
@@ -837,6 +858,18 @@ class VAEChrom():
                      cell_labels_raw[self.train_idx],
                      gene_plot[i],
                      save=f"{figure_path}/sig-{gene_plot[i]}-init.png",
+                     sparsify=self.config['sparsify'])
+
+            plot_sig(t[:, i].squeeze(),
+                     c[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
+                     u[:, i] / (scaling[:, gind][:, i] if self.enable_cvae else scaling[gind][i]),
+                     s[:, i],
+                     chat[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
+                     uhat[:, i] / (scaling[:, gind][:, i] if self.enable_cvae else scaling[gind][i]),
+                     shat[:, i],
+                     cell_labels_raw[self.train_idx],
+                     gene_plot[i],
+                     save=f"{figure_path}/sig-scaled-{gene_plot[i]}-init.png",
                      sparsify=self.config['sparsify'])
 
             plot_phase(c[:, i],
@@ -867,14 +900,57 @@ class VAEChrom():
                        cell_types_raw,
                        save=f"{figure_path}/phase-{gene_plot[i]}-init-us.png")
 
+            plot_phase(c[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
+                       u[:, i] / (scaling[:, gind][:, i] if self.enable_cvae else scaling[gind][i]),
+                       s[:, i],
+                       chat[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
+                       uhat[:, i] / (scaling[:, gind][:, i] if self.enable_cvae else scaling[gind][i]),
+                       shat[:, i],
+                       gene_plot[i],
+                       'cu',
+                       None,
+                       None,
+                       cell_labels,
+                       cell_types_raw,
+                       save=f"{figure_path}/phase-scaled-{gene_plot[i]}-init-cu.png")
+
+            plot_phase(c[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
+                       u[:, i] / (scaling[:, gind][:, i] if self.enable_cvae else scaling[gind][i]),
+                       s[:, i],
+                       chat[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
+                       uhat[:, i] / (scaling[:, gind][:, i] if self.enable_cvae else scaling[gind][i]),
+                       shat[:, i],
+                       gene_plot[i],
+                       'us',
+                       None,
+                       None,
+                       cell_labels,
+                       cell_types_raw,
+                       save=f"{figure_path}/phase-scaled-{gene_plot[i]}-init-us.png")
+
     def forward(self, data_in, t=None, z=None, c0=None, u0=None, s0=None, t0=None, t1=None, condition=None, sample=True):
         if self.config['unit_scale']:
-            data_in_scale = torch.cat((data_in[:, :data_in.shape[1]//3]/self.decoder.sigma_c,
-                                       data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]/self.decoder.sigma_u,
-                                       data_in[:, data_in.shape[1]//3*2:]/self.decoder.sigma_s), 1)
+            sigma_c = self.decoder.sigma_c
+            sigma_u = self.decoder.sigma_u
+            sigma_s = self.decoder.sigma_s
+            data_in_scale = torch.cat((data_in[:, :data_in.shape[1]//3]/sigma_c,
+                                       data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]/sigma_u,
+                                       data_in[:, data_in.shape[1]//3*2:]/sigma_s), 1)
         else:
-            data_in_scale = torch.cat((data_in[:, :data_in.shape[1]//3]/self.decoder.scaling_c_,
-                                       data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]/self.decoder.scaling,
+            if condition is not None:
+                if self.config['log_params']:
+                    scaling_c = torch.exp(torch.mm(condition, self.decoder.scaling_c))
+                else:
+                    scaling_c = F.softplus(torch.mm(condition, self.decoder.scaling_c), 10, 2)
+                scaling = torch.mm(condition, self.decoder.scaling)
+            else:
+                if self.config['log_params']:
+                    scaling_c = torch.exp(self.decoder.scaling_c)
+                else:
+                    scaling_c = F.softplus(self.decoder.scaling_c, 10, 2)
+                scaling = self.decoder.scaling
+            data_in_scale = torch.cat((data_in[:, :data_in.shape[1]//3]/scaling_c,
+                                       data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]/scaling,
                                        data_in[:, data_in.shape[1]//3*2:]), 1)
         mu_t, std_t, mu_z, std_z = self.encoder.forward(data_in_scale, condition)
         if t is None or z is None:
@@ -1018,7 +1094,7 @@ class VAEChrom():
                            'cu',
                            t.detach().cpu().numpy().flatten(),
                            None,
-                           self.cell_labels[idx.cpu().numpy()],
+                           self.cell_labels[idx.detach().cpu().numpy()],
                            self.cell_types_raw,
                            show=True)
                 plot_phase(c[:, i].cpu().numpy(),
@@ -1031,7 +1107,7 @@ class VAEChrom():
                            'us',
                            t.detach().cpu().numpy().flatten(),
                            None,
-                           self.cell_labels[idx.cpu().numpy()],
+                           self.cell_labels[idx.detach().cpu().numpy()],
                            self.cell_types_raw,
                            show=True)
         self.global_counter += 1
@@ -1042,7 +1118,7 @@ class VAEChrom():
 
         if self.is_full_vb:
             kld_params = None
-            for i, x in enumerate(['alpha_c', 'alpha', 'beta', 'gamma', 'scaling_c']):
+            for i, x in enumerate(['alpha_c', 'alpha', 'beta', 'gamma']):
                 if self.enable_cvae:
                     for j in range(self.n_batch):
                         mu_param = self.decoder.get_param(x)[j, 0].view(1, -1)
@@ -1061,11 +1137,23 @@ class VAEChrom():
             loss = loss + self.config["kl_param"]*kld_params
 
         if self.use_knn and self.config["velocity_continuity"]:
-            forward_loss = (self.loss_vel(c0/F.softplus(self.decoder.scaling_c, 10, 2), chat/F.softplus(self.decoder.scaling_c, 10, 2), vc,
-                                          u0/self.decoder.scaling, uhat/self.decoder.scaling, vu,
+            if onehot is not None:
+                if self.config['log_params']:
+                    scaling_c = torch.exp(torch.mm(onehot, self.decoder.scaling_c))
+                else:
+                    scaling_c = F.softplus(torch.mm(onehot, self.decoder.scaling_c), 10, 2)
+                scaling = torch.mm(onehot, self.decoder.scaling)
+            else:
+                if self.config['log_params']:
+                    scaling_c = torch.exp(self.decoder.scaling_c)
+                else:
+                    scaling_c = F.softplus(self.decoder.scaling_c, 10, 2)
+                scaling = self.decoder.scaling
+            forward_loss = (self.loss_vel(c0/scaling_c, chat/scaling_c, vc,
+                                          u0/scaling, uhat/scaling, vu,
                                           s0, shat, vs)
-                            + self.loss_vel(chat/F.softplus(self.decoder.scaling_c, 10, 2), chat_fw/F.softplus(self.decoder.scaling_c, 10, 2), vc_fw,
-                                            uhat/self.decoder.scaling, uhat_fw/self.decoder.scaling, vu_fw,
+                            + self.loss_vel(chat/scaling_c, chat_fw/scaling_c, vc_fw,
+                                            uhat/scaling, uhat_fw/scaling, vu_fw,
                                             shat, shat_fw, vs_fw))
             loss = loss - self.config["reg_forward"]*forward_loss
 
@@ -1082,10 +1170,11 @@ class VAEChrom():
 
         return loss
 
-    def train_epoch(self, train_loader, test_set, optimizer, optimizer2=None, k=1, net='both', drop=True):
+    def train_epoch(self, train_loader, test_set, optimizer, optimizer2=None, k=1, net='both', set_stop_thred=False):
         B = len(train_loader)
         self.set_mode('train', net)
         stop_training = False
+        set_drop_loss = []
 
         for i, batch in enumerate(train_loader):
             if self.counter == 1 or self.counter % self.config["test_iter"] == 0:
@@ -1095,7 +1184,7 @@ class VAEChrom():
                                       True)
 
                 if len(self.loss_test) > 0:
-                    if (elbo_test - self.loss_test[-1] <= self.config["early_stop_thred"]) and drop:
+                    if self.config["early_stop_thred"] is not None and (elbo_test - self.loss_test[-1] <= self.config["early_stop_thred"]):
                         self.n_drop = self.n_drop + 1
                     else:
                         self.n_drop = 0
@@ -1105,6 +1194,15 @@ class VAEChrom():
                 if (self.n_drop >= self.config["early_stop"]) and (self.config["early_stop"] > 0):
                     stop_training = True
                     break
+
+            if set_stop_thred:
+                elbo_test = self.test(test_set,
+                                      None,
+                                      self.counter,
+                                      True)
+
+                set_drop_loss.append(elbo_test)
+                self.set_mode('train', net)
 
             optimizer.zero_grad()
             if optimizer2 is not None:
@@ -1172,6 +1270,12 @@ class VAEChrom():
             self.loss_train.append(loss.detach().cpu().item())
             self.counter = self.counter + 1
 
+        if set_stop_thred:
+            print(np.mean([y - x for x, y in zip(set_drop_loss, set_drop_loss[1:])]))
+            # self.config['early_stop_thred'] = 0.25*np.mean([y - x for x, y in zip(set_drop_loss, set_drop_loss[1:])])
+            self.config['early_stop_thred'] = 0.5
+            print(f"Early stop threshold set to {self.config['early_stop_thred']:.4f}.")
+
         return stop_training
 
     def update_x0(self, c, u, s):
@@ -1181,7 +1285,7 @@ class VAEChrom():
         chat, uhat, shat, t, z = out["chat"], out["uhat"], out["shat"], out["t"], out["mu_z"]
         # t = np.clip(t, 0, np.quantile(t, 0.99))
         dt = (self.config["dt"][0]*(t.max()-t.min()), self.config["dt"][1]*(t.max()-t.min()))
-        train_idx = self.train_idx.cpu().numpy()
+        train_idx = self.train_idx.detach().cpu().numpy()
         init_mask = (t <= np.quantile(t, 0.01))
         c0_init = np.mean(c[init_mask], 0)
         u0_init = np.mean(u[init_mask], 0)
@@ -1240,8 +1344,6 @@ class VAEChrom():
         return t, z
 
     def train(self,
-              adata,
-              adata_atac,
               config={},
               plot=False,
               gene_plot=[],
@@ -1253,19 +1355,17 @@ class VAEChrom():
         self.global_counter = 0
 
         print("--------------------------- Train a VeloVAE ---------------------------")
-
-        X = np.concatenate((adata_atac.layers['Mc'], adata.layers['Mu'], adata.layers['Ms']), 1).astype(float)
-        # self.c_thred = 0  # np.quantile(adata_atac.layers['Mc'], 0.2)
-        # self.u_thred = 0  # np.quantile(adata.layers['Mu'], 0.1)
-        # self.s_thred = 0  # np.quantile(adata.layers['Ms'], 0.1)
+        X = np.concatenate((self.adata_atac.layers['Mc'].A if issparse(self.adata_atac.layers['Mc']) else self.adata_atac.layers['Mc'],
+                            self.adata.layers['Mu'].A if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu'],
+                            self.adata.layers['Ms'].A if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']), 1).astype(float)
 
         try:
-            Xembed = adata.obsm[f"X_{embed}"]
+            Xembed = self.adata.obsm[f"X_{embed}"]
             Xembed_train = Xembed[self.train_idx]
             Xembed_test = Xembed[self.test_idx]
         except KeyError:
             print(f"Embedding X_{embed} not found! Set to None.")
-            Xembed = np.nan*np.ones((adata.n_obs, 2))
+            Xembed = np.nan*np.ones((self.adata.n_obs, 2))
             Xembed_train = Xembed[self.train_idx]
             Xembed_test = Xembed[self.test_idx]
             plot = False
@@ -1275,7 +1375,7 @@ class VAEChrom():
         # print(f'Non zero ratios of C, U, S {self.non_zero_ratio}')
         # self.non_zero_ratio = torch.tensor(self.non_zero_ratio, dtype=torch.float, device=self.device)
 
-        cell_labels_raw = adata.obs[cluster_key].to_numpy() if cluster_key in adata.obs else np.array(['Unknown' for i in range(adata.n_obs)])
+        cell_labels_raw = self.adata.obs[cluster_key].to_numpy() if cluster_key in self.adata.obs else np.array(['Unknown' for i in range(self.adata.n_obs)])
 
         self.cell_types_raw = np.unique(cell_labels_raw)
         self.label_dic, self.label_dic_rev = encode_type(self.cell_types_raw)
@@ -1306,7 +1406,7 @@ class VAEChrom():
         print(f"Total Number of Iterations Per Epoch: {len(data_loader)}, test iteration: {self.config['test_iter']}")
         print("*********                      Finished.                      *********")
 
-        gind, gene_plot = get_gene_index(adata.var_names, gene_plot)
+        gind, gene_plot = get_gene_index(self.adata.var_names, gene_plot)
         os.makedirs(figure_path, exist_ok=True)
 
         print("*********                      Stage  1                       *********")
@@ -1318,8 +1418,9 @@ class VAEChrom():
         param_ode = [self.decoder.alpha_c,
                      self.decoder.alpha,
                      self.decoder.beta,
-                     self.decoder.gamma,
-                     self.decoder.scaling_c]
+                     self.decoder.gamma]
+        if self.config['train_scaling']:
+            param_ode.append(self.decoder.scaling_c)
         if self.config['four_basis']:
             param_ode.extend([self.decoder.c0,
                               self.decoder.u0,
@@ -1331,16 +1432,14 @@ class VAEChrom():
         optimizer = torch.optim.AdamW(param_nn, lr=self.config["learning_rate"], weight_decay=self.config["lambda"])
         optimizer_ode = torch.optim.AdamW(param_ode, lr=self.config["learning_rate_ode"], weight_decay=self.config["lambda"])
 
-        # from torch.profiler import profile, ProfilerActivity
-        # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
-        # self.config["n_epochs"] = 20
         for epoch in range(self.config["n_epochs"]):
             if epoch >= self.config["n_warmup"]:
                 stop_training = self.train_epoch(data_loader,
                                                  test_set,
-                                                 optimizer_ode,
                                                  optimizer,
-                                                 self.config["k_alt"])
+                                                 optimizer_ode,
+                                                 self.config["k_alt"],
+                                                 set_stop_thred=(epoch == self.config["n_warmup"]))
             else:
                 stop_training = self.train_epoch(data_loader,
                                                  test_set,
@@ -1364,7 +1463,6 @@ class VAEChrom():
             if stop_training:
                 print(f"*********       Stage 1: Early Stop Triggered at epoch {epoch+1}.       *********")
                 break
-        # return prof
 
         if self.config["run_2nd_stage"]:
             print("*********                      Stage  2                       *********")
@@ -1378,14 +1476,13 @@ class VAEChrom():
             #     param_post += list(self.decoder.net_t.parameters())
             optimizer_post = torch.optim.AdamW(param_post, lr=self.config["learning_rate_post"], weight_decay=self.config["lambda_post"])
 
-            sigma_c_prev = self.decoder.sigma_c.cpu().numpy()
-            sigma_u_prev = self.decoder.sigma_u.cpu().numpy()
-            sigma_s_prev = self.decoder.sigma_s.cpu().numpy()
+            sigma_c_prev = self.decoder.sigma_c.detach().cpu().numpy()
+            sigma_u_prev = self.decoder.sigma_u.detach().cpu().numpy()
+            sigma_s_prev = self.decoder.sigma_s.detach().cpu().numpy()
             c0_prev, u0_prev, s0_prev = None, None, None
             noise_change = np.inf
             x0_change = np.inf
             x0_change_prev = np.inf
-            # self.config['early_stop'] *= 2
 
             for r in range(self.config['n_refine']):
                 stop_training = (x0_change - x0_change_prev >= -0.01 and r > 1) or (x0_change < 0.01)
@@ -1404,20 +1501,21 @@ class VAEChrom():
                         print('c0, u0, or s0 contains nan')
                     plot_time(self.t0.squeeze(), Xembed, save=f"{figure_path}/time-t0-round{r}.png")
                     plot_time(t, Xembed, save=f"{figure_path}/time-round{r}.png")
-                    t0_plot = self.t0[self.train_idx.cpu().numpy()].squeeze()
+                    train_idx = self.train_idx.detach().cpu().numpy()
+                    t0_plot = self.t0[train_idx].squeeze()
                     for i in range(len(gind)):
                         idx = gind[i]
-                        c0_plot = self.c0[self.train_idx.cpu().numpy(), idx]
-                        u0_plot = self.u0[self.train_idx.cpu().numpy(), idx]
-                        s0_plot = self.s0[self.train_idx.cpu().numpy(), idx]
-                        c_plot = X[:, :G//3][self.train_idx.cpu().numpy(), idx]
-                        u_plot = X[:, G//3:G//3*2][self.train_idx.cpu().numpy(), idx]
-                        s_plot = X[:, G//3*2:][self.train_idx.cpu().numpy(), idx]
-                        plot_sig_(t[self.train_idx.cpu().numpy()],
+                        c0_plot = self.c0[train_idx, idx]
+                        u0_plot = self.u0[train_idx, idx]
+                        s0_plot = self.s0[train_idx, idx]
+                        c_plot = X[:, :G//3][train_idx, idx]
+                        u_plot = X[:, G//3:G//3*2][train_idx, idx]
+                        s_plot = X[:, G//3*2:][train_idx, idx]
+                        plot_sig_(t[train_idx],
                                   c_plot,
                                   u_plot,
                                   s_plot,
-                                  cell_labels=cell_labels_raw[self.train_idx.cpu().numpy()],
+                                  cell_labels=cell_labels_raw[train_idx],
                                   tpred=t0_plot,
                                   cpred=c0_plot,
                                   upred=u0_plot,
@@ -1490,25 +1588,25 @@ class VAEChrom():
 
                 count_epoch += (epoch+1)
                 if not self.config['global_std']:
-                    sigma_c = self.decoder.sigma_c.cpu().numpy()
-                    sigma_u = self.decoder.sigma_u.cpu().numpy()
-                    sigma_s = self.decoder.sigma_s.cpu().numpy()
+                    sigma_c = self.decoder.sigma_c.detach().cpu().numpy()
+                    sigma_u = self.decoder.sigma_u.detach().cpu().numpy()
+                    sigma_s = self.decoder.sigma_s.detach().cpu().numpy()
                     norm_delta_sigma = np.sum((sigma_c-sigma_c_prev)**2 + (sigma_u-sigma_u_prev)**2 + (sigma_s-sigma_s_prev)**2)
                     norm_sigma = np.sum(sigma_c_prev**2 + sigma_u_prev**2 + sigma_s_prev**2)
-                    sigma_c_prev = self.decoder.sigma_c.cpu().numpy()
-                    sigma_u_prev = self.decoder.sigma_u.cpu().numpy()
-                    sigma_s_prev = self.decoder.sigma_s.cpu().numpy()
+                    sigma_c_prev = self.decoder.sigma_c.detach().cpu().numpy()
+                    sigma_u_prev = self.decoder.sigma_u.detach().cpu().numpy()
+                    sigma_s_prev = self.decoder.sigma_s.detach().cpu().numpy()
                     noise_change = norm_delta_sigma/norm_sigma
                     print(f"Change in noise variance: {noise_change:.4f}")
                 if r > 0:
                     x0_change_prev = x0_change
-                    norm_delta_x0 = np.sqrt(((self.c0.cpu().numpy() - c0_prev)**2 + (self.u0.cpu().numpy() - u0_prev)**2 + (self.s0.cpu().numpy() - s0_prev)**2).sum(1).mean())
-                    std_x = np.sqrt((self.c0.cpu().numpy().var(0) + self.u0.cpu().numpy().var(0) + self.s0.cpu().numpy().var(0)).sum())
+                    norm_delta_x0 = np.sqrt(((self.c0.detach().cpu().numpy() - c0_prev)**2 + (self.u0.detach().cpu().numpy() - u0_prev)**2 + (self.s0.detach().cpu().numpy() - s0_prev)**2).sum(1).mean())
+                    std_x = np.sqrt((self.c0.detach().cpu().numpy().var(0) + self.u0.detach().cpu().numpy().var(0) + self.s0.detach().cpu().numpy().var(0)).sum())
                     x0_change = norm_delta_x0/std_x
                     print(f"Change in x0: {x0_change:.4f}")
-                c0_prev = self.c0.cpu().numpy()
-                u0_prev = self.u0.cpu().numpy()
-                s0_prev = self.s0.cpu().numpy()
+                c0_prev = self.c0.detach().cpu().numpy()
+                u0_prev = self.u0.detach().cpu().numpy()
+                s0_prev = self.s0.detach().cpu().numpy()
 
             if plot and self.config['n_refine'] > 1:
                 plot_time(self.t0.detach().cpu().numpy().squeeze(), Xembed, save=f"{figure_path}/time-t0-updated.png")
@@ -1522,7 +1620,7 @@ class VAEChrom():
                               c0_plot,
                               u0_plot,
                               s0_plot,
-                              cell_labels=cell_labels_raw[self.train_idx.cpu().numpy()],
+                              cell_labels=cell_labels_raw[self.train_idx.detach().cpu().numpy()],
                               title=gene_plot[i],
                               save=f"{figure_path}/sig-{gene_plot[i]}-x0-updated.png")
 
@@ -1542,7 +1640,7 @@ class VAEChrom():
                               gene_plot,
                               True,
                               figure_path)
-        self.loss_train.append(elbo_train)
+        self.loss_train.append(-elbo_train)
         self.loss_test.append(elbo_test)
         if plot:
             plot_train_loss(self.loss_train, range(1, len(self.loss_train)+1), save=f'{figure_path}/train_loss_velovae.png')
@@ -1575,12 +1673,8 @@ class VAEChrom():
             shat_fw_res = np.zeros((N, len(gene_idx)))
         if "t" in output:
             if self.config['t_network']:
-                if self.enable_cvae:
-                    mu_t_out = np.zeros((N, self.config['dim_z']))
-                    std_t_out = np.zeros((N, self.config['dim_z']))
-                else:
-                    mu_t_out = np.zeros((N, self.config['dim_z']))
-                    std_t_out = np.zeros((N, self.config['dim_z']))
+                mu_t_out = np.zeros((N, self.config['dim_z']))
+                std_t_out = np.zeros((N, self.config['dim_z']))
             else:
                 mu_t_out = np.zeros((N, 1))
                 std_t_out = np.zeros((N, 1))
@@ -1654,7 +1748,7 @@ class VAEChrom():
                                      sample=False,
                                      idx=batch_idx)
 
-                elbo = elbo - (B/N)*loss
+                elbo = elbo - ((j-i)/N)*loss
                 if "chat" in output and gene_idx is not None:
                     if chat.ndim == 3:
                         chat = torch.sum(chat*w_hard, 1)
@@ -1714,7 +1808,7 @@ class VAEChrom():
             out["vu"] = vu_res
             out["vs"] = vs_res
 
-        return out, elbo.cpu().item()
+        return out, elbo.detach().cpu().item()
 
     def test(self,
              dataset,
@@ -1744,6 +1838,21 @@ class VAEChrom():
             testid_str = 'test' + '0'*(8-len(testid_str)) + id_num
 
         if plot:
+            cell_idx = self.test_idx if test_mode else self.train_idx
+            if self.enable_cvae:
+                onehot = F.one_hot(self.batch[cell_idx], self.n_batch).detach().cpu().numpy()
+                if self.config['log_params']:
+                    scaling_c = np.dot(onehot, np.exp(self.decoder.scaling_c.detach().cpu().numpy()))
+                else:
+                    scaling_c = np.dot(onehot, F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy())
+                scaling = np.dot(onehot, self.decoder.scaling.detach().cpu().numpy())
+            else:
+                if self.config['log_params']:
+                    scaling_c = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
+                else:
+                    scaling_c = F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy()
+                scaling = self.decoder.scaling.detach().cpu().numpy()
+
             plot_time(t_, Xembed, save=f"{path}/time-{testid_str}.png")
 
             for i in range(len(gind)):
@@ -1767,16 +1876,27 @@ class VAEChrom():
                          save=f"{path}/sig-{gene_plot[i]}-{testid_str}.png",
                          sparsify=self.config['sparsify'])
 
+                plot_sig(t_.squeeze(),
+                         dataset.data[:, idx].cpu().numpy() / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
+                         dataset.data[:, idx+G].cpu().numpy() / (scaling[:, idx] if self.enable_cvae else scaling[idx]),
+                         dataset.data[:, idx+G*2].cpu().numpy(),
+                         chat[:, i] / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
+                         uhat[:, i] / (scaling[:, idx] if self.enable_cvae else scaling[idx]),
+                         shat[:, i],
+                         np.array([self.label_dic_rev[x] for x in dataset.labels]),
+                         gene_plot[i],
+                         save=f"{path}/sig-scaled-{gene_plot[i]}-{testid_str}.png",
+                         sparsify=self.config['sparsify'])
+
                 if self.use_knn and self.config['velocity_continuity']:
-                    scaling_c = F.softplus(self.decoder.scaling_c[i].detach().cpu(), 10, 2).numpy()
-                    scaling = self.decoder.scaling[i].detach().cpu().numpy()
-                    cell_idx = self.test_idx if test_mode else self.train_idx
                     plot_vel(t_.squeeze(),
-                             chat[:, i]/scaling_c, uhat[:, i]/scaling, shat[:, i],
+                             chat[:, i] / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
+                             uhat[:, i] / (scaling[:, idx] if self.enable_cvae else scaling[idx]),
+                             shat[:, i],
                              out["vc"][:, i], out["vu"][:, i], out["vs"][:, i],
                              self.t0[cell_idx].squeeze().detach().cpu().numpy(),
-                             self.c0[cell_idx, idx].detach().cpu().numpy()/scaling_c,
-                             self.u0[cell_idx, idx].detach().cpu().numpy()/scaling,
+                             self.c0[cell_idx, idx].detach().cpu().numpy() / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
+                             self.u0[cell_idx, idx].detach().cpu().numpy() / (scaling[:, idx] if self.enable_cvae else scaling[idx]),
                              self.s0[cell_idx, idx].detach().cpu().numpy(),
                              title=gene_plot[i],
                              save=f"{path}/vel-{gene_plot[i]}-{testid_str}.png")
@@ -1791,6 +1911,18 @@ class VAEChrom():
                              np.array([self.label_dic_rev[x] for x in dataset.labels]),
                              gene_plot[i],
                              save=f"{path}/sig-{gene_plot[i]}-{testid_str}-bw.png",
+                             sparsify=self.config['sparsify'])
+
+                    plot_sig(t_.squeeze(),
+                             dataset.data[:, idx].cpu().numpy() / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
+                             dataset.data[:, idx+G].cpu().numpy() / (scaling[:, idx] if self.enable_cvae else scaling[idx]),
+                             dataset.data[:, idx+G*2].cpu().numpy(),
+                             out["chat_fw"][:, i] / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
+                             out["uhat_fw"][:, i] / (scaling[:, idx] if self.enable_cvae else scaling[idx]),
+                             out["shat_fw"][:, i],
+                             np.array([self.label_dic_rev[x] for x in dataset.labels]),
+                             gene_plot[i],
+                             save=f"{path}/sig-scaled-{gene_plot[i]}-{testid_str}-bw.png",
                              sparsify=self.config['sparsify'])
         return elbo
 
@@ -1816,7 +1948,7 @@ class VAEChrom():
         torch.save(self.encoder.state_dict(), f"{file_path}/{enc_name}.pt")
         torch.save(self.decoder.state_dict(), f"{file_path}/{dec_name}.pt")
 
-    def save_anndata(self, adata, adata_atac, file_path, file_name=None):
+    def save_anndata(self, file_path, file_name=None):
         self.set_mode('eval')
         os.makedirs(file_path, exist_ok=True)
 
@@ -1825,103 +1957,108 @@ class VAEChrom():
             if self.enable_cvae:
                 for i in range(self.n_batch):
                     if self.config['log_params']:
-                        adata.var[f"{mode}_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i, 0].detach().cpu().numpy())
-                        adata.var[f"{mode}_alpha_{i}"] = np.exp(self.decoder.alpha[i, 0].detach().cpu().numpy())
-                        adata.var[f"{mode}_beta_{i}"] = np.exp(self.decoder.beta[i, 0].detach().cpu().numpy())
-                        adata.var[f"{mode}_gamma_{i}"] = np.exp(self.decoder.gamma[i, 0].detach().cpu().numpy())
-                        adata.var[f"{mode}_scaling_c_{i}"] = np.exp(self.decoder.scaling_c[i, 0].detach().cpu().numpy())
+                        self.adata.var[f"{mode}_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i, 0].detach().cpu().numpy())
+                        self.adata.var[f"{mode}_alpha_{i}"] = np.exp(self.decoder.alpha[i, 0].detach().cpu().numpy())
+                        self.adata.var[f"{mode}_beta_{i}"] = np.exp(self.decoder.beta[i, 0].detach().cpu().numpy())
+                        self.adata.var[f"{mode}_gamma_{i}"] = np.exp(self.decoder.gamma[i, 0].detach().cpu().numpy())
                     else:
-                        adata.var[f"{mode}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i, 0].detach().cpu(), 10, 2).numpy()
-                        adata.var[f"{mode}_alpha_{i}"] = F.softplus(self.decoder.alpha[i, 0].detach().cpu(), 10, 2).numpy()
-                        adata.var[f"{mode}_beta_{i}"] = F.softplus(self.decoder.beta[i, 0].detach().cpu(), 10, 2).numpy()
-                        adata.var[f"{mode}_gamma_{i}"] = F.softplus(self.decoder.gamma[i, 0].detach().cpu(), 10, 2).numpy()
-                        adata.var[f"{mode}_scaling_c_{i}"] = F.softplus(self.decoder.scaling_c[i, 0].detach().cpu(), 10, 2).numpy()
-                    adata.var[f"{mode}_logstd_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i, 1].detach().cpu().numpy())
-                    adata.var[f"{mode}_logstd_alpha_{i}"] = np.exp(self.decoder.alpha[i, 1].detach().cpu().numpy())
-                    adata.var[f"{mode}_logstd_beta_{i}"] = np.exp(self.decoder.beta[i, 1].detach().cpu().numpy())
-                    adata.var[f"{mode}_logstd_gamma_{i}"] = np.exp(self.decoder.gamma[i, 1].detach().cpu().numpy())
-                    adata.var[f"{mode}_logstd_scaling_c_{i}"] = np.exp(self.decoder.scaling_c[i, 1].detach().cpu().numpy())
+                        self.adata.var[f"{mode}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i, 0].detach().cpu(), 10, 2).numpy()
+                        self.adata.var[f"{mode}_alpha_{i}"] = F.softplus(self.decoder.alpha[i, 0].detach().cpu(), 10, 2).numpy()
+                        self.adata.var[f"{mode}_beta_{i}"] = F.softplus(self.decoder.beta[i, 0].detach().cpu(), 10, 2).numpy()
+                        self.adata.var[f"{mode}_gamma_{i}"] = F.softplus(self.decoder.gamma[i, 0].detach().cpu(), 10, 2).numpy()
+                    self.adata.var[f"{mode}_logstd_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i, 1].detach().cpu().numpy())
+                    self.adata.var[f"{mode}_logstd_alpha_{i}"] = np.exp(self.decoder.alpha[i, 1].detach().cpu().numpy())
+                    self.adata.var[f"{mode}_logstd_beta_{i}"] = np.exp(self.decoder.beta[i, 1].detach().cpu().numpy())
+                    self.adata.var[f"{mode}_logstd_gamma_{i}"] = np.exp(self.decoder.gamma[i, 1].detach().cpu().numpy())
             else:
                 if self.config['log_params']:
-                    adata.var[f"{mode}_alpha_c"] = np.exp(self.decoder.alpha_c[0].detach().cpu().numpy())
-                    adata.var[f"{mode}_alpha"] = np.exp(self.decoder.alpha[0].detach().cpu().numpy())
-                    adata.var[f"{mode}_beta"] = np.exp(self.decoder.beta[0].detach().cpu().numpy())
-                    adata.var[f"{mode}_gamma"] = np.exp(self.decoder.gamma[0].detach().cpu().numpy())
-                    adata.var[f"{mode}_scaling_c"] = np.exp(self.decoder.scaling_c[0].detach().cpu().numpy())
+                    self.adata.var[f"{mode}_alpha_c"] = np.exp(self.decoder.alpha_c[0].detach().cpu().numpy())
+                    self.adata.var[f"{mode}_alpha"] = np.exp(self.decoder.alpha[0].detach().cpu().numpy())
+                    self.adata.var[f"{mode}_beta"] = np.exp(self.decoder.beta[0].detach().cpu().numpy())
+                    self.adata.var[f"{mode}_gamma"] = np.exp(self.decoder.gamma[0].detach().cpu().numpy())
                 else:
-                    adata.var[f"{mode}_alpha_c"] = F.softplus(self.decoder.alpha_c[0].detach().cpu(), 10, 2).numpy()
-                    adata.var[f"{mode}_alpha"] = F.softplus(self.decoder.alpha[0].detach().cpu(), 10, 2).numpy()
-                    adata.var[f"{mode}_beta"] = F.softplus(self.decoder.beta[0].detach().cpu(), 10, 2).numpy()
-                    adata.var[f"{mode}_gamma"] = F.softplus(self.decoder.gamma[0].detach().cpu(), 10, 2).numpy()
-                    adata.var[f"{mode}_scaling_c"] = F.softplus(self.decoder.scaling_c[0].detach().cpu(), 10, 2).numpy()
-                adata.var[f"{mode}_logstd_alpha_c"] = np.exp(self.decoder.alpha_c[1].detach().cpu().numpy())
-                adata.var[f"{mode}_logstd_alpha"] = np.exp(self.decoder.alpha[1].detach().cpu().numpy())
-                adata.var[f"{mode}_logstd_beta"] = np.exp(self.decoder.beta[1].detach().cpu().numpy())
-                adata.var[f"{mode}_logstd_gamma"] = np.exp(self.decoder.gamma[1].detach().cpu().numpy())
-                adata.var[f"{mode}_logstd_scaling_c"] = np.exp(self.decoder.scaling_c[1].detach().cpu().numpy())
+                    self.adata.var[f"{mode}_alpha_c"] = F.softplus(self.decoder.alpha_c[0].detach().cpu(), 10, 2).numpy()
+                    self.adata.var[f"{mode}_alpha"] = F.softplus(self.decoder.alpha[0].detach().cpu(), 10, 2).numpy()
+                    self.adata.var[f"{mode}_beta"] = F.softplus(self.decoder.beta[0].detach().cpu(), 10, 2).numpy()
+                    self.adata.var[f"{mode}_gamma"] = F.softplus(self.decoder.gamma[0].detach().cpu(), 10, 2).numpy()
+                self.adata.var[f"{mode}_logstd_alpha_c"] = np.exp(self.decoder.alpha_c[1].detach().cpu().numpy())
+                self.adata.var[f"{mode}_logstd_alpha"] = np.exp(self.decoder.alpha[1].detach().cpu().numpy())
+                self.adata.var[f"{mode}_logstd_beta"] = np.exp(self.decoder.beta[1].detach().cpu().numpy())
+                self.adata.var[f"{mode}_logstd_gamma"] = np.exp(self.decoder.gamma[1].detach().cpu().numpy())
         else:
             if self.enable_cvae:
                 for i in range(self.n_batch):
                     if self.config['log_params']:
-                        adata.var[f"{mode}_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i].detach().cpu().numpy())
-                        adata.var[f"{mode}_alpha_{i}"] = np.exp(self.decoder.alpha[i].detach().cpu().numpy())
-                        adata.var[f"{mode}_beta_{i}"] = np.exp(self.decoder.beta[i].detach().cpu().numpy())
-                        adata.var[f"{mode}_gamma_{i}"] = np.exp(self.decoder.gamma[i].detach().cpu().numpy())
-                        adata.var[f"{mode}_scaling_c_{i}"] = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
+                        self.adata.var[f"{mode}_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i].detach().cpu().numpy())
+                        self.adata.var[f"{mode}_alpha_{i}"] = np.exp(self.decoder.alpha[i].detach().cpu().numpy())
+                        self.adata.var[f"{mode}_beta_{i}"] = np.exp(self.decoder.beta[i].detach().cpu().numpy())
+                        self.adata.var[f"{mode}_gamma_{i}"] = np.exp(self.decoder.gamma[i].detach().cpu().numpy())
                     else:
-                        adata.var[f"{mode}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i].detach().cpu(), 10, 2).numpy()
-                        adata.var[f"{mode}_alpha_{i}"] = F.softplus(self.decoder.alpha[i].detach().cpu(), 10, 2).numpy()
-                        adata.var[f"{mode}_beta_{i}"] = F.softplus(self.decoder.beta[i].detach().cpu(), 10, 2).numpy()
-                        adata.var[f"{mode}_gamma_{i}"] = F.softplus(self.decoder.gamma[i].detach().cpu(), 10, 2).numpy()
-                        adata.var[f"{mode}_scaling_c_{i}"] = F.softplus(self.decoder.scaling_c[i].detach().cpu(), 10, 2).numpy()
+                        self.adata.var[f"{mode}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i].detach().cpu(), 10, 2).numpy()
+                        self.adata.var[f"{mode}_alpha_{i}"] = F.softplus(self.decoder.alpha[i].detach().cpu(), 10, 2).numpy()
+                        self.adata.var[f"{mode}_beta_{i}"] = F.softplus(self.decoder.beta[i].detach().cpu(), 10, 2).numpy()
+                        self.adata.var[f"{mode}_gamma_{i}"] = F.softplus(self.decoder.gamma[i].detach().cpu(), 10, 2).numpy()
             else:
                 if self.config['log_params']:
-                    adata.var[f"{mode}_alpha_c"] = np.exp(self.decoder.alpha_c.detach().cpu().numpy())
-                    adata.var[f"{mode}_alpha"] = np.exp(self.decoder.alpha.detach().cpu().numpy())
-                    adata.var[f"{mode}_beta"] = np.exp(self.decoder.beta.detach().cpu().numpy())
-                    adata.var[f"{mode}_gamma"] = np.exp(self.decoder.gamma.detach().cpu().numpy())
-                    adata.var[f"{mode}_scaling_c"] = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
+                    self.adata.var[f"{mode}_alpha_c"] = np.exp(self.decoder.alpha_c.detach().cpu().numpy())
+                    self.adata.var[f"{mode}_alpha"] = np.exp(self.decoder.alpha.detach().cpu().numpy())
+                    self.adata.var[f"{mode}_beta"] = np.exp(self.decoder.beta.detach().cpu().numpy())
+                    self.adata.var[f"{mode}_gamma"] = np.exp(self.decoder.gamma.detach().cpu().numpy())
                 else:
-                    adata.var[f"{mode}_alpha_c"] = F.softplus(self.decoder.alpha_c.detach().cpu(), 10, 2).numpy()
-                    adata.var[f"{mode}_alpha"] = F.softplus(self.decoder.alpha.detach().cpu(), 10, 2).numpy()
-                    adata.var[f"{mode}_beta"] = F.softplus(self.decoder.beta.detach().cpu(), 10, 2).numpy()
-                    adata.var[f"{mode}_gamma"] = F.softplus(self.decoder.gamma.detach().cpu(), 10, 2).numpy()
-                    adata.var[f"{mode}_scaling_c"] = F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy()
-        adata.var[f"{mode}_ton"] = self.decoder.ton.detach().cpu().numpy()
-        adata.var[f"{mode}_scaling"] = self.decoder.scaling.detach().cpu().numpy()
-        adata.var[f"{mode}_sigma_c"] = self.decoder.sigma_c.detach().cpu().numpy()
-        adata.var[f"{mode}_sigma_u"] = self.decoder.sigma_u.detach().cpu().numpy()
-        adata.var[f"{mode}_sigma_s"] = self.decoder.sigma_s.detach().cpu().numpy()
-        adata.varm[f"{mode}_basis"] = F.softmax(self.decoder.logit_pw, 1).detach().cpu().numpy()
-
-        c, u, s = adata_atac.layers['Mc'], adata.layers['Mu'], adata.layers['Ms']
-        if self.enable_cvae and self.ref_batch >= 0:
-            out, _ = self.pred_all(np.concatenate((c, u, s), 1), "both", batch=torch.full((adata.n_obs,), self.ref_batch, dtype=int, device=self.device))
+                    self.adata.var[f"{mode}_alpha_c"] = F.softplus(self.decoder.alpha_c.detach().cpu(), 10, 2).numpy()
+                    self.adata.var[f"{mode}_alpha"] = F.softplus(self.decoder.alpha.detach().cpu(), 10, 2).numpy()
+                    self.adata.var[f"{mode}_beta"] = F.softplus(self.decoder.beta.detach().cpu(), 10, 2).numpy()
+                    self.adata.var[f"{mode}_gamma"] = F.softplus(self.decoder.gamma.detach().cpu(), 10, 2).numpy()
+        if self.enable_cvae:
+            for i in range(self.n_batch):
+                if self.config['log_params']:
+                    self.adata.var[f"{mode}_scaling_c_{i}"] = np.exp(self.decoder.scaling_c[i].detach().cpu().numpy())
+                else:
+                    self.adata.var[f"{mode}_scaling_c_{i}"] = F.softplus(self.decoder.scaling_c[i].detach().cpu(), 10, 2).numpy()
+                self.adata.var[f"{mode}_scaling_{i}"] = self.decoder.scaling[i].detach().cpu().numpy()
         else:
-            out, _ = self.pred_all(np.concatenate((c, u, s), 1), "both")
+            if self.config['log_params']:
+                self.adata.var[f"{mode}_scaling_c"] = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
+            else:
+                self.adata.var[f"{mode}_scaling_c"] = F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy()
+            self.adata.var[f"{mode}_scaling"] = self.decoder.scaling.detach().cpu().numpy()
+        self.adata.var[f"{mode}_sigma_c"] = self.decoder.sigma_c.detach().cpu().numpy()
+        self.adata.var[f"{mode}_sigma_u"] = self.decoder.sigma_u.detach().cpu().numpy()
+        self.adata.var[f"{mode}_sigma_s"] = self.decoder.sigma_s.detach().cpu().numpy()
+        self.adata.var[f"{mode}_ton"] = self.decoder.ton.detach().cpu().numpy()
+        self.adata.varm[f"{mode}_basis"] = F.softmax(self.decoder.logit_pw, 1).detach().cpu().numpy()
+
+        x = np.concatenate((self.adata_atac.layers['Mc'].A if issparse(self.adata_atac.layers['Mc']) else self.adata_atac.layers['Mc'],
+                            self.adata.layers['Mu'].A if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu'],
+                            self.adata.layers['Ms'].A if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']), 1).astype(float)
+        G = x.shape[1]//3
+        if self.enable_cvae and self.ref_batch >= 0:
+            out, _ = self.pred_all(x, "both", batch=torch.full((self.adata.n_obs,), self.ref_batch, dtype=int, device=self.device))
+        else:
+            out, _ = self.pred_all(x, "both")
         chat, uhat, shat, t, std_t, t_, z, std_z = out["chat"], out["uhat"], out["shat"], out["mu_t"], out["std_t"], out["t"], out["mu_z"], out["std_z"]
 
-        adata.obs[f"{mode}_time"] = t_
-        adata.obsm[f"{mode}_t"] = t
-        adata.obsm[f"{mode}_std_t"] = std_t
-        adata.obsm[f"{mode}_z"] = z
-        adata.obsm[f"{mode}_std_z"] = std_z
-        adata.layers[f"{mode}_chat"] = chat
-        adata.layers[f"{mode}_uhat"] = uhat
-        adata.layers[f"{mode}_shat"] = shat
-        sigma_c, sigma_u, sigma_s = adata.var[f"{mode}_sigma_c"].to_numpy(), adata.var[f"{mode}_sigma_u"].to_numpy(), adata.var[f"{mode}_sigma_s"].to_numpy()
-        adata.var[f"{mode}_likelihood"] = np.mean(-0.5*((c-chat)/sigma_c)**2-0.5*((u-uhat)/sigma_u)**2-0.5*((s-shat)/sigma_s)**2-np.log(sigma_c)-np.log(sigma_u)-np.log(sigma_s)-np.log(2*np.pi), 0)
+        self.adata.obs[f"{mode}_time"] = t_
+        self.adata.obsm[f"{mode}_t"] = t
+        self.adata.obsm[f"{mode}_std_t"] = std_t
+        self.adata.obsm[f"{mode}_z"] = z
+        self.adata.obsm[f"{mode}_std_z"] = std_z
+        self.adata.layers[f"{mode}_chat"] = chat
+        self.adata.layers[f"{mode}_uhat"] = uhat
+        self.adata.layers[f"{mode}_shat"] = shat
+        sigma_c, sigma_u, sigma_s = self.adata.var[f"{mode}_sigma_c"].to_numpy(), self.adata.var[f"{mode}_sigma_u"].to_numpy(), self.adata.var[f"{mode}_sigma_s"].to_numpy()
+        self.adata.var[f"{mode}_likelihood"] = np.mean(-0.5*((x[:, :G]-chat)/sigma_c)**2-0.5*((x[:, G:G*2]-uhat)/sigma_u)**2-0.5*((x[:, G*2:]-shat)/sigma_s)**2-np.log(sigma_c)-np.log(sigma_u)-np.log(sigma_s)-np.log(2*np.pi), 0)
 
-        rho = np.zeros(u.shape)
-        kc = np.zeros(u.shape)
+        rho = np.zeros_like(uhat)
+        kc = np.zeros_like(uhat)
         with torch.no_grad():
-            B = min(u.shape[0]//10, 1000)
-            Nb = u.shape[0] // B
-            if Nb*B < u.shape[0]:
+            B = min(uhat.shape[0]//10, 1000)
+            Nb = uhat.shape[0] // B
+            if Nb*B < uhat.shape[0]:
                 Nb += 1
             for n in range(Nb):
                 i = n*B
-                j = min([(n+1)*B, u.shape[0]])
+                j = min([(n+1)*B, uhat.shape[0]])
                 if self.enable_cvae:
                     y_onehot = F.one_hot(self.batch[i:j], self.n_batch).float()
                     z_onehot = torch.cat((torch.tensor(z[i:j], dtype=torch.float, device=self.device), y_onehot), 1)
@@ -1930,21 +2067,21 @@ class VAEChrom():
                 else:
                     rho_batch = self.decoder.net_rho(torch.tensor(z[i:j], dtype=torch.float, device=self.device))
                     kc_batch = self.decoder.net_kc(torch.tensor(z[i:j], dtype=torch.float, device=self.device) if self.parallel_arch else rho_batch)
-                rho[i:j] = rho_batch.cpu().numpy()
-                kc[i:j] = kc_batch.cpu().numpy()
+                rho[i:j] = rho_batch.detach().cpu().numpy()
+                kc[i:j] = kc_batch.detach().cpu().numpy()
 
-        adata.layers[f"{mode}_rho"] = rho
-        adata.layers[f"{mode}_kc"] = kc
+        self.adata.layers[f"{mode}_rho"] = rho
+        self.adata.layers[f"{mode}_kc"] = kc
 
-        adata.obs[f"{mode}_t0"] = self.t0.detach().cpu().numpy().squeeze() if self.t0 is not None else 0
-        adata.layers[f"{mode}_c0"] = self.c0.detach().cpu().numpy() if self.c0 is not None else np.zeros_like(adata.layers['Mu'])
-        adata.layers[f"{mode}_u0"] = self.u0.detach().cpu().numpy() if self.u0 is not None else np.zeros_like(adata.layers['Mu'])
-        adata.layers[f"{mode}_s0"] = self.s0.detach().cpu().numpy() if self.s0 is not None else np.zeros_like(adata.layers['Mu'])
+        self.adata.obs[f"{mode}_t0"] = self.t0.detach().cpu().numpy().squeeze() if self.t0 is not None else 0
+        self.adata.layers[f"{mode}_c0"] = self.c0.detach().cpu().numpy() if self.c0 is not None else np.zeros_like(self.adata.layers['Mu'])
+        self.adata.layers[f"{mode}_u0"] = self.u0.detach().cpu().numpy() if self.u0 is not None else np.zeros_like(self.adata.layers['Mu'])
+        self.adata.layers[f"{mode}_s0"] = self.s0.detach().cpu().numpy() if self.s0 is not None else np.zeros_like(self.adata.layers['Mu'])
 
-        adata.uns[f"{mode}_train_idx"] = self.train_idx.cpu().numpy()
-        adata.uns[f"{mode}_test_idx"] = self.test_idx.cpu().numpy()
+        self.adata.uns[f"{mode}_train_idx"] = self.train_idx.detach().cpu().numpy()
+        self.adata.uns[f"{mode}_test_idx"] = self.test_idx.detach().cpu().numpy()
 
-        rna_velocity_vae(adata, adata_atac, mode, batch_key=self.config['batch_key'], use_raw=False)
+        rna_velocity_vae(self.adata, self.adata_atac, mode, batch_key=self.config['batch_key'], use_raw=False)
 
         if file_name is not None:
-            adata.write_h5ad(f"{file_path}/{file_name}")
+            self.adata.write_h5ad(f"{file_path}/{file_name}")
