@@ -90,7 +90,7 @@ def pred_exp(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
     spred = s0*expg + rho*alpha*kc/gamma*(1-expg)
     spred += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     spred += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
-    return F.sigmoid(cpred), F.relu(upred), F.relu(spred)
+    return cpred, upred, spred
 
 
 def pred_exp_backward(tau, c, u, s, kc, alpha_c, rho, alpha, beta, gamma):
@@ -171,11 +171,14 @@ def assign_time(c, u, s, c0_, u0_, s0_, alpha_c, alpha, beta, gamma, std_c_=None
     return t_latent, t_
 
 
-def init_gene(s, u, c, percent, fit_scaling=True, tmax=1):
+def init_gene(c, u, s, percent, fit_scaling=True, tmax=1):
     std_u, std_s = np.std(u), np.std(s)
-    scaling = std_u / std_s if fit_scaling else 1.0
+    scaling = np.clip(std_u / std_s, 1e-6, 1e6) if fit_scaling else 1.0
+    if np.isnan(scaling):
+        scaling = 1.0
     u = u/scaling
-    scaling_c = np.clip(np.max(c), 1e-3, None)
+    scaling_c = np.clip(np.percentile(c, 99.5), 1e-3, None)
+    # scaling_c = np.clip(np.max(c), 1e-3, None)
     c = c/scaling_c
     std_c_ = np.std(c)
 
@@ -213,7 +216,7 @@ def init_gene(s, u, c, percent, fit_scaling=True, tmax=1):
         beta = alpha * c_inf / u_inf
         u0_, s0_ = u_inf, s_inf
     t_ = tau_inv(u0_, s0_, 0, 0, alpha, beta, gamma)
-    alpha_c = -np.log(1 - np.clip(np.median(c[mask]), 0, 0.999)) / t_
+    alpha_c = -np.log(1 - np.clip(np.median(c[mask]), 0.001, 0.999)) / t_
     if alpha_c == beta:
         alpha_c -= 1e-3
     if alpha_c == gamma:
@@ -245,7 +248,7 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1):
         ufilt = ui[(si > 0) & (ui > 0) & (ci > 0)]
         sfilt = si[(si > 0) & (ui > 0) & (ci > 0)]
         if (len(sfilt) > 5):
-            out = init_gene(sfilt, ufilt, cfilt, percent, fit_scaling, tmax)
+            out = init_gene(cfilt, ufilt, sfilt, percent, fit_scaling, tmax)
             alpha_c, alpha, beta, gamma, t_, c0_, u0_, s0_, ts_, scaling_c, scaling = out
             params[i, :] = np.array([alpha_c, alpha, beta, gamma, scaling_c, scaling])
             t[i, (si > 0) & (ui > 0) & (ci > 0)] = t_
@@ -273,19 +276,20 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1):
         # c[c == 0] = np.nan
         # u[u == 0] = np.nan
         # s[s == 0] = np.nan
-        sigma_c = np.clip(np.nanstd(c, 0), 0.1, None)
-        sigma_u = np.clip(np.nanstd(u, 0), 0.1, None)
-        sigma_s = np.clip(np.nanstd(s, 0), 0.1, None)
+        sigma_c = np.clip(np.nanstd(c, 0), 0.01, None)
+        sigma_u = np.clip(np.nanstd(u, 0), 0.01, None)
+        sigma_s = np.clip(np.nanstd(s, 0), 0.01, None)
+        print(sigma_c[973], sigma_u[973], sigma_s[973])
     else:
         dist_c = c - cpred
         dist_u = u - upred
         dist_s = s - spred
-        sigma_c = np.clip(np.std(dist_c, 0), 0.1, None)
-        sigma_u = np.clip(np.std(dist_u, 0), 0.1, None)
-        sigma_s = np.clip(np.std(dist_s, 0), 0.1, None)
-    sigma_c[np.isnan(sigma_c)] = 0.1
-    sigma_u[np.isnan(sigma_u)] = 0.1
-    sigma_s[np.isnan(sigma_s)] = 0.1
+        sigma_c = np.clip(np.nanstd(dist_c, 0), 0.01, None)
+        sigma_u = np.clip(np.nanstd(dist_u, 0), 0.01, None)
+        sigma_s = np.clip(np.nanstd(dist_s, 0), 0.01, None)
+    sigma_c[np.isnan(sigma_c)] = 1
+    sigma_u[np.isnan(sigma_u)] = 1
+    sigma_s[np.isnan(sigma_s)] = 1
 
     alpha_c, alpha, beta, gamma = params[:, 0], params[:, 1], params[:, 2], params[:, 3]
     scaling_c, scaling, = params[:, 4], params[:, 5]
@@ -712,7 +716,7 @@ def assign_gene_mode_auto(adata,
             cluster_type[i] = 0
             _, pval_3 = kstest(w_noisy[y == i], q_neutral)
             if pval_3 < thred:
-                km = KMeans(2, n_init='auto')
+                km = KMeans(2, n_init='auto', random_state=42)
                 yw = km.fit_predict(w_noisy[y == i].reshape(-1, 1))
                 w[y == i] = sample_dir_mix(w_noisy[y == i], yw, std_prior)
             else:

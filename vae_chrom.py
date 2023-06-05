@@ -96,6 +96,7 @@ class Decoder(nn.Module):
                  dim_z,
                  dim_cond=0,
                  batch_idx=None,
+                 ref_batch=None,
                  N1=256,
                  N2=512,
                  parallel_arch=True,
@@ -119,6 +120,7 @@ class Decoder(nn.Module):
             dim_cond = 0
         self.cvae = True if dim_cond > 1 else False
         self.batch = batch_idx
+        self.ref_batch = ref_batch
         self.parallel_arch = parallel_arch
         self.t_network = t_network
         self.is_full_vb = full_vb
@@ -185,7 +187,8 @@ class Decoder(nn.Module):
             self.scaling_c = nn.Parameter(torch.empty(G))
 
             # self.register_buffer('scaling_c', torch.empty(G))
-            self.register_buffer('scaling', torch.empty(G))
+            self.register_buffer('scaling_u', torch.empty(G))
+            self.register_buffer('scaling_s', torch.empty(G))
             self.register_buffer('sigma_c', torch.empty(G))
             self.register_buffer('sigma_u', torch.empty(G))
             self.register_buffer('sigma_s', torch.empty(G))
@@ -264,8 +267,10 @@ class Decoder(nn.Module):
 
     def init_ode(self, c, u, s, p):
         G = self.adata.n_vars
+        print("Initialization using the steady-state and dynamical models.")
         out = init_params(c, u, s, p, fit_scaling=True, global_std=self.global_std, tmax=self.tmax)
-        alpha_c, alpha, beta, gamma, scaling_c, scaling, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, t, cpred, upred, spred = out
+        alpha_c, alpha, beta, gamma, scaling_c, scaling_u, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, t, cpred, upred, spred = out
+        scaling_s = np.ones_like(scaling_u)
 
         if self.init_method == 'tprior':
             w = assign_gene_mode_tprior(self.adata, self.init_key, self.train_idx)
@@ -276,6 +281,7 @@ class Decoder(nn.Module):
             sigma_c = np.clip(sigma_c, np.min(sigma_c[self.adata.var['quantile_genes']]), np.max(sigma_c[self.adata.var['quantile_genes']]))
             sigma_u = np.clip(sigma_u, np.min(sigma_u[self.adata.var['quantile_genes']]), np.max(sigma_u[self.adata.var['quantile_genes']]))
             sigma_s = np.clip(sigma_s, np.min(sigma_s[self.adata.var['quantile_genes']]), np.max(sigma_s[self.adata.var['quantile_genes']]))
+            print(sigma_c[973], sigma_u[973], sigma_s[973])
         print(f"Initial induction: {np.sum(w >= 0.5)}, repression: {np.sum(w < 0.5)} out of {G}.")
         self.adata.var["w_init"] = w
         logit_pw = 0.5*(np.log(w+1e-10) - np.log(1-w-1e-10))
@@ -283,7 +289,7 @@ class Decoder(nn.Module):
         self.logit_pw = nn.Parameter(torch.tensor(logit_pw))
 
         if self.init_method == "tprior":
-            print("Initialization using prior time.")
+            print("Reinitialization using prior time.")
             self.alpha_c_ = alpha_c
             self.alpha_ = alpha
             self.beta_ = beta
@@ -305,11 +311,10 @@ class Decoder(nn.Module):
             self.t_init = self.t_init
             self.t_init = self.t_init/self.t_init.max()*self.tmax
             if self.reinit:
-                toff = get_ts_global(self.t_init, u/scaling, s, 95)
-                alpha_c, alpha, beta, gamma, ton = reinit_params(c/scaling_c, u/scaling, s, self.t_init, toff)
+                toff = get_ts_global(self.t_init, u/scaling_u, s, 95)
+                alpha_c, alpha, beta, gamma, ton = reinit_params(c/scaling_c, u/scaling_u, s, self.t_init, toff)
 
         else:
-            print("Initialization using the steady-state and dynamical models.")
             self.alpha_c_ = alpha_c
             self.alpha_ = alpha
             self.beta_ = beta
@@ -333,17 +338,50 @@ class Decoder(nn.Module):
                     for i in range(t.shape[1]):
                         t_eq[:, i] = hist_equal(t[:, i], self.tmax, 0.9, n_bin)
                     self.t_init = np.quantile(t_eq, 0.5, 1)
-                toff = get_ts_global(self.t_init, c/scaling_c, u/scaling, s, 95)
-                alpha_c, alpha, beta, gamma, ton = reinit_params(c/scaling_c, u/scaling, s, self.t_init, toff)
+                toff = get_ts_global(self.t_init, c/scaling_c, u/scaling_u, s, 95)
+                alpha_c, alpha, beta, gamma, ton = reinit_params(c/scaling_c, u/scaling_u, s, self.t_init, toff)
 
         if self.cvae:
             print("Computing scaling factors for each batch class.")
             scaling_c = np.ones((self.dim_cond, G))
-            scaling = np.ones((self.dim_cond, G))
+            scaling_u = np.ones((self.dim_cond, G))
+            scaling_s = np.ones((self.dim_cond, G))
+            if self.ref_batch is None:
+                self.ref_batch = 0
+            ci = c[self.batch[self.train_idx] == self.ref_batch]
+            ui = u[self.batch[self.train_idx] == self.ref_batch]
+            si = s[self.batch[self.train_idx] == self.ref_batch]
+            filt = (si > 0) * (ui > 0) * (ci > 0)
+            ci[~filt] = np.nan
+            ui[~filt] = np.nan
+            si[~filt] = np.nan
+            std_u_ref, std_s_ref = np.nanstd(ui, axis=0), np.nanstd(si, axis=0)
+            scaling_c[self.ref_batch] = np.clip(np.nanpercentile(ci, 99.5, axis=0), 1e-3, None)
+            scaling_u[self.ref_batch] = np.clip(std_u_ref / std_s_ref, 1e-6, 1e6)
+            scaling_s[self.ref_batch] = 1.0
             for i in range(self.dim_cond):
-                filt = self.batch[self.train_idx] == i
-                out = init_params(c[filt], u[filt], s[filt], p, fit_scaling=True, global_std=self.global_std, tmax=self.tmax)
-                scaling_c[i], scaling[i] = out[4], out[5]
+                if i != self.ref_batch:
+                    ci = c[self.batch[self.train_idx] == i]
+                    ui = u[self.batch[self.train_idx] == i]
+                    si = s[self.batch[self.train_idx] == i]
+                    filt = (si > 0) * (ui > 0) * (ci > 0)
+                    ci[~filt] = np.nan
+                    ui[~filt] = np.nan
+                    si[~filt] = np.nan
+                    std_u, std_s = np.nanstd(ui, axis=0), np.nanstd(si, axis=0)
+                    scaling_c[i] = np.clip(np.nanpercentile(ci, 99.5, axis=0), 1e-3, None)
+                    scaling_u[i] = np.clip(std_u / (std_s_ref*(~np.isnan(std_s_ref)) + std_s*np.isnan(std_s_ref)), 1e-6, 1e6)
+                    scaling_s[i] = np.clip(std_s / (std_s_ref*(~np.isnan(std_s_ref)) + std_s*np.isnan(std_s_ref)), 1e-6, 1e6)
+        if np.any(np.isnan(scaling_u)):
+            print('scaling_u invalid nan')
+        if np.any(np.isinf(scaling_u)):
+            print('scaling_u invalid inf')
+        if np.any(np.isnan(scaling_s)):
+            print('scaling_s invalid nan')
+        if np.any(np.isinf(scaling_s)):
+            print('scaling_s invalid inf')
+        scaling_u[np.isnan(scaling_u)] = 1.0
+        scaling_s[np.isnan(scaling_s)] = 1.0
 
         self.alpha_c = self.to_param(alpha_c)
         self.alpha = self.to_param(alpha)
@@ -359,7 +397,8 @@ class Decoder(nn.Module):
             self.ton = nn.Parameter(torch.zeros(G))
         else:
             self.ton = nn.Parameter(torch.tensor(ton+1e-10))
-        self.register_buffer('scaling', torch.tensor(scaling))
+        self.register_buffer('scaling_u', torch.tensor(scaling_u))
+        self.register_buffer('scaling_s', torch.tensor(scaling_s))
         self.register_buffer('sigma_c', torch.tensor(sigma_c))
         self.register_buffer('sigma_u', torch.tensor(sigma_u))
         self.register_buffer('sigma_s', torch.tensor(sigma_s))
@@ -384,6 +423,10 @@ class Decoder(nn.Module):
             return self.gamma
         elif x == 'scaling_c':
             return self.scaling_c
+        elif x == 'scaling_u':
+            return self.scaling_u
+        elif x == 'scaling_s':
+            return self.scaling_s
 
     def reparameterize(self, condition=None, sample=True):
         if self.is_full_vb:
@@ -417,7 +460,8 @@ class Decoder(nn.Module):
             beta = self.beta
             gamma = self.gamma
         scaling_c = self.scaling_c
-        scaling = self.scaling
+        scaling_u = self.scaling_u
+        scaling_s = self.scaling_s
 
         if self.log_params:
             alpha_c = alpha_c.exp()
@@ -438,12 +482,13 @@ class Decoder(nn.Module):
             beta = torch.mm(condition, beta)
             gamma = torch.mm(condition, gamma)
             scaling_c = torch.mm(condition, scaling_c)
-            scaling = torch.mm(condition, scaling)
+            scaling_u = torch.mm(condition, scaling_u)
+            scaling_s = torch.mm(condition, scaling_s)
 
-        return alpha_c, alpha, beta, gamma, scaling_c, scaling
+        return alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s
 
     def forward(self, t, z, c0=None, u0=None, s0=None, t0=None, condition=None, neg_slope=0.0, sample=True, four_basis=False, return_velocity=False, use_input_time=False, backward=False):
-        alpha_c, alpha, beta, gamma, scaling_c, scaling = self.reparameterize(condition, sample)
+        alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s = self.reparameterize(condition, sample)
         if condition is None:
             self.rho = self.net_rho(z)
             self.kc = self.net_kc(z if self.parallel_arch else self.rho)
@@ -496,8 +541,8 @@ class Decoder(nn.Module):
         else:
             chat, uhat, shat = pred_func(F.leaky_relu(t_ - t0, neg_slope),
                                          c0/scaling_c,
-                                         u0/scaling,
-                                         s0,
+                                         u0/scaling_u,
+                                         s0/scaling_s,
                                          self.kc,
                                          alpha_c,
                                          self.rho,
@@ -505,7 +550,8 @@ class Decoder(nn.Module):
                                          beta,
                                          gamma)
         chat = chat * scaling_c
-        uhat = uhat * scaling
+        uhat = uhat * scaling_u
+        shat = shat * scaling_s
 
         if return_velocity:
             vc = self.kc * alpha_c - alpha_c * chat
@@ -613,7 +659,7 @@ class VAEChrom():
             "neg_slope2": 0.01,
             "k_alt": 0,
             "train_ton": False,
-            "train_scaling": True,
+            "train_scaling": False,
             "knn_use_pred": True,
             "run_2nd_stage": run_2nd_stage,
             "velocity_continuity": velocity_continuity,
@@ -642,6 +688,7 @@ class VAEChrom():
                                dim_z,
                                dim_cond=self.n_batch,
                                batch_idx=self.batch_,
+                               ref_batch=self.ref_batch,
                                N1=hidden_size[2],
                                N2=hidden_size[3],
                                parallel_arch=parallel_arch,
@@ -666,6 +713,7 @@ class VAEChrom():
         self.s0 = None
         self.t0 = None
         self.x0_index = None
+        self.c1 = None
         self.u1 = None
         self.s1 = None
         self.t1 = None
@@ -745,7 +793,9 @@ class VAEChrom():
     def encode_batch(self, adata):
         self.n_batch = 0
         self.batch = None
+        self.batch_ = None
         batch_count = None
+        self.ref_batch = self.config['ref_batch']
         if self.config['batch_key'] is not None and self.config['batch_key'] in adata.obs:
             print('CVAE enabled. Performing batch effect correction.')
             batch_raw = adata.obs[self.config['batch_key']].to_numpy()
@@ -755,8 +805,7 @@ class VAEChrom():
             self.batch_ = np.array([self.batch_dic[x] for x in batch_raw])
             self.batch = torch.tensor(self.batch_, dtype=int, device=self.device)
             self.batch_names = np.array([self.batch_dic[batch_names_raw[i]] for i in range(self.n_batch)])
-        if isinstance(self.config['ref_batch'], int):
-            self.ref_batch = self.config['ref_batch']
+        if isinstance(self.ref_batch, int):
             if self.ref_batch >= self.n_batch:
                 self.ref_batch = self.n_batch - 1
             elif self.ref_batch < -self.n_batch:
@@ -764,7 +813,7 @@ class VAEChrom():
             print(f'Reference batch set to {self.ref_batch} ({batch_names_raw[self.ref_batch]}).')
             if np.issubdtype(batch_names_raw.dtype, np.number) and 0 not in batch_names_raw:
                 print('Warning: integer batch names do not start from 0. Reference batch index may not match the actual batch name!')
-        elif isinstance(self.config['ref_batch'], str):
+        elif isinstance(self.ref_batch, str):
             if self.config['ref_batch'] in batch_names_raw:
                 self.ref_batch = self.batch_dic[self.config['ref_batch']]
                 print(f'Reference batch set to {self.ref_batch} ({batch_names_raw[self.ref_batch]}).')
@@ -827,13 +876,15 @@ class VAEChrom():
                 scaling_c = np.dot(onehot, np.exp(self.decoder.scaling_c.detach().cpu().numpy()))
             else:
                 scaling_c = np.dot(onehot, F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy())
-            scaling = np.dot(onehot, self.decoder.scaling.detach().cpu().numpy())
+            scaling_u = np.dot(onehot, self.decoder.scaling_u.detach().cpu().numpy())
+            scaling_s = np.dot(onehot, self.decoder.scaling_s.detach().cpu().numpy())
         else:
             if self.config['log_params']:
                 scaling_c = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
             else:
                 scaling_c = F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy()
-            scaling = self.decoder.scaling.detach().cpu().numpy()
+            scaling_u = self.decoder.scaling_u.detach().cpu().numpy()
+            scaling_s = self.decoder.scaling_s.detach().cpu().numpy()
 
         t = self.decoder.t_[:, gind]
         c = self.adata_atac.layers['Mc'][self.train_idx, :][:, gind]
@@ -862,11 +913,11 @@ class VAEChrom():
 
             plot_sig(t[:, i].squeeze(),
                      c[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
-                     u[:, i] / (scaling[:, gind][:, i] if self.enable_cvae else scaling[gind][i]),
-                     s[:, i],
+                     u[:, i] / (scaling_u[:, gind][:, i] if self.enable_cvae else scaling_u[gind][i]),
+                     s[:, i] / (scaling_s[:, gind][:, i] if self.enable_cvae else scaling_s[gind][i]),
                      chat[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
-                     uhat[:, i] / (scaling[:, gind][:, i] if self.enable_cvae else scaling[gind][i]),
-                     shat[:, i],
+                     uhat[:, i] / (scaling_u[:, gind][:, i] if self.enable_cvae else scaling_u[gind][i]),
+                     shat[:, i] / (scaling_s[:, gind][:, i] if self.enable_cvae else scaling_s[gind][i]),
                      cell_labels_raw[self.train_idx],
                      gene_plot[i],
                      save=f"{figure_path}/sig-scaled-{gene_plot[i]}-init.png",
@@ -901,11 +952,11 @@ class VAEChrom():
                        save=f"{figure_path}/phase-{gene_plot[i]}-init-us.png")
 
             plot_phase(c[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
-                       u[:, i] / (scaling[:, gind][:, i] if self.enable_cvae else scaling[gind][i]),
-                       s[:, i],
+                       u[:, i] / (scaling_u[:, gind][:, i] if self.enable_cvae else scaling_u[gind][i]),
+                       s[:, i] / (scaling_s[:, gind][:, i] if self.enable_cvae else scaling_s[gind][i]),
                        chat[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
-                       uhat[:, i] / (scaling[:, gind][:, i] if self.enable_cvae else scaling[gind][i]),
-                       shat[:, i],
+                       uhat[:, i] / (scaling_u[:, gind][:, i] if self.enable_cvae else scaling_u[gind][i]),
+                       shat[:, i] / (scaling_s[:, gind][:, i] if self.enable_cvae else scaling_s[gind][i]),
                        gene_plot[i],
                        'cu',
                        None,
@@ -915,11 +966,11 @@ class VAEChrom():
                        save=f"{figure_path}/phase-scaled-{gene_plot[i]}-init-cu.png")
 
             plot_phase(c[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
-                       u[:, i] / (scaling[:, gind][:, i] if self.enable_cvae else scaling[gind][i]),
-                       s[:, i],
+                       u[:, i] / (scaling_u[:, gind][:, i] if self.enable_cvae else scaling_u[gind][i]),
+                       s[:, i] / (scaling_s[:, gind][:, i] if self.enable_cvae else scaling_s[gind][i]),
                        chat[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
-                       uhat[:, i] / (scaling[:, gind][:, i] if self.enable_cvae else scaling[gind][i]),
-                       shat[:, i],
+                       uhat[:, i] / (scaling_u[:, gind][:, i] if self.enable_cvae else scaling_u[gind][i]),
+                       shat[:, i] / (scaling_s[:, gind][:, i] if self.enable_cvae else scaling_s[gind][i]),
                        gene_plot[i],
                        'us',
                        None,
@@ -942,16 +993,18 @@ class VAEChrom():
                     scaling_c = torch.exp(torch.mm(condition, self.decoder.scaling_c))
                 else:
                     scaling_c = F.softplus(torch.mm(condition, self.decoder.scaling_c), 10, 2)
-                scaling = torch.mm(condition, self.decoder.scaling)
+                scaling_u = torch.mm(condition, self.decoder.scaling_u)
+                scaling_s = torch.mm(condition, self.decoder.scaling_s)
             else:
                 if self.config['log_params']:
                     scaling_c = torch.exp(self.decoder.scaling_c)
                 else:
                     scaling_c = F.softplus(self.decoder.scaling_c, 10, 2)
-                scaling = self.decoder.scaling
+                scaling_u = self.decoder.scaling_u
+                scaling_s = self.decoder.scaling_s
             data_in_scale = torch.cat((data_in[:, :data_in.shape[1]//3]/scaling_c,
-                                       data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]/scaling,
-                                       data_in[:, data_in.shape[1]//3*2:]), 1)
+                                       data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]/scaling_u,
+                                       data_in[:, data_in.shape[1]//3*2:]/scaling_s), 1)
         mu_t, std_t, mu_z, std_z = self.encoder.forward(data_in_scale, condition)
         if t is None or z is None:
             if sample and not self.use_knn:
@@ -1113,7 +1166,7 @@ class VAEChrom():
         self.global_counter += 1
 
         if not self.use_knn and self.config["four_basis"]:
-            kldw = elbo_collapsed_categorical(self.decoder.logit_pw, self.alpha_w, 4, self.decoder.scaling.shape[0])
+            kldw = elbo_collapsed_categorical(self.decoder.logit_pw, self.alpha_w, 4, self.decoder.scaling_u.shape[0])
             loss += self.config["kl_w"]*kldw
 
         if self.is_full_vb:
@@ -1142,24 +1195,32 @@ class VAEChrom():
                     scaling_c = torch.exp(torch.mm(onehot, self.decoder.scaling_c))
                 else:
                     scaling_c = F.softplus(torch.mm(onehot, self.decoder.scaling_c), 10, 2)
-                scaling = torch.mm(onehot, self.decoder.scaling)
+                scaling_u = torch.mm(onehot, self.decoder.scaling_u)
+                scaling_s = torch.mm(onehot, self.decoder.scaling_s)
             else:
                 if self.config['log_params']:
                     scaling_c = torch.exp(self.decoder.scaling_c)
                 else:
                     scaling_c = F.softplus(self.decoder.scaling_c, 10, 2)
-                scaling = self.decoder.scaling
+                scaling_u = self.decoder.scaling_u
+                scaling_s = self.decoder.scaling_s
             forward_loss = (self.loss_vel(c0/scaling_c, chat/scaling_c, vc,
-                                          u0/scaling, uhat/scaling, vu,
-                                          s0, shat, vs)
+                                          u0/scaling_u, uhat/scaling_u, vu,
+                                          s0/scaling_s, shat/scaling_s, vs)
                             + self.loss_vel(chat/scaling_c, chat_fw/scaling_c, vc_fw,
-                                            uhat/scaling, uhat_fw/scaling, vu_fw,
-                                            shat, shat_fw, vs_fw))
+                                            uhat/scaling_u, uhat_fw/scaling_u, vu_fw,
+                                            shat/scaling_s, shat_fw/scaling_s, vs_fw))
             loss = loss - self.config["reg_forward"]*forward_loss
 
         if self.reg_velocity:
+            if onehot is not None:
+                scaling_u = torch.mm(onehot, self.decoder.scaling_u)
+                scaling_s = torch.mm(onehot, self.decoder.scaling_s)
+            else:
+                scaling_u = self.decoder.scaling_u
+                scaling_s = self.decoder.scaling_s
             _, _, beta, gamma = self.decoder.reparameterize(onehot, sample)
-            cos_sim = cosine_similarity(uhat/self.decoder.scaling, shat, beta, gamma, s_knn)
+            cos_sim = cosine_similarity(uhat/scaling_u, shat/scaling_s, beta, gamma, s_knn)
             loss = loss - self.config["reg_cos"]*cos_sim
 
         # print(err_rec, self.config["kl_t"]*kldt, self.config["kl_z"]*kldz,
@@ -1273,7 +1334,7 @@ class VAEChrom():
         if set_stop_thred:
             print(np.mean([y - x for x, y in zip(set_drop_loss, set_drop_loss[1:])]))
             # self.config['early_stop_thred'] = 0.25*np.mean([y - x for x, y in zip(set_drop_loss, set_drop_loss[1:])])
-            self.config['early_stop_thred'] = 0.5
+            self.config['early_stop_thred'] = 1.0
             print(f"Early stop threshold set to {self.config['early_stop_thred']:.4f}.")
 
         return stop_training
@@ -1845,13 +1906,15 @@ class VAEChrom():
                     scaling_c = np.dot(onehot, np.exp(self.decoder.scaling_c.detach().cpu().numpy()))
                 else:
                     scaling_c = np.dot(onehot, F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy())
-                scaling = np.dot(onehot, self.decoder.scaling.detach().cpu().numpy())
+                scaling_u = np.dot(onehot, self.decoder.scaling_u.detach().cpu().numpy())
+                scaling_s = np.dot(onehot, self.decoder.scaling_s.detach().cpu().numpy())
             else:
                 if self.config['log_params']:
                     scaling_c = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
                 else:
                     scaling_c = F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy()
-                scaling = self.decoder.scaling.detach().cpu().numpy()
+                scaling_u = self.decoder.scaling_u.detach().cpu().numpy()
+                scaling_s = self.decoder.scaling_s.detach().cpu().numpy()
 
             plot_time(t_, Xembed, save=f"{path}/time-{testid_str}.png")
 
@@ -1878,11 +1941,11 @@ class VAEChrom():
 
                 plot_sig(t_.squeeze(),
                          dataset.data[:, idx].cpu().numpy() / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
-                         dataset.data[:, idx+G].cpu().numpy() / (scaling[:, idx] if self.enable_cvae else scaling[idx]),
-                         dataset.data[:, idx+G*2].cpu().numpy(),
+                         dataset.data[:, idx+G].cpu().numpy() / (scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]),
+                         dataset.data[:, idx+G*2].cpu().numpy() / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
                          chat[:, i] / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
-                         uhat[:, i] / (scaling[:, idx] if self.enable_cvae else scaling[idx]),
-                         shat[:, i],
+                         uhat[:, i] / (scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]),
+                         shat[:, i] / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
                          np.array([self.label_dic_rev[x] for x in dataset.labels]),
                          gene_plot[i],
                          save=f"{path}/sig-scaled-{gene_plot[i]}-{testid_str}.png",
@@ -1891,13 +1954,13 @@ class VAEChrom():
                 if self.use_knn and self.config['velocity_continuity']:
                     plot_vel(t_.squeeze(),
                              chat[:, i] / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
-                             uhat[:, i] / (scaling[:, idx] if self.enable_cvae else scaling[idx]),
-                             shat[:, i],
+                             uhat[:, i] / (scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]),
+                             shat[:, i] / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
                              out["vc"][:, i], out["vu"][:, i], out["vs"][:, i],
                              self.t0[cell_idx].squeeze().detach().cpu().numpy(),
                              self.c0[cell_idx, idx].detach().cpu().numpy() / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
-                             self.u0[cell_idx, idx].detach().cpu().numpy() / (scaling[:, idx] if self.enable_cvae else scaling[idx]),
-                             self.s0[cell_idx, idx].detach().cpu().numpy(),
+                             self.u0[cell_idx, idx].detach().cpu().numpy() / (scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]),
+                             self.s0[cell_idx, idx].detach().cpu().numpy() / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
                              title=gene_plot[i],
                              save=f"{path}/vel-{gene_plot[i]}-{testid_str}.png")
 
@@ -1915,11 +1978,11 @@ class VAEChrom():
 
                     plot_sig(t_.squeeze(),
                              dataset.data[:, idx].cpu().numpy() / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
-                             dataset.data[:, idx+G].cpu().numpy() / (scaling[:, idx] if self.enable_cvae else scaling[idx]),
-                             dataset.data[:, idx+G*2].cpu().numpy(),
+                             dataset.data[:, idx+G].cpu().numpy() / (scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]),
+                             dataset.data[:, idx+G*2].cpu().numpy() / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
                              out["chat_fw"][:, i] / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
-                             out["uhat_fw"][:, i] / (scaling[:, idx] if self.enable_cvae else scaling[idx]),
-                             out["shat_fw"][:, i],
+                             out["uhat_fw"][:, i] / (scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]),
+                             out["shat_fw"][:, i] / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
                              np.array([self.label_dic_rev[x] for x in dataset.labels]),
                              gene_plot[i],
                              save=f"{path}/sig-scaled-{gene_plot[i]}-{testid_str}-bw.png",
@@ -1933,12 +1996,12 @@ class VAEChrom():
                                output=["chat", "uhat", "shat"],
                                gene_idx=np.array(range(G)),
                                batch=F.one_hot(dataset.batch, self.n_batch).float() if self.enable_cvae else None)
-        std_c = np.clip((out["chat"] - dataset.data[:, :G].cpu().numpy()).std(0), 0.1, None)
-        std_u = np.clip((out["uhat"] - dataset.data[:, G:G*2].cpu().numpy()).std(0), 0.1, None)
-        std_s = np.clip((out["shat"] - dataset.data[:, G*2:].cpu().numpy()).std(0), 0.1, None)
-        std_c[np.isnan(std_c)] = 0.1
-        std_u[np.isnan(std_u)] = 0.1
-        std_s[np.isnan(std_s)] = 0.1
+        std_c = np.clip((out["chat"] - dataset.data[:, :G].cpu().numpy()).std(0), 0.01, None)
+        std_u = np.clip((out["uhat"] - dataset.data[:, G:G*2].cpu().numpy()).std(0), 0.01, None)
+        std_s = np.clip((out["shat"] - dataset.data[:, G*2:].cpu().numpy()).std(0), 0.01, None)
+        std_c[np.isnan(std_c)] = 1
+        std_u[np.isnan(std_u)] = 1
+        std_s[np.isnan(std_s)] = 1
         self.decoder.register_buffer('sigma_c', torch.tensor(std_c, dtype=torch.float, device=self.device))
         self.decoder.register_buffer('sigma_u', torch.tensor(std_u, dtype=torch.float, device=self.device))
         self.decoder.register_buffer('sigma_s', torch.tensor(std_s, dtype=torch.float, device=self.device))
@@ -2015,13 +2078,15 @@ class VAEChrom():
                     self.adata.var[f"{mode}_scaling_c_{i}"] = np.exp(self.decoder.scaling_c[i].detach().cpu().numpy())
                 else:
                     self.adata.var[f"{mode}_scaling_c_{i}"] = F.softplus(self.decoder.scaling_c[i].detach().cpu(), 10, 2).numpy()
-                self.adata.var[f"{mode}_scaling_{i}"] = self.decoder.scaling[i].detach().cpu().numpy()
+                self.adata.var[f"{mode}_scaling_u_{i}"] = self.decoder.scaling_u[i].detach().cpu().numpy()
+                self.adata.var[f"{mode}_scaling_s_{i}"] = self.decoder.scaling_s[i].detach().cpu().numpy()
         else:
             if self.config['log_params']:
                 self.adata.var[f"{mode}_scaling_c"] = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
             else:
                 self.adata.var[f"{mode}_scaling_c"] = F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy()
-            self.adata.var[f"{mode}_scaling"] = self.decoder.scaling.detach().cpu().numpy()
+            self.adata.var[f"{mode}_scaling_u"] = self.decoder.scaling_u.detach().cpu().numpy()
+            self.adata.var[f"{mode}_scaling_s"] = self.decoder.scaling_s.detach().cpu().numpy()
         self.adata.var[f"{mode}_sigma_c"] = self.decoder.sigma_c.detach().cpu().numpy()
         self.adata.var[f"{mode}_sigma_u"] = self.decoder.sigma_u.detach().cpu().numpy()
         self.adata.var[f"{mode}_sigma_s"] = self.decoder.sigma_s.detach().cpu().numpy()
