@@ -242,7 +242,7 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1):
     c0, u0, s0 = np.zeros((ngene)), np.zeros((ngene)), np.zeros((ngene))
     cpred, upred, spred = np.zeros_like(u), np.zeros_like(u), np.zeros_like(u)
 
-    for i in range(ngene):
+    for i in tqdm_notebook(range(ngene)):
         ci, ui, si = c[:, i], u[:, i], s[:, i]
         cfilt = ci[(si > 0) & (ui > 0) & (ci > 0)]
         ufilt = ui[(si > 0) & (ui > 0) & (ci > 0)]
@@ -279,7 +279,6 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1):
         sigma_c = np.clip(np.nanstd(c, 0), 0.01, None)
         sigma_u = np.clip(np.nanstd(u, 0), 0.01, None)
         sigma_s = np.clip(np.nanstd(s, 0), 0.01, None)
-        print(sigma_c[973], sigma_u[973], sigma_s[973])
     else:
         dist_c = c - cpred
         dist_u = u - upred
@@ -287,6 +286,7 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1):
         sigma_c = np.clip(np.nanstd(dist_c, 0), 0.01, None)
         sigma_u = np.clip(np.nanstd(dist_u, 0), 0.01, None)
         sigma_s = np.clip(np.nanstd(dist_s, 0), 0.01, None)
+    # print(sigma_c[647], sigma_u[647], sigma_s[647])
     sigma_c[np.isnan(sigma_c)] = 1
     sigma_u[np.isnan(sigma_u)] = 1
     sigma_s[np.isnan(sigma_s)] = 1
@@ -453,6 +453,10 @@ def reparameterize(mu, std):
     return std*eps + mu
 
 
+def softplusinv(x, beta=1.0):
+    return (1/beta * np.log(np.exp(beta * np.clip(x, 0, 20)) - 1)) * (x <= 20) + x * (x > 20)
+
+
 def knn_approx(c, u, s, c0, u0, s0, k):
     x = np.concatenate((c, u, s), 1)
     x0 = np.concatenate((c0, u0, s0), 1)
@@ -506,6 +510,10 @@ def knnx0_index(t,
     len_avg = 0
     if hist_eq:
         t, t_query = _hist_equal(t, t_query)
+    k_global = np.clip(len(t)//20, 10, 1000)
+    print(f'Using {k_global} latent neighbors to select ancestors.')
+    knn_z = NearestNeighbors(n_neighbors=k_global)
+    knn_z.fit(z)
     neighbor_index = []
     for i in tqdm_notebook(range(Nq)):
         if adaptive > 0:
@@ -516,24 +524,27 @@ def knnx0_index(t,
             t_ub, t_lb = t_query[i] + dt_l, t_query[i] + dt_r
         else:
             t_ub, t_lb = t_query[i] - dt_r, t_query[i] - dt_l
-        indices = np.where((t >= t_lb) & (t < t_ub))[0]
+        _, filt = knn_z.kneighbors(z_query[i:i+1])
+        filt_bin = np.zeros_like(t).astype(bool)
+        filt_bin[filt] = True
+        indices = np.where((t >= t_lb) & (t < t_ub) & filt_bin)[0]
         k_ = len(indices)
         delta_t = dt[1] - dt[0]  # increment / decrement of the time window boundary
-        while k_ < k and t_lb > t.min() - (dt[1] - dt[0]) and t_ub < t.max() + (dt[1] - dt[0]):
+        while k_ < k and t_lb > t[filt].min() - 5*delta_t and t_ub < t[filt].max() + 5*delta_t:
             if forward:
-                t_lb = t_query[i]
+                t_lb = np.clip(t_lb - delta_t/5, t_query[i], None)
                 t_ub = t_ub + delta_t
             else:
                 t_lb = t_lb - delta_t
-                t_ub = t_query[i]
-            indices = np.where((t >= t_lb) & (t < t_ub))[0]  # filter out cells in the bin
+                t_ub = np.clip(t_ub + delta_t/5, None, t_query[i])
+            indices = np.where((t >= t_lb) & (t < t_ub) & filt_bin)[0]  # select cells in the bin
             k_ = len(indices)
         len_avg = len_avg + k_
         if k_ > 0:
             k_neighbor = k if k_ > k else max(1, k_//2)
             knn_model = NearestNeighbors(n_neighbors=k_neighbor)
             knn_model.fit(z[indices])
-            dist, ind = knn_model.kneighbors(z_query[i:i+1])
+            _, ind = knn_model.kneighbors(z_query[i:i+1])
             if k_neighbor > 1:
                 neighbor_index.append(indices[ind.squeeze()].astype(int))
             else:

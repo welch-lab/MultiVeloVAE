@@ -10,7 +10,7 @@ from velovae.plotting_chrom import plot_sig_, plot_sig, plot_vel, plot_phase, pl
 from .model_util import hist_equal, convert_time, get_gene_index
 from .model_util import elbo_collapsed_categorical, assign_gene_mode_tprior
 from .model_util_chrom import pred_exp, pred_exp_backward, init_params, get_ts_global, reinit_params
-from .model_util_chrom import kl_gaussian, reparameterize, knnx0_index, get_x0
+from .model_util_chrom import kl_gaussian, reparameterize, softplusinv, knnx0_index, get_x0
 from .model_util_chrom import cosine_similarity, find_dirichlet_param, assign_gene_mode
 from .transition_graph import encode_type
 from .training_data_chrom import SCData
@@ -42,22 +42,22 @@ class Encoder(nn.Module):
         # self.dpt2 = nn.Dropout(p=0.2)
         # self.net = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1,
         #                          self.fc2, self.bn2, nn.LeakyReLU(), self.dpt2)
-        self.fc1 = nn.Linear(Cin+dim_cond, N1)
-        self.bn1 = nn.BatchNorm1d(N1)
+        self.fc1 = nn.Linear(Cin+dim_cond, N2)
+        self.bn1 = nn.BatchNorm1d(N2)
         self.dpt1 = nn.Dropout(p=0.2)
         self.net = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1)
 
         # self.fc_mu_t = nn.Linear(N2, dim_z if t_network else 1)
         # self.fc_std_t = nn.Linear(N2, dim_z if t_network else 1)
-        self.fc_mu_t = nn.Linear(N1, dim_z if t_network else 1)
-        self.fc_std_t = nn.Linear(N1, dim_z if t_network else 1)
+        self.fc_mu_t = nn.Linear(N2, dim_z if t_network else 1)
+        self.fc_std_t = nn.Linear(N2, dim_z if t_network else 1)
         self.spt = nn.Softplus()
         self.spt1 = nn.Softplus()
 
         # self.fc_mu_z = nn.Linear(N2, dim_z)
         # self.fc_std_z = nn.Linear(N2, dim_z)
-        self.fc_mu_z = nn.Linear(N1, dim_z)
-        self.fc_std_z = nn.Linear(N1, dim_z)
+        self.fc_mu_z = nn.Linear(N2, dim_z)
+        self.fc_std_z = nn.Linear(N2, dim_z)
         self.spt2 = nn.Softplus()
 
         if checkpoint is not None:
@@ -160,17 +160,17 @@ class Decoder(nn.Module):
         #                             self.fc4, self.bn4, nn.LeakyReLU(), self.dpt4,
         #                             self.fc_out2, nn.Hardtanh(0, 1))
 
-        self.fc1 = nn.Linear(dim_z+dim_cond, N2)
-        self.bn1 = nn.BatchNorm1d(N2)
+        self.fc1 = nn.Linear(dim_z+dim_cond, N1)
+        self.bn1 = nn.BatchNorm1d(N1)
         self.dpt1 = nn.Dropout(p=0.2)
-        self.fc_out1 = nn.Linear(N2, G)
+        self.fc_out1 = nn.Linear(N1, G)
         self.net_rho = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1,
                                      self.fc_out1, nn.Sigmoid())
 
-        self.fc2 = nn.Linear(dim_z+dim_cond if self.parallel_arch else G, N2)
-        self.bn2 = nn.BatchNorm1d(N2)
+        self.fc2 = nn.Linear(dim_z+dim_cond if self.parallel_arch else G, N1)
+        self.bn2 = nn.BatchNorm1d(N1)
         self.dpt2 = nn.Dropout(p=0.2)
-        self.fc_out2 = nn.Linear(N2, G)
+        self.fc_out2 = nn.Linear(N1, G)
         self.net_kc = nn.Sequential(self.fc2, self.bn2, nn.LeakyReLU(), self.dpt2,
                                     self.fc_out2, nn.Sigmoid())
 
@@ -185,9 +185,11 @@ class Decoder(nn.Module):
             self.beta = nn.Parameter(torch.empty(self.params_shape))
             self.gamma = nn.Parameter(torch.empty(self.params_shape))
             self.scaling_c = nn.Parameter(torch.empty(G))
+            self.scaling_u = nn.Parameter(torch.empty(G))
+            # self.scaling_s = nn.Parameter(torch.empty(G))
 
             # self.register_buffer('scaling_c', torch.empty(G))
-            self.register_buffer('scaling_u', torch.empty(G))
+            # self.register_buffer('scaling_u', torch.empty(G))
             self.register_buffer('scaling_s', torch.empty(G))
             self.register_buffer('sigma_c', torch.empty(G))
             self.register_buffer('sigma_u', torch.empty(G))
@@ -232,14 +234,14 @@ class Decoder(nn.Module):
     def to_param(self, x):
         if self.is_full_vb:
             if self.cvae:
-                return nn.Parameter(torch.tensor(np.tile(np.stack([np.log(x) if self.log_params else x, np.log(0.05)*np.ones(self.params_shape[2])]), (self.params_shape[0], 1, 1))))
+                return nn.Parameter(torch.tensor(np.tile(np.stack([np.log(x) if self.log_params else softplusinv(x), np.log(0.05)*np.ones(self.params_shape[2])]), (self.params_shape[0], 1, 1))))
             else:
-                return nn.Parameter(torch.tensor(np.stack([np.log(x) if self.log_params else x, np.log(0.05)*np.ones(self.params_shape[1])])))
+                return nn.Parameter(torch.tensor(np.stack([np.log(x) if self.log_params else softplusinv(x), np.log(0.05)*np.ones(self.params_shape[1])])))
         else:
             if self.cvae:
-                return nn.Parameter(torch.tensor(np.tile(np.log(x) if self.log_params else x, (self.params_shape[0], 1))))
+                return nn.Parameter(torch.tensor(np.tile(np.log(x) if self.log_params else softplusinv(x), (self.params_shape[0], 1))))
             else:
-                return nn.Parameter(torch.tensor(np.log(x) if self.log_params else x))
+                return nn.Parameter(torch.tensor(np.log(x) if self.log_params else softplusinv(x)))
 
     def init_weights(self, reinit_t=True):
         for m in self.net_rho.modules():
@@ -281,7 +283,7 @@ class Decoder(nn.Module):
             sigma_c = np.clip(sigma_c, np.min(sigma_c[self.adata.var['quantile_genes']]), np.max(sigma_c[self.adata.var['quantile_genes']]))
             sigma_u = np.clip(sigma_u, np.min(sigma_u[self.adata.var['quantile_genes']]), np.max(sigma_u[self.adata.var['quantile_genes']]))
             sigma_s = np.clip(sigma_s, np.min(sigma_s[self.adata.var['quantile_genes']]), np.max(sigma_s[self.adata.var['quantile_genes']]))
-            print(sigma_c[973], sigma_u[973], sigma_s[973])
+            # print(sigma_c[647], sigma_u[647], sigma_s[647])
         print(f"Initial induction: {np.sum(w >= 0.5)}, repression: {np.sum(w < 0.5)} out of {G}.")
         self.adata.var["w_init"] = w
         logit_pw = 0.5*(np.log(w+1e-10) - np.log(1-w-1e-10))
@@ -387,7 +389,11 @@ class Decoder(nn.Module):
         self.alpha = self.to_param(alpha)
         self.beta = self.to_param(beta)
         self.gamma = self.to_param(gamma)
-        self.scaling_c = nn.Parameter(torch.tensor(np.log(scaling_c) if self.log_params else scaling_c))
+        self.scaling_c = nn.Parameter(torch.tensor(np.log(scaling_c) if self.log_params else softplusinv(scaling_c)))
+        self.scaling_u = nn.Parameter(torch.tensor(np.log(scaling_u) if self.log_params else softplusinv(scaling_u)))
+        # self.scaling_s = nn.Parameter(torch.tensor(np.log(scaling_s) if self.log_params else scaling_s))
+        # self.register_buffer('scaling_u', torch.tensor(scaling_u))
+        self.register_buffer('scaling_s', torch.tensor(scaling_s))
 
         self.c0 = nn.Parameter(torch.tensor(np.log(c0+1e-10) if self.log_params else c0))
         self.u0 = nn.Parameter(torch.tensor(np.log(u0+1e-10) if self.log_params else u0))
@@ -397,8 +403,6 @@ class Decoder(nn.Module):
             self.ton = nn.Parameter(torch.zeros(G))
         else:
             self.ton = nn.Parameter(torch.tensor(ton+1e-10))
-        self.register_buffer('scaling_u', torch.tensor(scaling_u))
-        self.register_buffer('scaling_s', torch.tensor(scaling_s))
         self.register_buffer('sigma_c', torch.tensor(sigma_c))
         self.register_buffer('sigma_u', torch.tensor(sigma_u))
         self.register_buffer('sigma_s', torch.tensor(sigma_s))
@@ -428,7 +432,7 @@ class Decoder(nn.Module):
         elif x == 'scaling_s':
             return self.scaling_s
 
-    def reparameterize(self, condition=None, sample=True):
+    def reparameterize(self, condition=None, sample=True, four_basis=False):
         if self.is_full_vb:
             if sample:
                 G = self.adata.n_vars
@@ -469,12 +473,16 @@ class Decoder(nn.Module):
             beta = beta.exp()
             gamma = gamma.exp()
             scaling_c = scaling_c.exp()
+            scaling_u = scaling_u.exp()
+            # scaling_s = scaling_s.exp()
         else:
-            alpha_c = F.softplus(alpha_c, 10, 2)
-            alpha = F.softplus(alpha, 10, 2)
-            beta = F.softplus(beta, 10, 2)
-            gamma = F.softplus(gamma, 10, 2)
-            scaling_c = F.softplus(scaling_c, 10, 2)
+            alpha_c = F.softplus(alpha_c)
+            alpha = F.softplus(alpha)
+            beta = F.softplus(beta)
+            gamma = F.softplus(gamma)
+            scaling_c = F.softplus(scaling_c)
+            scaling_u = F.softplus(scaling_u)
+            # scaling_s = F.softplus(scaling_s)
 
         if condition is not None:
             alpha_c = torch.mm(condition, alpha_c)
@@ -485,10 +493,19 @@ class Decoder(nn.Module):
             scaling_u = torch.mm(condition, scaling_u)
             scaling_s = torch.mm(condition, scaling_s)
 
+        if self.cvae and four_basis:
+            alpha_c = alpha_c.unsqueeze(1)
+            alpha = alpha.unsqueeze(1)
+            beta = beta.unsqueeze(1)
+            gamma = gamma.unsqueeze(1)
+            scaling_c = scaling_c.unsqueeze(1)
+            scaling_u = scaling_u.unsqueeze(1)
+            scaling_s = scaling_s.unsqueeze(1)
+
         return alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s
 
     def forward(self, t, z, c0=None, u0=None, s0=None, t0=None, condition=None, neg_slope=0.0, sample=True, four_basis=False, return_velocity=False, use_input_time=False, backward=False):
-        alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s = self.reparameterize(condition, sample)
+        alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s = self.reparameterize(condition, sample, four_basis)
         if condition is None:
             self.rho = self.net_rho(z)
             self.kc = self.net_kc(z if self.parallel_arch else self.rho)
@@ -588,6 +605,7 @@ class VAEChrom():
                  use_loss_std=False,
                  log_params=False,
                  learning_rate=None,
+                 early_stop_thred=1.0,
                  checkpoints=[None, None],
                  plot_init=False,
                  gene_plot=[],
@@ -632,14 +650,12 @@ class VAEChrom():
             # training parameters
             "n_epochs": 1000,
             "n_epochs_post": 500,
-            "n_epochs_final": 500,
             "n_refine": 20 if refine_velocity else 1,
             "batch_size": 256,
             "learning_rate": None,
             "learning_rate_ode": None,
             "learning_rate_x0": None,
             "learning_rate_post": None,
-            "learning_rate_final": None,
             "lambda": 1e-3,
             "lambda_post": 1e-3,
             "kl_t": 1.0,
@@ -649,17 +665,18 @@ class VAEChrom():
             "reg_forward": 10.0,
             "reg_cos": 0.0,
             "test_iter": None,
-            "save_epoch": 100,
+            "save_epoch": 50,
             "n_warmup": 6,
+            "n_warmup_post": 4,
             "weight_c": 0.6,
             "early_stop": 6,
-            "early_stop_thred": None,  # adata.n_vars*1e-3,
+            "early_stop_thred": early_stop_thred,  # adata.n_vars*1e-3,
             "train_test_split": 0.7,
             "neg_slope": 0.0,
             "neg_slope2": 0.01,
             "k_alt": 0,
             "train_ton": False,
-            "train_scaling": False,
+            "train_scaling": True,
             "knn_use_pred": True,
             "run_2nd_stage": run_2nd_stage,
             "velocity_continuity": velocity_continuity,
@@ -669,7 +686,7 @@ class VAEChrom():
             "sparsify": 1}
 
         self.set_device(device)
-        self.set_lr(adata, learning_rate)
+        self.set_lr(adata, adata_atac, learning_rate)
         self.split_train_test(adata.n_obs)
         self.encode_batch(adata)
         self.get_prior(adata)
@@ -748,20 +765,16 @@ class VAEChrom():
         else:
             self.device = torch.device('cpu')
 
-    def set_lr(self, adata, learning_rate):
+    def set_lr(self, adata, adata_atac, learning_rate):
         if learning_rate is None:
-            if issparse(adata.layers["unspliced"]):
-                p = np.sum(adata.layers["unspliced"].A > 0) + (np.sum(adata.layers["spliced"].A > 0))
-            else:
-                p = np.sum(adata.layers["unspliced"] > 0) + (np.sum(adata.layers["spliced"] > 0))
-            p /= adata.n_obs * adata.n_vars * 2
-            self.config["learning_rate"] = 10**(-4*p-3)
-            print(f'Learning rate set to {self.config["learning_rate"]:.4f} based on data sparsity.')
+            p = np.sum(adata_atac.layers['Mc'] > 0) + np.sum(adata.layers['Mu'] > 0) + (np.sum(adata.layers['Ms'] > 0))
+            p /= adata.n_obs * adata.n_vars * 3
+            self.config["learning_rate"] = 10**(p-4)
+            print(f'Learning rate set to {self.config["learning_rate"]*10000:.1f}e-4 based on data sparsity.')
         else:
             self.config["learning_rate"] = learning_rate
         self.config["learning_rate_post"] = self.config["learning_rate"]
-        self.config["learning_rate_final"] = self.config["learning_rate"]
-        self.config["learning_rate_ode"] = 8*self.config["learning_rate"]
+        self.config["learning_rate_ode"] = 10*self.config["learning_rate"]
         self.config["learning_rate_t0"] = self.config["learning_rate"]
 
     def set_mode(self, mode, net='both'):
@@ -874,16 +887,24 @@ class VAEChrom():
             onehot = F.one_hot(self.batch, self.n_batch).detach().cpu().numpy()[self.train_idx, :]
             if self.config['log_params']:
                 scaling_c = np.dot(onehot, np.exp(self.decoder.scaling_c.detach().cpu().numpy()))
+                scaling_u = np.dot(onehot, np.exp(self.decoder.scaling_u.detach().cpu().numpy()))
+                # scaling_s = np.dot(onehot, np.exp(self.decoder.scaling_s.detach().cpu().numpy()))
             else:
-                scaling_c = np.dot(onehot, F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy())
-            scaling_u = np.dot(onehot, self.decoder.scaling_u.detach().cpu().numpy())
+                scaling_c = np.dot(onehot, F.softplus(self.decoder.scaling_c.detach().cpu()).numpy())
+                scaling_u = np.dot(onehot, F.softplus(self.decoder.scaling_u.detach().cpu()).numpy())
+                # scaling_s = np.dot(onehot, F.softplus(self.decoder.scaling_s.detach().cpu()).numpy())
+            # scaling_u = np.dot(onehot, self.decoder.scaling_u.detach().cpu().numpy())
             scaling_s = np.dot(onehot, self.decoder.scaling_s.detach().cpu().numpy())
         else:
             if self.config['log_params']:
                 scaling_c = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
+                scaling_u = np.exp(self.decoder.scaling_u.detach().cpu().numpy())
+                # scaling_s = np.exp(self.decoder.scaling_s.detach().cpu().numpy())
             else:
-                scaling_c = F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy()
-            scaling_u = self.decoder.scaling_u.detach().cpu().numpy()
+                scaling_c = F.softplus(self.decoder.scaling_c.detach().cpu()).numpy()
+                scaling_u = F.softplus(self.decoder.scaling_u.detach().cpu()).numpy()
+                # scaling_s = F.softplus(self.decoder.scaling_s.detach().cpu()).numpy()
+            # scaling_u = self.decoder.scaling_u.detach().cpu().numpy()
             scaling_s = self.decoder.scaling_s.detach().cpu().numpy()
 
         t = self.decoder.t_[:, gind]
@@ -920,7 +941,7 @@ class VAEChrom():
                      shat[:, i] / (scaling_s[:, gind][:, i] if self.enable_cvae else scaling_s[gind][i]),
                      cell_labels_raw[self.train_idx],
                      gene_plot[i],
-                     save=f"{figure_path}/sig-scaled-{gene_plot[i]}-init.png",
+                     save=f"{figure_path}/sigscaled-{gene_plot[i]}-init.png",
                      sparsify=self.config['sparsify'])
 
             plot_phase(c[:, i],
@@ -963,7 +984,7 @@ class VAEChrom():
                        None,
                        cell_labels,
                        cell_types_raw,
-                       save=f"{figure_path}/phase-scaled-{gene_plot[i]}-init-cu.png")
+                       save=f"{figure_path}/phasescaled-{gene_plot[i]}-init-cu.png")
 
             plot_phase(c[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
                        u[:, i] / (scaling_u[:, gind][:, i] if self.enable_cvae else scaling_u[gind][i]),
@@ -977,7 +998,7 @@ class VAEChrom():
                        None,
                        cell_labels,
                        cell_types_raw,
-                       save=f"{figure_path}/phase-scaled-{gene_plot[i]}-init-us.png")
+                       save=f"{figure_path}/phasescaled-{gene_plot[i]}-init-us.png")
 
     def forward(self, data_in, t=None, z=None, c0=None, u0=None, s0=None, t0=None, t1=None, condition=None, sample=True):
         if self.config['unit_scale']:
@@ -991,16 +1012,24 @@ class VAEChrom():
             if condition is not None:
                 if self.config['log_params']:
                     scaling_c = torch.exp(torch.mm(condition, self.decoder.scaling_c))
+                    scaling_u = torch.exp(torch.mm(condition, self.decoder.scaling_u))
+                    # scaling_s = torch.exp(torch.mm(condition, self.decoder.scaling_s))
                 else:
-                    scaling_c = F.softplus(torch.mm(condition, self.decoder.scaling_c), 10, 2)
-                scaling_u = torch.mm(condition, self.decoder.scaling_u)
+                    scaling_c = F.softplus(torch.mm(condition, self.decoder.scaling_c))
+                    scaling_u = F.softplus(torch.mm(condition, self.decoder.scaling_u))
+                    # scaling_s = F.softplus(torch.mm(condition, self.decoder.scaling_s))
+                # scaling_u = torch.mm(condition, self.decoder.scaling_u)
                 scaling_s = torch.mm(condition, self.decoder.scaling_s)
             else:
                 if self.config['log_params']:
                     scaling_c = torch.exp(self.decoder.scaling_c)
+                    scaling_u = torch.exp(self.decoder.scaling_u)
+                    # scaling_s = torch.exp(self.decoder.scaling_s)
                 else:
-                    scaling_c = F.softplus(self.decoder.scaling_c, 10, 2)
-                scaling_u = self.decoder.scaling_u
+                    scaling_c = F.softplus(self.decoder.scaling_c)
+                    scaling_u = F.softplus(self.decoder.scaling_u)
+                    # scaling_s = F.softplus(self.decoder.scaling_s)
+                # scaling_u = self.decoder.scaling_u
                 scaling_s = self.decoder.scaling_s
             data_in_scale = torch.cat((data_in[:, :data_in.shape[1]//3]/scaling_c,
                                        data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]/scaling_u,
@@ -1193,16 +1222,24 @@ class VAEChrom():
             if onehot is not None:
                 if self.config['log_params']:
                     scaling_c = torch.exp(torch.mm(onehot, self.decoder.scaling_c))
+                    scaling_u = torch.exp(torch.mm(onehot, self.decoder.scaling_u))
+                    # scaling_s = torch.exp(torch.mm(onehot, self.decoder.scaling_s))
                 else:
-                    scaling_c = F.softplus(torch.mm(onehot, self.decoder.scaling_c), 10, 2)
-                scaling_u = torch.mm(onehot, self.decoder.scaling_u)
+                    scaling_c = F.softplus(torch.mm(onehot, self.decoder.scaling_c))
+                    scaling_u = F.softplus(torch.mm(onehot, self.decoder.scaling_u))
+                    # scaling_s = F.softplus(torch.mm(onehot, self.decoder.scaling_s))
+                # scaling_u = torch.mm(onehot, self.decoder.scaling_u)
                 scaling_s = torch.mm(onehot, self.decoder.scaling_s)
             else:
                 if self.config['log_params']:
                     scaling_c = torch.exp(self.decoder.scaling_c)
+                    scaling_u = torch.exp(self.decoder.scaling_u)
+                    # scaling_s = torch.exp(self.decoder.scaling_s)
                 else:
-                    scaling_c = F.softplus(self.decoder.scaling_c, 10, 2)
-                scaling_u = self.decoder.scaling_u
+                    scaling_c = F.softplus(self.decoder.scaling_c)
+                    scaling_u = F.softplus(self.decoder.scaling_u)
+                    # scaling_s = F.softplus(self.decoder.scaling_s)
+                # scaling_u = self.decoder.scaling_u
                 scaling_s = self.decoder.scaling_s
             forward_loss = (self.loss_vel(c0/scaling_c, chat/scaling_c, vc,
                                           u0/scaling_u, uhat/scaling_u, vu,
@@ -1214,10 +1251,22 @@ class VAEChrom():
 
         if self.reg_velocity:
             if onehot is not None:
-                scaling_u = torch.mm(onehot, self.decoder.scaling_u)
+                if self.config['log_params']:
+                    scaling_u = torch.exp(torch.mm(onehot, self.decoder.scaling_u))
+                #     scaling_s = torch.exp(torch.mm(onehot, self.decoder.scaling_s))
+                else:
+                    scaling_u = F.softplus(torch.mm(onehot, self.decoder.scaling_u))
+                #     scaling_s = F.softplus(torch.mm(onehot, self.decoder.scaling_s))
+                # scaling_u = torch.mm(onehot, self.decoder.scaling_u)
                 scaling_s = torch.mm(onehot, self.decoder.scaling_s)
             else:
-                scaling_u = self.decoder.scaling_u
+                if self.config['log_params']:
+                    scaling_u = torch.exp(self.decoder.scaling_u)
+                #     scaling_s = torch.exp(self.decoder.scaling_s)
+                else:
+                    scaling_u = F.softplus(self.decoder.scaling_u)
+                #     scaling_s = F.softplus(self.decoder.scaling_s)
+                # scaling_u = self.decoder.scaling_u
                 scaling_s = self.decoder.scaling_s
             _, _, beta, gamma = self.decoder.reparameterize(onehot, sample)
             cos_sim = cosine_similarity(uhat/scaling_u, shat/scaling_s, beta, gamma, s_knn)
@@ -1230,485 +1279,6 @@ class VAEChrom():
         #       self.config["reg_cos"]*cos_sim if self.reg_velocity else 0)
 
         return loss
-
-    def train_epoch(self, train_loader, test_set, optimizer, optimizer2=None, k=1, net='both', set_stop_thred=False):
-        B = len(train_loader)
-        self.set_mode('train', net)
-        stop_training = False
-        set_drop_loss = []
-
-        for i, batch in enumerate(train_loader):
-            if self.counter == 1 or self.counter % self.config["test_iter"] == 0:
-                elbo_test = self.test(test_set,
-                                      None,
-                                      self.counter,
-                                      True)
-
-                if len(self.loss_test) > 0:
-                    if self.config["early_stop_thred"] is not None and (elbo_test - self.loss_test[-1] <= self.config["early_stop_thred"]):
-                        self.n_drop = self.n_drop + 1
-                    else:
-                        self.n_drop = 0
-                self.loss_test.append(elbo_test)
-                self.set_mode('train', net)
-
-                if (self.n_drop >= self.config["early_stop"]) and (self.config["early_stop"] > 0):
-                    stop_training = True
-                    break
-
-            if set_stop_thred:
-                elbo_test = self.test(test_set,
-                                      None,
-                                      self.counter,
-                                      True)
-
-                set_drop_loss.append(elbo_test)
-                self.set_mode('train', net)
-
-            optimizer.zero_grad()
-            if optimizer2 is not None:
-                optimizer2.zero_grad()
-
-            xbatch, idx = batch[0], batch[2]
-            batch_idx = self.train_idx[idx]
-
-            c0 = self.c0[batch_idx] if self.use_knn else None
-            u0 = self.u0[batch_idx] if self.use_knn else None
-            s0 = self.s0[batch_idx] if self.use_knn else None
-            t0 = self.t0[batch_idx] if self.use_knn else None
-            t1 = self.t1[batch_idx] if self.use_knn and self.config['velocity_continuity'] else None
-            t = self.t[batch_idx] if self.use_knn else None
-            z = self.z[batch_idx] if self.use_knn else None
-            p_t = self.p_t[:, batch_idx, :]
-            p_z = self.p_z[:, batch_idx, :]
-            onehot = F.one_hot(batch[3], self.n_batch).float() if self.enable_cvae else None
-            out = self.forward(xbatch, t, z, c0, u0, s0, t0, t1, onehot)
-            mu_tx, std_tx, mu_zx, std_zx, chat, uhat, shat, t_, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = out
-
-            loss = self.vae_risk((mu_tx, std_tx),
-                                 p_t,
-                                 (mu_zx, std_zx),
-                                 p_z,
-                                 xbatch[:, :xbatch.size()[1]//3],
-                                 xbatch[:, xbatch.size()[1]//3:xbatch.size()[1]//3*2],
-                                 xbatch[:, xbatch.size()[1]//3*2:],
-                                 chat,
-                                 uhat,
-                                 shat,
-                                 vc,
-                                 vu,
-                                 vs,
-                                 c0,
-                                 u0,
-                                 s0,
-                                 chat_fw,
-                                 uhat_fw,
-                                 shat_fw,
-                                 vc_fw,
-                                 vu_fw,
-                                 vs_fw,
-                                 self.c1[batch_idx] if self.use_knn and self.config["velocity_continuity"] else None,
-                                 self.u1[batch_idx] if self.use_knn and self.config["velocity_continuity"] else None,
-                                 self.s1[batch_idx] if self.use_knn and self.config["velocity_continuity"] else None,
-                                 t_,
-                                 self.s_knn[batch_idx] if self.reg_velocity else None,
-                                 onehot,
-                                 idx=batch_idx)
-
-            loss.backward()
-            torch.nn.utils.clip_grad_value_(self.encoder.parameters(), GRAD_MAX)
-            torch.nn.utils.clip_grad_value_(self.decoder.parameters(), GRAD_MAX)
-            if k == 0:
-                optimizer.step()
-                if optimizer2 is not None:
-                    optimizer2.step()
-            else:
-                if optimizer2 is not None and ((i+1) % (k+1) == 0 or i == B-1):
-                    optimizer2.step()
-                else:
-                    optimizer.step()
-
-            self.loss_train.append(loss.detach().cpu().item())
-            self.counter = self.counter + 1
-
-        if set_stop_thred:
-            print(np.mean([y - x for x, y in zip(set_drop_loss, set_drop_loss[1:])]))
-            # self.config['early_stop_thred'] = 0.25*np.mean([y - x for x, y in zip(set_drop_loss, set_drop_loss[1:])])
-            self.config['early_stop_thred'] = 1.0
-            print(f"Early stop threshold set to {self.config['early_stop_thred']:.4f}.")
-
-        return stop_training
-
-    def update_x0(self, c, u, s):
-        start = time.time()
-        self.set_mode('eval')
-        out, _ = self.pred_all(np.concatenate((c, u, s), 1), "both")
-        chat, uhat, shat, t, z = out["chat"], out["uhat"], out["shat"], out["t"], out["mu_z"]
-        # t = np.clip(t, 0, np.quantile(t, 0.99))
-        dt = (self.config["dt"][0]*(t.max()-t.min()), self.config["dt"][1]*(t.max()-t.min()))
-        train_idx = self.train_idx.detach().cpu().numpy()
-        init_mask = (t <= np.quantile(t, 0.01))
-        c0_init = np.mean(c[init_mask], 0)
-        u0_init = np.mean(u[init_mask], 0)
-        s0_init = np.mean(s[init_mask], 0)
-        c_in = chat[train_idx]
-        u_in = uhat[train_idx]
-        s_in = shat[train_idx]
-        print("Cell-wise KNN estimation.")
-        if self.x0_index is None:
-            self.x0_index = knnx0_index(t[train_idx],
-                                        z[train_idx],
-                                        t,
-                                        z,
-                                        dt,
-                                        self.config["n_neighbors"],
-                                        hist_eq=False)
-        c0, u0, s0, t0 = get_x0(c_in,
-                                u_in,
-                                s_in,
-                                t[train_idx],
-                                dt,
-                                self.x0_index,
-                                c0_init,
-                                u0_init,
-                                s0_init)
-        if self.config["velocity_continuity"]:
-            if self.x1_index is None:
-                self.x1_index = knnx0_index(t[train_idx],
-                                            z[train_idx],
-                                            t,
-                                            z,
-                                            dt,
-                                            self.config["n_neighbors"],
-                                            forward=True,
-                                            hist_eq=True)
-            c1, u1, s1, t1 = get_x0(c_in,
-                                    u_in,
-                                    s_in,
-                                    t[train_idx],
-                                    dt,
-                                    self.x1_index,
-                                    None,
-                                    None,
-                                    None,
-                                    forward=True)
-        self.c0 = c0
-        self.u0 = u0
-        self.s0 = s0
-        self.t0 = t0.reshape(-1, 1)
-        if self.config['velocity_continuity']:
-            self.c1 = c1
-            self.u1 = u1
-            self.s1 = s1
-            self.t1 = t1.reshape(-1, 1)
-        print(f"Finished. Actual Time: {convert_time(time.time()-start)}")
-        return t, z
-
-    def train(self,
-              config={},
-              plot=False,
-              gene_plot=[],
-              cluster_key="clusters",
-              figure_path="figures",
-              embed="umap"):
-        self.update_config(config)
-        start = time.time()
-        self.global_counter = 0
-
-        print("--------------------------- Train a VeloVAE ---------------------------")
-        X = np.concatenate((self.adata_atac.layers['Mc'].A if issparse(self.adata_atac.layers['Mc']) else self.adata_atac.layers['Mc'],
-                            self.adata.layers['Mu'].A if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu'],
-                            self.adata.layers['Ms'].A if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']), 1).astype(float)
-
-        try:
-            Xembed = self.adata.obsm[f"X_{embed}"]
-            Xembed_train = Xembed[self.train_idx]
-            Xembed_test = Xembed[self.test_idx]
-        except KeyError:
-            print(f"Embedding X_{embed} not found! Set to None.")
-            Xembed = np.nan*np.ones((self.adata.n_obs, 2))
-            Xembed_train = Xembed[self.train_idx]
-            Xembed_test = Xembed[self.test_idx]
-            plot = False
-
-        G = X.shape[1]
-        # self.non_zero_ratio = [np.sum(X[:, :G//3] != 0)/(X.shape[0]*G), np.sum(X[:, G//3:G//3*2] != 0)/(X.shape[0]*G), np.sum(X[:, G//3*2:] != 0)/(X.shape[0]*G)]
-        # print(f'Non zero ratios of C, U, S {self.non_zero_ratio}')
-        # self.non_zero_ratio = torch.tensor(self.non_zero_ratio, dtype=torch.float, device=self.device)
-
-        cell_labels_raw = self.adata.obs[cluster_key].to_numpy() if cluster_key in self.adata.obs else np.array(['Unknown' for i in range(self.adata.n_obs)])
-
-        self.cell_types_raw = np.unique(cell_labels_raw)
-        self.label_dic, self.label_dic_rev = encode_type(self.cell_types_raw)
-
-        self.n_type = len(self.cell_types_raw)
-        self.cell_labels = np.array([self.label_dic[x] for x in cell_labels_raw])
-        self.cell_types = np.array([self.label_dic[self.cell_types_raw[i]] for i in range(self.n_type)])
-
-        print("*********        Creating Training and Validation Datasets        *********")
-        train_set = SCData(X[self.train_idx],
-                           self.cell_labels[self.train_idx],
-                           batch=self.batch[self.train_idx] if self.enable_cvae else None,
-                           device=self.device)
-
-        test_set = None
-        if len(self.test_idx) > 0:
-            test_set = SCData(X[self.test_idx],
-                              self.cell_labels[self.test_idx],
-                              batch=self.batch[self.test_idx] if self.enable_cvae else None,
-                              device=self.device)
-
-        data_loader = torch.utils.data.DataLoader(train_set, batch_size=self.config["batch_size"], shuffle=True)
-        if self.config["test_iter"] is None:
-            self.config["test_iter"] = len(self.train_idx)//self.config["batch_size"]*2
-
-        self.train_idx = torch.tensor(self.train_idx, dtype=int, device=self.device)
-        self.test_idx = torch.tensor(self.test_idx, dtype=int, device=self.device)
-        print(f"Total Number of Iterations Per Epoch: {len(data_loader)}, test iteration: {self.config['test_iter']}")
-        print("*********                      Finished.                      *********")
-
-        gind, gene_plot = get_gene_index(self.adata.var_names, gene_plot)
-        os.makedirs(figure_path, exist_ok=True)
-
-        print("*********                      Stage  1                       *********")
-        param_nn = list(self.encoder.parameters())
-        param_nn += list(self.decoder.net_rho.parameters())
-        param_nn += list(self.decoder.net_kc.parameters())
-        if self.config['t_network']:
-            param_nn += list(self.decoder.net_t.parameters())
-        param_ode = [self.decoder.alpha_c,
-                     self.decoder.alpha,
-                     self.decoder.beta,
-                     self.decoder.gamma]
-        if self.config['train_scaling']:
-            param_ode.append(self.decoder.scaling_c)
-        if self.config['four_basis']:
-            param_ode.extend([self.decoder.c0,
-                              self.decoder.u0,
-                              self.decoder.s0,
-                              self.decoder.logit_p])
-        if self.config['train_ton']:
-            param_ode.append(self.decoder.ton)
-
-        optimizer = torch.optim.AdamW(param_nn, lr=self.config["learning_rate"], weight_decay=self.config["lambda"])
-        optimizer_ode = torch.optim.AdamW(param_ode, lr=self.config["learning_rate_ode"], weight_decay=self.config["lambda"])
-
-        for epoch in range(self.config["n_epochs"]):
-            if epoch >= self.config["n_warmup"]:
-                stop_training = self.train_epoch(data_loader,
-                                                 test_set,
-                                                 optimizer,
-                                                 optimizer_ode,
-                                                 self.config["k_alt"],
-                                                 set_stop_thred=(epoch == self.config["n_warmup"]))
-            else:
-                stop_training = self.train_epoch(data_loader,
-                                                 test_set,
-                                                 optimizer,
-                                                 None,
-                                                 self.config["k_alt"])
-
-            if epoch == 0 or (epoch+1) % self.config["save_epoch"] == 0:
-                elbo_train = self.test(train_set,
-                                       Xembed_train,
-                                       f"train{epoch+1}",
-                                       False,
-                                       gind,
-                                       gene_plot,
-                                       plot,
-                                       figure_path)
-                self.set_mode('train')
-                elbo_test = self.loss_test[-1] if len(self.loss_test) > 0 else -np.inf
-                print(f"Epoch {epoch+1}: Train ELBO = {elbo_train:.3f}, Test ELBO = {elbo_test:.3f} \t\t Total Time = {convert_time(time.time()-start)}")
-
-            if stop_training:
-                print(f"*********       Stage 1: Early Stop Triggered at epoch {epoch+1}.       *********")
-                break
-
-        if self.config["run_2nd_stage"]:
-            print("*********                      Stage  2                       *********")
-            n_stage1 = epoch+1
-            count_epoch = n_stage1
-            n_test1 = len(self.loss_test)
-            self.set_mode('eval', 'encoder')
-            param_post = list(self.decoder.net_rho.parameters())
-            param_post += list(self.decoder.net_kc.parameters())
-            # if self.config['t_network']:
-            #     param_post += list(self.decoder.net_t.parameters())
-            optimizer_post = torch.optim.AdamW(param_post, lr=self.config["learning_rate_post"], weight_decay=self.config["lambda_post"])
-
-            sigma_c_prev = self.decoder.sigma_c.detach().cpu().numpy()
-            sigma_u_prev = self.decoder.sigma_u.detach().cpu().numpy()
-            sigma_s_prev = self.decoder.sigma_s.detach().cpu().numpy()
-            c0_prev, u0_prev, s0_prev = None, None, None
-            noise_change = np.inf
-            x0_change = np.inf
-            x0_change_prev = np.inf
-
-            for r in range(self.config['n_refine']):
-                stop_training = (x0_change - x0_change_prev >= -0.01 and r > 1) or (x0_change < 0.01)
-                if not self.config['global_std'] and noise_change > 0.001 and r < self.config['n_refine']-1:
-                    self.update_std_noise(train_set)
-                    stop_training = False
-                if stop_training:
-                    print(f"Stage 2: Early Stop Triggered at round {r}.")
-                    break
-
-                t, z = self.update_x0(X[:, :G//3], X[:, G//3:G//3*2], X[:, G//3*2:])
-                if plot:
-                    if np.sum(np.isnan(self.t0)) > 0:
-                        print('t0 contains nan')
-                    if np.sum(np.isnan(self.c0)) > 0 or np.sum(np.isnan(self.u0)) > 0 or np.sum(np.isnan(self.s0)) > 0:
-                        print('c0, u0, or s0 contains nan')
-                    plot_time(self.t0.squeeze(), Xembed, save=f"{figure_path}/time-t0-round{r}.png")
-                    plot_time(t, Xembed, save=f"{figure_path}/time-round{r}.png")
-                    train_idx = self.train_idx.detach().cpu().numpy()
-                    t0_plot = self.t0[train_idx].squeeze()
-                    for i in range(len(gind)):
-                        idx = gind[i]
-                        c0_plot = self.c0[train_idx, idx]
-                        u0_plot = self.u0[train_idx, idx]
-                        s0_plot = self.s0[train_idx, idx]
-                        c_plot = X[:, :G//3][train_idx, idx]
-                        u_plot = X[:, G//3:G//3*2][train_idx, idx]
-                        s_plot = X[:, G//3*2:][train_idx, idx]
-                        plot_sig_(t[train_idx],
-                                  c_plot,
-                                  u_plot,
-                                  s_plot,
-                                  cell_labels=cell_labels_raw[train_idx],
-                                  tpred=t0_plot,
-                                  cpred=c0_plot,
-                                  upred=u0_plot,
-                                  spred=s0_plot,
-                                  type_specific=False,
-                                  title=gene_plot[i],
-                                  save=f"{figure_path}/sig-{gene_plot[i]}-x0-round{r}.png")
-                self.c0 = torch.tensor(self.c0, dtype=torch.float, device=self.device)
-                self.u0 = torch.tensor(self.u0, dtype=torch.float, device=self.device)
-                self.s0 = torch.tensor(self.s0, dtype=torch.float, device=self.device)
-                self.t0 = torch.tensor(self.t0, dtype=torch.float, device=self.device)
-                self.t = torch.reshape(torch.tensor(t, dtype=torch.float, device=self.device), (-1, 1))
-                self.z = torch.tensor(z, dtype=torch.float, device=self.device)
-                if self.config["velocity_continuity"]:
-                    self.c1 = torch.tensor(self.c1, dtype=torch.float, device=self.device)
-                    self.u1 = torch.tensor(self.u1, dtype=torch.float, device=self.device)
-                    self.s1 = torch.tensor(self.s1, dtype=torch.float, device=self.device)
-                    self.t1 = torch.tensor(self.t1, dtype=torch.float, device=self.device)
-
-                if r == 0:
-                    self.use_knn = True
-                    self.decoder.logit_pw.requires_grad = False
-                    self.decoder.init_weights(reinit_t=False)
-
-                self.n_drop = 0
-                print(f"*********             Velocity Refinement Round {r+1}             *********")
-
-                for epoch in range(self.config["n_epochs_post"]):
-                    if epoch == 0:
-                        elbo_train = self.test(train_set,
-                                               Xembed_train,
-                                               f"train{epoch+count_epoch}",
-                                               False,
-                                               gind,
-                                               gene_plot,
-                                               plot,
-                                               figure_path)
-                        self.set_mode('train', 'decoder')
-                    if epoch >= self.config["n_warmup"]:
-                        stop_training = self.train_epoch(data_loader,
-                                                         test_set,
-                                                         optimizer_post,
-                                                         optimizer_ode,
-                                                         self.config["k_alt"],
-                                                         'decoder')
-                    else:
-                        stop_training = self.train_epoch(data_loader,
-                                                         test_set,
-                                                         optimizer_post,
-                                                         None,
-                                                         self.config["k_alt"],
-                                                         'decoder')
-
-                    if epoch == 0 or (epoch+count_epoch+1) % self.config["save_epoch"] == 0:
-                        elbo_train = self.test(train_set,
-                                               Xembed_train,
-                                               f"train{epoch+count_epoch+1}",
-                                               False,
-                                               gind,
-                                               gene_plot,
-                                               plot,
-                                               figure_path)
-                        self.set_mode('train', 'decoder')
-                        elbo_test = self.loss_test[-1] if len(self.loss_test) > n_test1 else -np.inf
-                        print(f"Epoch {epoch+count_epoch+1}: Train ELBO = {elbo_train:.3f}, Test ELBO = {elbo_test:.3f} \t\t Total Time = {convert_time(time.time()-start)}")
-
-                    if stop_training:
-                        print(f"*********       Round {r+1}: Early Stop Triggered at epoch {epoch+count_epoch+1}.       *********")
-                        break
-
-                count_epoch += (epoch+1)
-                if not self.config['global_std']:
-                    sigma_c = self.decoder.sigma_c.detach().cpu().numpy()
-                    sigma_u = self.decoder.sigma_u.detach().cpu().numpy()
-                    sigma_s = self.decoder.sigma_s.detach().cpu().numpy()
-                    norm_delta_sigma = np.sum((sigma_c-sigma_c_prev)**2 + (sigma_u-sigma_u_prev)**2 + (sigma_s-sigma_s_prev)**2)
-                    norm_sigma = np.sum(sigma_c_prev**2 + sigma_u_prev**2 + sigma_s_prev**2)
-                    sigma_c_prev = self.decoder.sigma_c.detach().cpu().numpy()
-                    sigma_u_prev = self.decoder.sigma_u.detach().cpu().numpy()
-                    sigma_s_prev = self.decoder.sigma_s.detach().cpu().numpy()
-                    noise_change = norm_delta_sigma/norm_sigma
-                    print(f"Change in noise variance: {noise_change:.4f}")
-                if r > 0:
-                    x0_change_prev = x0_change
-                    norm_delta_x0 = np.sqrt(((self.c0.detach().cpu().numpy() - c0_prev)**2 + (self.u0.detach().cpu().numpy() - u0_prev)**2 + (self.s0.detach().cpu().numpy() - s0_prev)**2).sum(1).mean())
-                    std_x = np.sqrt((self.c0.detach().cpu().numpy().var(0) + self.u0.detach().cpu().numpy().var(0) + self.s0.detach().cpu().numpy().var(0)).sum())
-                    x0_change = norm_delta_x0/std_x
-                    print(f"Change in x0: {x0_change:.4f}")
-                c0_prev = self.c0.detach().cpu().numpy()
-                u0_prev = self.u0.detach().cpu().numpy()
-                s0_prev = self.s0.detach().cpu().numpy()
-
-            if plot and self.config['n_refine'] > 1:
-                plot_time(self.t0.detach().cpu().numpy().squeeze(), Xembed, save=f"{figure_path}/time-t0-updated.png")
-                t0_plot = self.t0[self.train_idx].detach().cpu().numpy().squeeze()
-                for i in range(len(gind)):
-                    idx = gind[i]
-                    c0_plot = self.c0[self.train_idx, idx].detach().cpu().numpy()
-                    u0_plot = self.u0[self.train_idx, idx].detach().cpu().numpy()
-                    s0_plot = self.s0[self.train_idx, idx].detach().cpu().numpy()
-                    plot_sig_(t0_plot,
-                              c0_plot,
-                              u0_plot,
-                              s0_plot,
-                              cell_labels=cell_labels_raw[self.train_idx.detach().cpu().numpy()],
-                              title=gene_plot[i],
-                              save=f"{figure_path}/sig-{gene_plot[i]}-x0-updated.png")
-
-        elbo_train = self.test(train_set,
-                               Xembed_train,
-                               "final-train",
-                               False,
-                               gind,
-                               gene_plot,
-                               True,
-                               figure_path)
-        elbo_test = self.test(test_set,
-                              Xembed_test,
-                              "final-test",
-                              True,
-                              gind,
-                              gene_plot,
-                              True,
-                              figure_path)
-        self.loss_train.append(-elbo_train)
-        self.loss_test.append(elbo_test)
-        if plot:
-            plot_train_loss(self.loss_train, range(1, len(self.loss_train)+1), save=f'{figure_path}/train_loss_velovae.png')
-            if self.config["test_iter"] > 0:
-                plot_test_loss(self.loss_test, [i*self.config["test_iter"] for i in range(1, len(self.loss_test)+1)], save=f'{figure_path}/test_loss_velovae.png')
-        print(f"Final: Train ELBO = {elbo_train:.3f},\tTest ELBO = {elbo_test:.3f}")
-        print(f"*********              Finished. Total Time = {convert_time(time.time()-start)}             *********")
 
     def pred_all(self, data, mode='test', output=["chat", "uhat", "shat", "t", "z"], gene_idx=None, batch=None):
         N, G = data.shape[0], data.shape[1]//3
@@ -1892,11 +1462,11 @@ class VAEChrom():
 
         testid_str = str(testid)
         if testid_str.startswith('train'):
-            id_num = testid_str[5:]
-            testid_str = 'train' + '0'*(9-len(testid_str)) + id_num
+            id_num = testid_str[6:]
+            testid_str = 'train-' + '0'*(10-len(testid_str)) + id_num
         elif testid_str.startswith('test'):
-            id_num = testid_str[4:]
-            testid_str = 'test' + '0'*(8-len(testid_str)) + id_num
+            id_num = testid_str[5:]
+            testid_str = 'test-' + '0'*(9-len(testid_str)) + id_num
 
         if plot:
             cell_idx = self.test_idx if test_mode else self.train_idx
@@ -1904,19 +1474,28 @@ class VAEChrom():
                 onehot = F.one_hot(self.batch[cell_idx], self.n_batch).detach().cpu().numpy()
                 if self.config['log_params']:
                     scaling_c = np.dot(onehot, np.exp(self.decoder.scaling_c.detach().cpu().numpy()))
+                    scaling_u = np.dot(onehot, np.exp(self.decoder.scaling_u.detach().cpu().numpy()))
+                    # scaling_s = np.dot(onehot, np.exp(self.decoder.scaling_s.detach().cpu().numpy()))
                 else:
-                    scaling_c = np.dot(onehot, F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy())
-                scaling_u = np.dot(onehot, self.decoder.scaling_u.detach().cpu().numpy())
+                    scaling_c = np.dot(onehot, F.softplus(self.decoder.scaling_c.detach().cpu()).numpy())
+                    scaling_u = np.dot(onehot, F.softplus(self.decoder.scaling_u.detach().cpu()).numpy())
+                    # scaling_s = np.dot(onehot, F.softplus(self.decoder.scaling_s.detach().cpu()).numpy())
+                # scaling_u = np.dot(onehot, self.decoder.scaling_u.detach().cpu().numpy())
                 scaling_s = np.dot(onehot, self.decoder.scaling_s.detach().cpu().numpy())
             else:
                 if self.config['log_params']:
                     scaling_c = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
+                    scaling_u = np.exp(self.decoder.scaling_u.detach().cpu().numpy())
+                    # scaling_s = np.exp(self.decoder.scaling_s.detach().cpu().numpy())
                 else:
-                    scaling_c = F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy()
-                scaling_u = self.decoder.scaling_u.detach().cpu().numpy()
+                    scaling_c = F.softplus(self.decoder.scaling_c.detach().cpu()).numpy()
+                    scaling_u = F.softplus(self.decoder.scaling_u.detach().cpu()).numpy()
+                    # scaling_s = F.softplus(self.decoder.scaling_s.detach().cpu()).numpy()
+                # scaling_u = self.decoder.scaling_u.detach().cpu().numpy()
                 scaling_s = self.decoder.scaling_s.detach().cpu().numpy()
 
-            plot_time(t_, Xembed, save=f"{path}/time-{testid_str}.png")
+            if not self.use_knn:
+                plot_time(t_, Xembed, save=f"{path}/time-{testid_str}.png")
 
             for i in range(len(gind)):
                 idx = gind[i]
@@ -1948,7 +1527,7 @@ class VAEChrom():
                          shat[:, i] / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
                          np.array([self.label_dic_rev[x] for x in dataset.labels]),
                          gene_plot[i],
-                         save=f"{path}/sig-scaled-{gene_plot[i]}-{testid_str}.png",
+                         save=f"{path}/sigscaled-{gene_plot[i]}-{testid_str}.png",
                          sparsify=self.config['sparsify'])
 
                 if self.use_knn and self.config['velocity_continuity']:
@@ -1985,9 +1564,182 @@ class VAEChrom():
                              out["shat_fw"][:, i] / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
                              np.array([self.label_dic_rev[x] for x in dataset.labels]),
                              gene_plot[i],
-                             save=f"{path}/sig-scaled-{gene_plot[i]}-{testid_str}-bw.png",
+                             save=f"{path}/sigscaled-{gene_plot[i]}-{testid_str}-bw.png",
                              sparsify=self.config['sparsify'])
         return elbo
+
+    def train_epoch(self, train_loader, test_set, optimizer, optimizer2=None, k=1, net='both', set_stop_thred=False):
+        B = len(train_loader)
+        self.set_mode('train', net)
+        stop_training = False
+        set_drop_loss = []
+
+        for i, batch in enumerate(train_loader):
+            if self.counter == 1 or self.counter % self.config["test_iter"] == 0:
+                elbo_test = self.test(test_set,
+                                      None,
+                                      self.counter,
+                                      True)
+
+                if len(self.loss_test) > 0:
+                    if self.config["early_stop_thred"] is not None and (elbo_test - self.loss_test[-1] <= self.config["early_stop_thred"]):
+                        self.n_drop = self.n_drop + 1
+                    else:
+                        self.n_drop = 0
+                self.loss_test.append(elbo_test)
+                self.set_mode('train', net)
+
+                if (self.n_drop >= self.config["early_stop"]) and (self.config["early_stop"] > 0):
+                    stop_training = True
+                    break
+
+            if set_stop_thred:
+                elbo_test = self.test(test_set,
+                                      None,
+                                      self.counter,
+                                      True)
+
+                set_drop_loss.append(elbo_test)
+                self.set_mode('train', net)
+
+            optimizer.zero_grad()
+            if optimizer2 is not None:
+                optimizer2.zero_grad()
+
+            xbatch, idx = batch[0], batch[2]
+            batch_idx = self.train_idx[idx]
+
+            c0 = self.c0[batch_idx] if self.use_knn else None
+            u0 = self.u0[batch_idx] if self.use_knn else None
+            s0 = self.s0[batch_idx] if self.use_knn else None
+            t0 = self.t0[batch_idx] if self.use_knn else None
+            t1 = self.t1[batch_idx] if self.use_knn and self.config['velocity_continuity'] else None
+            t = self.t[batch_idx] if self.use_knn else None
+            z = self.z[batch_idx] if self.use_knn else None
+            p_t = self.p_t[:, batch_idx, :]
+            p_z = self.p_z[:, batch_idx, :]
+            onehot = F.one_hot(batch[3], self.n_batch).float() if self.enable_cvae else None
+            out = self.forward(xbatch, t, z, c0, u0, s0, t0, t1, onehot)
+            mu_tx, std_tx, mu_zx, std_zx, chat, uhat, shat, t_, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = out
+
+            loss = self.vae_risk((mu_tx, std_tx),
+                                 p_t,
+                                 (mu_zx, std_zx),
+                                 p_z,
+                                 xbatch[:, :xbatch.size()[1]//3],
+                                 xbatch[:, xbatch.size()[1]//3:xbatch.size()[1]//3*2],
+                                 xbatch[:, xbatch.size()[1]//3*2:],
+                                 chat,
+                                 uhat,
+                                 shat,
+                                 vc,
+                                 vu,
+                                 vs,
+                                 c0,
+                                 u0,
+                                 s0,
+                                 chat_fw,
+                                 uhat_fw,
+                                 shat_fw,
+                                 vc_fw,
+                                 vu_fw,
+                                 vs_fw,
+                                 self.c1[batch_idx] if self.use_knn and self.config["velocity_continuity"] else None,
+                                 self.u1[batch_idx] if self.use_knn and self.config["velocity_continuity"] else None,
+                                 self.s1[batch_idx] if self.use_knn and self.config["velocity_continuity"] else None,
+                                 t_,
+                                 self.s_knn[batch_idx] if self.reg_velocity else None,
+                                 onehot,
+                                 idx=batch_idx)
+
+            loss.backward()
+            torch.nn.utils.clip_grad_value_(self.encoder.parameters(), GRAD_MAX)
+            torch.nn.utils.clip_grad_value_(self.decoder.parameters(), GRAD_MAX)
+            if k == 0:
+                optimizer.step()
+                if optimizer2 is not None:
+                    optimizer2.step()
+            else:
+                if optimizer2 is not None and ((i+1) % (k+1) == 0 or i == B-1):
+                    optimizer2.step()
+                else:
+                    optimizer.step()
+
+            self.loss_train.append(loss.detach().cpu().item())
+            self.counter = self.counter + 1
+
+        # if set_stop_thred:
+        #     print(np.mean([y - x for x, y in zip(set_drop_loss, set_drop_loss[1:])]))
+        #     # self.config['early_stop_thred'] = 0.25*np.mean([y - x for x, y in zip(set_drop_loss, set_drop_loss[1:])])
+        #     self.config['early_stop_thred'] = 0.5
+        #     print(f"Early stop threshold set to {self.config['early_stop_thred']:.4f}.")
+
+        return stop_training
+
+    def update_x0(self, c, u, s):
+        start = time.time()
+        self.set_mode('eval')
+        out, _ = self.pred_all(np.concatenate((c, u, s), 1), "both")
+        chat, uhat, shat, t, z = out["chat"], out["uhat"], out["shat"], out["t"], out["mu_z"]
+        # t = np.clip(t, 0, np.quantile(t, 0.99))
+        dt = (self.config["dt"][0]*(t.max()-t.min()), self.config["dt"][1]*(t.max()-t.min()))
+        train_idx = self.train_idx.detach().cpu().numpy()
+        init_mask = (t <= np.quantile(t, 0.01))
+        c0_init = np.mean(c[init_mask], 0)
+        u0_init = np.mean(u[init_mask], 0)
+        s0_init = np.mean(s[init_mask], 0)
+        c_in = chat[train_idx]
+        u_in = uhat[train_idx]
+        s_in = shat[train_idx]
+        print("Cell-wise KNN estimation.")
+        if self.x0_index is None:
+            self.x0_index = knnx0_index(t[train_idx],
+                                        z[train_idx],
+                                        t,
+                                        z,
+                                        dt,
+                                        self.config["n_neighbors"],
+                                        hist_eq=False)
+        c0, u0, s0, t0 = get_x0(c_in,
+                                u_in,
+                                s_in,
+                                t[train_idx],
+                                dt,
+                                self.x0_index,
+                                c0_init,
+                                u0_init,
+                                s0_init)
+        if self.config["velocity_continuity"]:
+            if self.x1_index is None:
+                self.x1_index = knnx0_index(t[train_idx],
+                                            z[train_idx],
+                                            t,
+                                            z,
+                                            dt,
+                                            self.config["n_neighbors"],
+                                            forward=True,
+                                            hist_eq=True)
+            c1, u1, s1, t1 = get_x0(c_in,
+                                    u_in,
+                                    s_in,
+                                    t[train_idx],
+                                    dt,
+                                    self.x1_index,
+                                    None,
+                                    None,
+                                    None,
+                                    forward=True)
+        self.c0 = c0
+        self.u0 = u0
+        self.s0 = s0
+        self.t0 = t0.reshape(-1, 1)
+        if self.config['velocity_continuity']:
+            self.c1 = c1
+            self.u1 = u1
+            self.s1 = s1
+            self.t1 = t1.reshape(-1, 1)
+        print(f"Finished. Actual Time: {convert_time(time.time()-start)}")
+        return t, z
 
     def update_std_noise(self, dataset):
         G = dataset.data.shape[1]//3
@@ -1995,7 +1747,7 @@ class VAEChrom():
                                mode='train',
                                output=["chat", "uhat", "shat"],
                                gene_idx=np.array(range(G)),
-                               batch=F.one_hot(dataset.batch, self.n_batch).float() if self.enable_cvae else None)
+                               batch=dataset.batch)
         std_c = np.clip((out["chat"] - dataset.data[:, :G].cpu().numpy()).std(0), 0.01, None)
         std_u = np.clip((out["uhat"] - dataset.data[:, G:G*2].cpu().numpy()).std(0), 0.01, None)
         std_s = np.clip((out["shat"] - dataset.data[:, G*2:].cpu().numpy()).std(0), 0.01, None)
@@ -2005,6 +1757,320 @@ class VAEChrom():
         self.decoder.register_buffer('sigma_c', torch.tensor(std_c, dtype=torch.float, device=self.device))
         self.decoder.register_buffer('sigma_u', torch.tensor(std_u, dtype=torch.float, device=self.device))
         self.decoder.register_buffer('sigma_s', torch.tensor(std_s, dtype=torch.float, device=self.device))
+
+    def train(self,
+              config={},
+              plot=False,
+              gene_plot=[],
+              cluster_key="clusters",
+              figure_path="figures",
+              embed="umap"):
+        self.update_config(config)
+        start = time.time()
+        self.global_counter = 0
+
+        print("--------------------------- Train a VeloVAE ---------------------------")
+        X = np.concatenate((self.adata_atac.layers['Mc'].A if issparse(self.adata_atac.layers['Mc']) else self.adata_atac.layers['Mc'],
+                            self.adata.layers['Mu'].A if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu'],
+                            self.adata.layers['Ms'].A if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']), 1).astype(float)
+
+        try:
+            Xembed = self.adata.obsm[f"X_{embed}"]
+            Xembed_train = Xembed[self.train_idx]
+            Xembed_test = Xembed[self.test_idx]
+        except KeyError:
+            print(f"Embedding X_{embed} not found! Set to None.")
+            Xembed = np.nan*np.ones((self.adata.n_obs, 2))
+            Xembed_train = Xembed[self.train_idx]
+            Xembed_test = Xembed[self.test_idx]
+            plot = False
+
+        G = X.shape[1]
+        # self.non_zero_ratio = [np.sum(X[:, :G//3] != 0)/(X.shape[0]*G), np.sum(X[:, G//3:G//3*2] != 0)/(X.shape[0]*G), np.sum(X[:, G//3*2:] != 0)/(X.shape[0]*G)]
+        # print(f'Non zero ratios of C, U, S {self.non_zero_ratio}')
+        # self.non_zero_ratio = torch.tensor(self.non_zero_ratio, dtype=torch.float, device=self.device)
+
+        cell_labels_raw = self.adata.obs[cluster_key].to_numpy() if cluster_key in self.adata.obs else np.array(['Unknown' for i in range(self.adata.n_obs)])
+
+        self.cell_types_raw = np.unique(cell_labels_raw)
+        self.label_dic, self.label_dic_rev = encode_type(self.cell_types_raw)
+
+        self.n_type = len(self.cell_types_raw)
+        self.cell_labels = np.array([self.label_dic[x] for x in cell_labels_raw])
+        self.cell_types = np.array([self.label_dic[self.cell_types_raw[i]] for i in range(self.n_type)])
+
+        print("*********        Creating Training and Validation Datasets        *********")
+        train_set = SCData(X[self.train_idx],
+                           self.cell_labels[self.train_idx],
+                           batch=self.batch[self.train_idx] if self.enable_cvae else None,
+                           device=self.device)
+
+        test_set = None
+        if len(self.test_idx) > 0:
+            test_set = SCData(X[self.test_idx],
+                              self.cell_labels[self.test_idx],
+                              batch=self.batch[self.test_idx] if self.enable_cvae else None,
+                              device=self.device)
+
+        data_loader = torch.utils.data.DataLoader(train_set, batch_size=self.config["batch_size"], shuffle=True)
+        if self.config["test_iter"] is None:
+            self.config["test_iter"] = len(self.train_idx)//self.config["batch_size"]*2
+
+        self.train_idx = torch.tensor(self.train_idx, dtype=int, device=self.device)
+        self.test_idx = torch.tensor(self.test_idx, dtype=int, device=self.device)
+        print(f"Total Number of Iterations Per Epoch: {len(data_loader)}, test iteration: {self.config['test_iter']}")
+        print("*********                      Finished.                      *********")
+
+        gind, gene_plot = get_gene_index(self.adata.var_names, gene_plot)
+        os.makedirs(figure_path, exist_ok=True)
+
+        print("*********                      Stage  1                       *********")
+        param_nn = list(self.encoder.parameters())
+        param_nn += list(self.decoder.net_rho.parameters())
+        param_nn += list(self.decoder.net_kc.parameters())
+        if self.config['t_network']:
+            param_nn += list(self.decoder.net_t.parameters())
+        param_ode = [self.decoder.alpha_c,
+                     self.decoder.alpha,
+                     self.decoder.beta,
+                     self.decoder.gamma]
+        if self.config['train_scaling']:
+            param_ode.extend([self.decoder.scaling_c,
+                              self.decoder.scaling_u])
+        if self.config['four_basis']:
+            param_ode.extend([self.decoder.c0,
+                              self.decoder.u0,
+                              self.decoder.s0,
+                              self.decoder.logit_pw])
+        if self.config['train_ton']:
+            param_ode.append(self.decoder.ton)
+
+        optimizer = torch.optim.AdamW(param_nn, lr=self.config["learning_rate"], weight_decay=self.config["lambda"])
+        optimizer_ode = torch.optim.AdamW(param_ode, lr=self.config["learning_rate_ode"], weight_decay=self.config["lambda"])
+
+        for epoch in range(self.config["n_epochs"]):
+            if epoch >= self.config["n_warmup"]:
+                stop_training = self.train_epoch(data_loader,
+                                                 test_set,
+                                                 optimizer,
+                                                 optimizer_ode,
+                                                 self.config["k_alt"],
+                                                 set_stop_thred=(epoch == self.config["n_warmup"]))
+            else:
+                stop_training = self.train_epoch(data_loader,
+                                                 test_set,
+                                                 optimizer,
+                                                 None,
+                                                 self.config["k_alt"])
+
+            if epoch == 0 or (epoch+1) % self.config["save_epoch"] == 0:
+                elbo_train = self.test(train_set,
+                                       Xembed_train,
+                                       f"train-{epoch+1}",
+                                       False,
+                                       gind,
+                                       gene_plot,
+                                       plot,
+                                       figure_path)
+                self.set_mode('train')
+                elbo_test = self.loss_test[-1] if len(self.loss_test) > 0 else -np.inf
+                print(f"Epoch {epoch+1}: Train ELBO = {elbo_train:.3f}, Test ELBO = {elbo_test:.3f} \t\t Total Time = {convert_time(time.time()-start)}")
+
+            if stop_training:
+                print(f"*********       Stage 1: Early Stop Triggered at epoch {epoch+1}.       *********")
+                break
+
+        if self.config["run_2nd_stage"]:
+            print("*********                      Stage  2                       *********")
+            n_stage1 = epoch+1
+            count_epoch = n_stage1
+            n_test1 = len(self.loss_test)
+            self.set_mode('eval', 'encoder')
+            param_post = list(self.decoder.net_rho.parameters())
+            param_post += list(self.decoder.net_kc.parameters())
+            # if self.config['t_network']:
+            #     param_post += list(self.decoder.net_t.parameters())
+            param_ode = [self.decoder.alpha_c,
+                         self.decoder.alpha,
+                         self.decoder.beta,
+                         self.decoder.gamma]
+            optimizer_post = torch.optim.AdamW(param_post, lr=self.config["learning_rate_post"], weight_decay=self.config["lambda_post"])
+            optimizer_ode = torch.optim.AdamW(param_ode, lr=self.config["learning_rate_ode"], weight_decay=self.config["lambda"])
+
+            sigma_c_prev = self.decoder.sigma_c.detach().cpu().numpy()
+            sigma_u_prev = self.decoder.sigma_u.detach().cpu().numpy()
+            sigma_s_prev = self.decoder.sigma_s.detach().cpu().numpy()
+            c0_prev, u0_prev, s0_prev = None, None, None
+            noise_change = np.inf
+            x0_change = np.inf
+            x0_change_prev = np.inf
+
+            for r in range(self.config['n_refine']):
+                # self.config['early_stop_thred'] *= 0.95
+                stop_training = (x0_change - x0_change_prev >= -0.01 and r > 1) or (x0_change < 0.01)
+                if not self.config['global_std'] and noise_change > 0.001 and r < self.config['n_refine']-1:
+                    self.update_std_noise(train_set)
+                    stop_training = False
+                if stop_training:
+                    print(f"Stage 2: Early Stop Triggered at round {r}.")
+                    break
+
+                t, z = self.update_x0(X[:, :G//3], X[:, G//3:G//3*2], X[:, G//3*2:])
+                if plot:
+                    if np.sum(np.isnan(self.t0)) > 0:
+                        print('t0 contains nan')
+                    if np.sum(np.isnan(self.c0)) > 0 or np.sum(np.isnan(self.u0)) > 0 or np.sum(np.isnan(self.s0)) > 0:
+                        print('c0, u0, or s0 contains nan')
+                    if r == 0:
+                        plot_time(self.t0.squeeze(), Xembed, save=f"{figure_path}/timet0-round{r+1}.png")
+                        plot_time(t, Xembed, save=f"{figure_path}/time-round{r+1}.png")
+                    train_idx = self.train_idx.detach().cpu().numpy()
+                    t0_plot = self.t0[train_idx].squeeze()
+                    for i in range(len(gind)):
+                        idx = gind[i]
+                        c0_plot = self.c0[train_idx, idx]
+                        u0_plot = self.u0[train_idx, idx]
+                        s0_plot = self.s0[train_idx, idx]
+                        c_plot = X[:, :G//3][train_idx, idx]
+                        u_plot = X[:, G//3:G//3*2][train_idx, idx]
+                        s_plot = X[:, G//3*2:][train_idx, idx]
+                        plot_sig_(t[train_idx],
+                                  c_plot,
+                                  u_plot,
+                                  s_plot,
+                                  cell_labels=cell_labels_raw[train_idx],
+                                  tpred=t0_plot,
+                                  cpred=c0_plot,
+                                  upred=u0_plot,
+                                  spred=s0_plot,
+                                  type_specific=False,
+                                  title=gene_plot[i],
+                                  save=f"{figure_path}/sigx0-{gene_plot[i]}-round{r+1}.png")
+                self.c0 = torch.tensor(self.c0, dtype=torch.float, device=self.device)
+                self.u0 = torch.tensor(self.u0, dtype=torch.float, device=self.device)
+                self.s0 = torch.tensor(self.s0, dtype=torch.float, device=self.device)
+                self.t0 = torch.tensor(self.t0, dtype=torch.float, device=self.device)
+                self.t = torch.reshape(torch.tensor(t, dtype=torch.float, device=self.device), (-1, 1))
+                self.z = torch.tensor(z, dtype=torch.float, device=self.device)
+                if self.config["velocity_continuity"]:
+                    self.c1 = torch.tensor(self.c1, dtype=torch.float, device=self.device)
+                    self.u1 = torch.tensor(self.u1, dtype=torch.float, device=self.device)
+                    self.s1 = torch.tensor(self.s1, dtype=torch.float, device=self.device)
+                    self.t1 = torch.tensor(self.t1, dtype=torch.float, device=self.device)
+
+                if r == 0:
+                    self.use_knn = True
+                    self.decoder.logit_pw.requires_grad = False
+                    self.decoder.init_weights(reinit_t=False)
+
+                self.n_drop = 0
+                print(f"*********             Velocity Refinement Round {r+1}             *********")
+
+                for epoch in range(self.config["n_epochs_post"]):
+                    if epoch == 0:
+                        elbo_train = self.test(train_set,
+                                               Xembed_train,
+                                               f"train-round{r+1}-first",
+                                               False,
+                                               gind,
+                                               gene_plot,
+                                               plot,
+                                               figure_path)
+                        self.set_mode('train', 'decoder')
+                    if epoch >= self.config["n_warmup_post"]:
+                        stop_training = self.train_epoch(data_loader,
+                                                         test_set,
+                                                         optimizer_post,
+                                                         optimizer_ode,
+                                                         self.config["k_alt"],
+                                                         'decoder')
+                    else:
+                        stop_training = self.train_epoch(data_loader,
+                                                         test_set,
+                                                         optimizer_post,
+                                                         None,
+                                                         self.config["k_alt"],
+                                                         'decoder')
+
+                    if stop_training or epoch == self.config["n_epochs_post"]:
+                        elbo_train = self.test(train_set,
+                                               Xembed_train,
+                                               f"train-round{r+1}-last",
+                                               False,
+                                               gind,
+                                               gene_plot,
+                                               plot,
+                                               figure_path)
+                        self.set_mode('train', 'decoder')
+                        elbo_test = self.loss_test[-1] if len(self.loss_test) > n_test1 else -np.inf
+                        print(f"Epoch {epoch+count_epoch+1}: Train ELBO = {elbo_train:.3f}, Test ELBO = {elbo_test:.3f} \t\t Total Time = {convert_time(time.time()-start)}")
+
+                    if stop_training:
+                        print(f"*********       Round {r+1}: Early Stop Triggered at epoch {epoch+count_epoch+1}.       *********")
+                        break
+
+                count_epoch += (epoch+1)
+                if not self.config['global_std']:
+                    sigma_c = self.decoder.sigma_c.detach().cpu().numpy()
+                    sigma_u = self.decoder.sigma_u.detach().cpu().numpy()
+                    sigma_s = self.decoder.sigma_s.detach().cpu().numpy()
+                    norm_delta_sigma = np.sum((sigma_c-sigma_c_prev)**2 + (sigma_u-sigma_u_prev)**2 + (sigma_s-sigma_s_prev)**2)
+                    norm_sigma = np.sum(sigma_c_prev**2 + sigma_u_prev**2 + sigma_s_prev**2)
+                    sigma_c_prev = self.decoder.sigma_c.detach().cpu().numpy()
+                    sigma_u_prev = self.decoder.sigma_u.detach().cpu().numpy()
+                    sigma_s_prev = self.decoder.sigma_s.detach().cpu().numpy()
+                    noise_change = norm_delta_sigma/norm_sigma
+                    print(f"Change in noise variance: {noise_change:.4f}")
+                if r > 0:
+                    x0_change_prev = x0_change
+                    norm_delta_x0 = np.sqrt(((self.c0.detach().cpu().numpy() - c0_prev)**2 + (self.u0.detach().cpu().numpy() - u0_prev)**2 + (self.s0.detach().cpu().numpy() - s0_prev)**2).sum(1).mean())
+                    std_x = np.sqrt((self.c0.detach().cpu().numpy().var(0) + self.u0.detach().cpu().numpy().var(0) + self.s0.detach().cpu().numpy().var(0)).sum())
+                    x0_change = norm_delta_x0/std_x
+                    print(f"Change in x0: {x0_change:.4f}")
+                c0_prev = self.c0.detach().cpu().numpy()
+                u0_prev = self.u0.detach().cpu().numpy()
+                s0_prev = self.s0.detach().cpu().numpy()
+
+            if plot and self.config['n_refine'] > 1:
+                plot_time(self.t0.detach().cpu().numpy().squeeze(), Xembed, save=f"{figure_path}/time-t0-updated.png")
+                t0_plot = self.t0[self.train_idx].detach().cpu().numpy().squeeze()
+                for i in range(len(gind)):
+                    idx = gind[i]
+                    c0_plot = self.c0[self.train_idx, idx].detach().cpu().numpy()
+                    u0_plot = self.u0[self.train_idx, idx].detach().cpu().numpy()
+                    s0_plot = self.s0[self.train_idx, idx].detach().cpu().numpy()
+                    plot_sig_(t0_plot,
+                              c0_plot,
+                              u0_plot,
+                              s0_plot,
+                              cell_labels=cell_labels_raw[self.train_idx.detach().cpu().numpy()],
+                              title=gene_plot[i],
+                              save=f"{figure_path}/sigx0-{gene_plot[i]}-updated.png")
+
+        elbo_train = self.test(train_set,
+                               Xembed_train,
+                               "final-train",
+                               False,
+                               gind,
+                               gene_plot,
+                               True,
+                               figure_path)
+        elbo_test = self.test(test_set,
+                              Xembed_test,
+                              "final-test",
+                              True,
+                              gind,
+                              gene_plot,
+                              True,
+                              figure_path)
+        self.loss_train.append(-elbo_train)
+        self.loss_test.append(elbo_test)
+        if plot:
+            plot_train_loss(self.loss_train, range(1, len(self.loss_train)+1), save=f'{figure_path}/train_loss_velovae.png')
+            if self.config["test_iter"] > 0:
+                plot_test_loss(self.loss_test, [i*self.config["test_iter"] for i in range(1, len(self.loss_test)+1)], save=f'{figure_path}/test_loss_velovae.png')
+        print(f"Final: Train ELBO = {elbo_train:.3f},\tTest ELBO = {elbo_test:.3f}")
+        print(f"*********              Finished. Total Time = {convert_time(time.time()-start)}             *********")
 
     def save_model(self, file_path, enc_name='encoder', dec_name='decoder'):
         os.makedirs(file_path, exist_ok=True)
@@ -2025,10 +2091,10 @@ class VAEChrom():
                         self.adata.var[f"{mode}_beta_{i}"] = np.exp(self.decoder.beta[i, 0].detach().cpu().numpy())
                         self.adata.var[f"{mode}_gamma_{i}"] = np.exp(self.decoder.gamma[i, 0].detach().cpu().numpy())
                     else:
-                        self.adata.var[f"{mode}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i, 0].detach().cpu(), 10, 2).numpy()
-                        self.adata.var[f"{mode}_alpha_{i}"] = F.softplus(self.decoder.alpha[i, 0].detach().cpu(), 10, 2).numpy()
-                        self.adata.var[f"{mode}_beta_{i}"] = F.softplus(self.decoder.beta[i, 0].detach().cpu(), 10, 2).numpy()
-                        self.adata.var[f"{mode}_gamma_{i}"] = F.softplus(self.decoder.gamma[i, 0].detach().cpu(), 10, 2).numpy()
+                        self.adata.var[f"{mode}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i, 0].detach().cpu()).numpy()
+                        self.adata.var[f"{mode}_alpha_{i}"] = F.softplus(self.decoder.alpha[i, 0].detach().cpu()).numpy()
+                        self.adata.var[f"{mode}_beta_{i}"] = F.softplus(self.decoder.beta[i, 0].detach().cpu()).numpy()
+                        self.adata.var[f"{mode}_gamma_{i}"] = F.softplus(self.decoder.gamma[i, 0].detach().cpu()).numpy()
                     self.adata.var[f"{mode}_logstd_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i, 1].detach().cpu().numpy())
                     self.adata.var[f"{mode}_logstd_alpha_{i}"] = np.exp(self.decoder.alpha[i, 1].detach().cpu().numpy())
                     self.adata.var[f"{mode}_logstd_beta_{i}"] = np.exp(self.decoder.beta[i, 1].detach().cpu().numpy())
@@ -2040,10 +2106,10 @@ class VAEChrom():
                     self.adata.var[f"{mode}_beta"] = np.exp(self.decoder.beta[0].detach().cpu().numpy())
                     self.adata.var[f"{mode}_gamma"] = np.exp(self.decoder.gamma[0].detach().cpu().numpy())
                 else:
-                    self.adata.var[f"{mode}_alpha_c"] = F.softplus(self.decoder.alpha_c[0].detach().cpu(), 10, 2).numpy()
-                    self.adata.var[f"{mode}_alpha"] = F.softplus(self.decoder.alpha[0].detach().cpu(), 10, 2).numpy()
-                    self.adata.var[f"{mode}_beta"] = F.softplus(self.decoder.beta[0].detach().cpu(), 10, 2).numpy()
-                    self.adata.var[f"{mode}_gamma"] = F.softplus(self.decoder.gamma[0].detach().cpu(), 10, 2).numpy()
+                    self.adata.var[f"{mode}_alpha_c"] = F.softplus(self.decoder.alpha_c[0].detach().cpu()).numpy()
+                    self.adata.var[f"{mode}_alpha"] = F.softplus(self.decoder.alpha[0].detach().cpu()).numpy()
+                    self.adata.var[f"{mode}_beta"] = F.softplus(self.decoder.beta[0].detach().cpu()).numpy()
+                    self.adata.var[f"{mode}_gamma"] = F.softplus(self.decoder.gamma[0].detach().cpu()).numpy()
                 self.adata.var[f"{mode}_logstd_alpha_c"] = np.exp(self.decoder.alpha_c[1].detach().cpu().numpy())
                 self.adata.var[f"{mode}_logstd_alpha"] = np.exp(self.decoder.alpha[1].detach().cpu().numpy())
                 self.adata.var[f"{mode}_logstd_beta"] = np.exp(self.decoder.beta[1].detach().cpu().numpy())
@@ -2057,10 +2123,10 @@ class VAEChrom():
                         self.adata.var[f"{mode}_beta_{i}"] = np.exp(self.decoder.beta[i].detach().cpu().numpy())
                         self.adata.var[f"{mode}_gamma_{i}"] = np.exp(self.decoder.gamma[i].detach().cpu().numpy())
                     else:
-                        self.adata.var[f"{mode}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i].detach().cpu(), 10, 2).numpy()
-                        self.adata.var[f"{mode}_alpha_{i}"] = F.softplus(self.decoder.alpha[i].detach().cpu(), 10, 2).numpy()
-                        self.adata.var[f"{mode}_beta_{i}"] = F.softplus(self.decoder.beta[i].detach().cpu(), 10, 2).numpy()
-                        self.adata.var[f"{mode}_gamma_{i}"] = F.softplus(self.decoder.gamma[i].detach().cpu(), 10, 2).numpy()
+                        self.adata.var[f"{mode}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i].detach().cpu()).numpy()
+                        self.adata.var[f"{mode}_alpha_{i}"] = F.softplus(self.decoder.alpha[i].detach().cpu()).numpy()
+                        self.adata.var[f"{mode}_beta_{i}"] = F.softplus(self.decoder.beta[i].detach().cpu()).numpy()
+                        self.adata.var[f"{mode}_gamma_{i}"] = F.softplus(self.decoder.gamma[i].detach().cpu()).numpy()
             else:
                 if self.config['log_params']:
                     self.adata.var[f"{mode}_alpha_c"] = np.exp(self.decoder.alpha_c.detach().cpu().numpy())
@@ -2068,24 +2134,32 @@ class VAEChrom():
                     self.adata.var[f"{mode}_beta"] = np.exp(self.decoder.beta.detach().cpu().numpy())
                     self.adata.var[f"{mode}_gamma"] = np.exp(self.decoder.gamma.detach().cpu().numpy())
                 else:
-                    self.adata.var[f"{mode}_alpha_c"] = F.softplus(self.decoder.alpha_c.detach().cpu(), 10, 2).numpy()
-                    self.adata.var[f"{mode}_alpha"] = F.softplus(self.decoder.alpha.detach().cpu(), 10, 2).numpy()
-                    self.adata.var[f"{mode}_beta"] = F.softplus(self.decoder.beta.detach().cpu(), 10, 2).numpy()
-                    self.adata.var[f"{mode}_gamma"] = F.softplus(self.decoder.gamma.detach().cpu(), 10, 2).numpy()
+                    self.adata.var[f"{mode}_alpha_c"] = F.softplus(self.decoder.alpha_c.detach().cpu()).numpy()
+                    self.adata.var[f"{mode}_alpha"] = F.softplus(self.decoder.alpha.detach().cpu()).numpy()
+                    self.adata.var[f"{mode}_beta"] = F.softplus(self.decoder.beta.detach().cpu()).numpy()
+                    self.adata.var[f"{mode}_gamma"] = F.softplus(self.decoder.gamma.detach().cpu()).numpy()
         if self.enable_cvae:
             for i in range(self.n_batch):
                 if self.config['log_params']:
                     self.adata.var[f"{mode}_scaling_c_{i}"] = np.exp(self.decoder.scaling_c[i].detach().cpu().numpy())
+                    self.adata.var[f"{mode}_scaling_u_{i}"] = np.exp(self.decoder.scaling_u[i].detach().cpu().numpy())
+                    # self.adata.var[f"{mode}_scaling_s_{i}"] = np.exp(self.decoder.scaling_s[i].detach().cpu().numpy())
                 else:
-                    self.adata.var[f"{mode}_scaling_c_{i}"] = F.softplus(self.decoder.scaling_c[i].detach().cpu(), 10, 2).numpy()
-                self.adata.var[f"{mode}_scaling_u_{i}"] = self.decoder.scaling_u[i].detach().cpu().numpy()
+                    self.adata.var[f"{mode}_scaling_c_{i}"] = F.softplus(self.decoder.scaling_c[i].detach().cpu()).numpy()
+                    self.adata.var[f"{mode}_scaling_u_{i}"] = F.softplus(self.decoder.scaling_u[i].detach().cpu()).numpy()
+                    # self.adata.var[f"{mode}_scaling_s_{i}"] = F.softplus(self.decoder.scaling_s[i].detach().cpu()).numpy()
+                # self.adata.var[f"{mode}_scaling_u_{i}"] = self.decoder.scaling_u[i].detach().cpu().numpy()
                 self.adata.var[f"{mode}_scaling_s_{i}"] = self.decoder.scaling_s[i].detach().cpu().numpy()
         else:
             if self.config['log_params']:
                 self.adata.var[f"{mode}_scaling_c"] = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
+                self.adata.var[f"{mode}_scaling_u"] = np.exp(self.decoder.scaling_u.detach().cpu().numpy())
+                # self.adata.var[f"{mode}_scaling_s"] = np.exp(self.decoder.scaling_s.detach().cpu().numpy())
             else:
-                self.adata.var[f"{mode}_scaling_c"] = F.softplus(self.decoder.scaling_c.detach().cpu(), 10, 2).numpy()
-            self.adata.var[f"{mode}_scaling_u"] = self.decoder.scaling_u.detach().cpu().numpy()
+                self.adata.var[f"{mode}_scaling_c"] = F.softplus(self.decoder.scaling_c.detach().cpu()).numpy()
+                self.adata.var[f"{mode}_scaling_u"] = F.softplus(self.decoder.scaling_u.detach().cpu()).numpy()
+                # self.adata.var[f"{mode}_scaling_s"] = F.softplus(self.decoder.scaling_s.detach().cpu()).numpy()
+            # self.adata.var[f"{mode}_scaling_u"] = self.decoder.scaling_u.detach().cpu().numpy()
             self.adata.var[f"{mode}_scaling_s"] = self.decoder.scaling_s.detach().cpu().numpy()
         self.adata.var[f"{mode}_sigma_c"] = self.decoder.sigma_c.detach().cpu().numpy()
         self.adata.var[f"{mode}_sigma_u"] = self.decoder.sigma_u.detach().cpu().numpy()

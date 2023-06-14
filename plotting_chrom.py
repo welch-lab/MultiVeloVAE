@@ -105,9 +105,9 @@ def plot_sig_(t,
                            label=type_)
         else:
             order = np.argsort(tpred)
-            ax[0].plot(tpred[order], cpred[order], 'k.')
-            ax[1].plot(tpred[order], upred[order], 'k.')
-            ax[2].plot(tpred[order], spred[order], 'k.')
+            ax[0].plot(tpred[order], cpred[order], 'k.', alpha=0.7)
+            ax[1].plot(tpred[order], upred[order], 'k.', alpha=0.7)
+            ax[2].plot(tpred[order], spred[order], 'k.', alpha=0.7)
 
         perm = np.random.permutation(len(s))
         Nsample = 100
