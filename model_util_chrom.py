@@ -286,7 +286,6 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1):
         sigma_c = np.clip(np.nanstd(dist_c, 0), 0.01, None)
         sigma_u = np.clip(np.nanstd(dist_u, 0), 0.01, None)
         sigma_s = np.clip(np.nanstd(dist_s, 0), 0.01, None)
-    # print(sigma_c[647], sigma_u[647], sigma_s[647])
     sigma_c[np.isnan(sigma_c)] = 1
     sigma_u[np.isnan(sigma_u)] = 1
     sigma_s[np.isnan(sigma_s)] = 1
@@ -411,7 +410,7 @@ def ode(t, alpha_c, alpha, beta, gamma, to, ts, neg_slope=0.0):
     return (chat_on*o + chat_off*(1-o)), (uhat_on*o + uhat_off*(1-o)), (shat_on*o + shat_off*(1-o))
 
 
-def ode_numpy(t, alpha_c, alpha, beta, gamma, to, ts, scaling_c=None, scaling=None, k=10.0):
+def ode_numpy(t, alpha_c, alpha, beta, gamma, to, ts, scaling_c=None, scaling_u=None, scaling_s=None, offset_c=None, offset_u=None, offset_s=None, k=10.0):
     eps = 1e-6
     o = (t <= ts).astype(int)
 
@@ -438,8 +437,16 @@ def ode_numpy(t, alpha_c, alpha, beta, gamma, to, ts, scaling_c=None, scaling=No
     chat, uhat, shat = (chat_on*o + chat_off*(1-o)), (uhat_on*o + uhat_off*(1-o)), (shat_on*o + shat_off*(1-o))
     if scaling_c is not None:
         chat *= scaling_c
-    if scaling is not None:
-        uhat *= scaling
+    if scaling_u is not None:
+        uhat *= scaling_u
+    if scaling_s is not None:
+        shat *= scaling_s
+    if offset_c is not None:
+        chat += offset_c
+    if offset_u is not None:
+        uhat += offset_u
+    if offset_s is not None:
+        shat += offset_s
     return chat, uhat, shat
 
 

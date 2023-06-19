@@ -37,25 +37,21 @@ class Encoder(nn.Module):
         # self.fc1 = nn.Linear(Cin+dim_cond, N1)
         # self.bn1 = nn.BatchNorm1d(N1)
         # self.dpt1 = nn.Dropout(p=0.2)
-        # self.fc2 = nn.Linear(N1, N2)
+        # self.net1 = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1)
+        # self.fc2 = nn.Linear(N1+dim_cond, N2)
         # self.bn2 = nn.BatchNorm1d(N2)
         # self.dpt2 = nn.Dropout(p=0.2)
-        # self.net = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1,
-        #                          self.fc2, self.bn2, nn.LeakyReLU(), self.dpt2)
+        # self.net2 = nn.Sequential(self.fc2, self.bn2, nn.LeakyReLU(), self.dpt2)
         self.fc1 = nn.Linear(Cin+dim_cond, N2)
         self.bn1 = nn.BatchNorm1d(N2)
         self.dpt1 = nn.Dropout(p=0.2)
-        self.net = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1)
+        self.net1 = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1)
 
-        # self.fc_mu_t = nn.Linear(N2, dim_z if t_network else 1)
-        # self.fc_std_t = nn.Linear(N2, dim_z if t_network else 1)
         self.fc_mu_t = nn.Linear(N2, dim_z if t_network else 1)
         self.fc_std_t = nn.Linear(N2, dim_z if t_network else 1)
         self.spt = nn.Softplus()
         self.spt1 = nn.Softplus()
 
-        # self.fc_mu_z = nn.Linear(N2, dim_z)
-        # self.fc_std_z = nn.Linear(N2, dim_z)
         self.fc_mu_z = nn.Linear(N2, dim_z)
         self.fc_std_z = nn.Linear(N2, dim_z)
         self.spt2 = nn.Softplus()
@@ -66,13 +62,20 @@ class Encoder(nn.Module):
             self.init_weights()
 
     def init_weights(self):
-        for m in self.net.modules():
+        for m in self.net1.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.constant_(m.bias, 0.0)
             elif isinstance(m, nn.BatchNorm1d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
+        # for m in self.net2.modules():
+        #     if isinstance(m, nn.Linear):
+        #         nn.init.xavier_uniform_(m.weight)
+        #         nn.init.constant_(m.bias, 0.0)
+        #     elif isinstance(m, nn.BatchNorm1d):
+        #         nn.init.constant_(m.weight, 1)
+        #         nn.init.constant_(m.bias, 0)
         for m in [self.fc_mu_t, self.fc_std_t, self.fc_mu_z, self.fc_std_z]:
             nn.init.xavier_uniform_(m.weight)
             nn.init.constant_(m.bias, 0.0)
@@ -80,7 +83,10 @@ class Encoder(nn.Module):
     def forward(self, data_in, condition=None):
         if condition is not None:
             data_in = torch.cat((data_in, condition), 1)
-        h = self.net(data_in)
+        h = self.net1(data_in)
+        # if condition is not None:
+        #     h = torch.cat((h, condition), 1)
+        # h = self.net2(h)
         mu_tx = self.fc_mu_t(h) if self.t_network else self.spt(self.fc_mu_t(h))
         std_tx = self.spt1(self.fc_std_t(h))
         mu_zx = self.fc_mu_z(h)
@@ -184,13 +190,6 @@ class Decoder(nn.Module):
             self.alpha = nn.Parameter(torch.empty(self.params_shape))
             self.beta = nn.Parameter(torch.empty(self.params_shape))
             self.gamma = nn.Parameter(torch.empty(self.params_shape))
-            self.scaling_c = nn.Parameter(torch.empty(G))
-            self.scaling_u = nn.Parameter(torch.empty(G))
-            # self.scaling_s = nn.Parameter(torch.empty(G))
-
-            # self.register_buffer('scaling_c', torch.empty(G))
-            # self.register_buffer('scaling_u', torch.empty(G))
-            self.register_buffer('scaling_s', torch.empty(G))
             self.register_buffer('sigma_c', torch.empty(G))
             self.register_buffer('sigma_u', torch.empty(G))
             self.register_buffer('sigma_s', torch.empty(G))
@@ -201,6 +200,23 @@ class Decoder(nn.Module):
             self.c0 = nn.Parameter(torch.empty(G))
             self.u0 = nn.Parameter(torch.empty(G))
             self.s0 = nn.Parameter(torch.empty(G))
+
+            if self.cvae:
+                self.scaling_c = nn.Parameter(torch.empty((self.dim_cond, G)))
+                self.scaling_u = nn.Parameter(torch.empty((self.dim_cond, G)))
+                self.scaling_s = nn.Parameter(torch.empty((self.dim_cond, G)))
+                self.offset_c = nn.Parameter(torch.empty((self.dim_cond, G)))
+                self.offset_u = nn.Parameter(torch.empty((self.dim_cond, G)))
+                self.offset_s = nn.Parameter(torch.empty((self.dim_cond, G)))
+                self.register_buffer('one_mat', torch.empty((self.dim_cond, G)))
+                self.register_buffer('zero_mat', torch.empty((self.dim_cond, G)))
+            else:
+                self.scaling_c = nn.Parameter(torch.empty(G))
+                self.scaling_u = nn.Parameter(torch.empty(G))
+                self.scaling_s = nn.Parameter(torch.empty(G))
+                self.offset_c = nn.Parameter(torch.empty(G))
+                self.offset_u = nn.Parameter(torch.empty(G))
+                self.offset_s = nn.Parameter(torch.empty(G))
 
             self.load_state_dict(torch.load(self.checkpoint))
         else:
@@ -273,6 +289,7 @@ class Decoder(nn.Module):
         out = init_params(c, u, s, p, fit_scaling=True, global_std=self.global_std, tmax=self.tmax)
         alpha_c, alpha, beta, gamma, scaling_c, scaling_u, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, t, cpred, upred, spred = out
         scaling_s = np.ones_like(scaling_u)
+        offset_c, offset_u, offset_s = np.zeros_like(scaling_u), np.zeros_like(scaling_u), np.zeros_like(scaling_u)
 
         if self.init_method == 'tprior':
             w = assign_gene_mode_tprior(self.adata, self.init_key, self.train_idx)
@@ -283,7 +300,6 @@ class Decoder(nn.Module):
             sigma_c = np.clip(sigma_c, np.min(sigma_c[self.adata.var['quantile_genes']]), np.max(sigma_c[self.adata.var['quantile_genes']]))
             sigma_u = np.clip(sigma_u, np.min(sigma_u[self.adata.var['quantile_genes']]), np.max(sigma_u[self.adata.var['quantile_genes']]))
             sigma_s = np.clip(sigma_s, np.min(sigma_s[self.adata.var['quantile_genes']]), np.max(sigma_s[self.adata.var['quantile_genes']]))
-            # print(sigma_c[647], sigma_u[647], sigma_s[647])
         print(f"Initial induction: {np.sum(w >= 0.5)}, repression: {np.sum(w < 0.5)} out of {G}.")
         self.adata.var["w_init"] = w
         logit_pw = 0.5*(np.log(w+1e-10) - np.log(1-w-1e-10))
@@ -374,6 +390,9 @@ class Decoder(nn.Module):
                     scaling_c[i] = np.clip(np.nanpercentile(ci, 99.5, axis=0), 1e-3, None)
                     scaling_u[i] = np.clip(std_u / (std_s_ref*(~np.isnan(std_s_ref)) + std_s*np.isnan(std_s_ref)), 1e-6, 1e6)
                     scaling_s[i] = np.clip(std_s / (std_s_ref*(~np.isnan(std_s_ref)) + std_s*np.isnan(std_s_ref)), 1e-6, 1e6)
+            offset_c = np.zeros((self.dim_cond, G))
+            offset_u = np.zeros((self.dim_cond, G))
+            offset_s = np.zeros((self.dim_cond, G))
         if np.any(np.isnan(scaling_u)):
             print('scaling_u invalid nan')
         if np.any(np.isinf(scaling_u)):
@@ -391,9 +410,16 @@ class Decoder(nn.Module):
         self.gamma = self.to_param(gamma)
         self.scaling_c = nn.Parameter(torch.tensor(np.log(scaling_c) if self.log_params else softplusinv(scaling_c)))
         self.scaling_u = nn.Parameter(torch.tensor(np.log(scaling_u) if self.log_params else softplusinv(scaling_u)))
+        self.scaling_s = nn.Parameter(torch.tensor(np.log(scaling_s) if self.log_params else softplusinv(scaling_s)))
+        self.offset_c = nn.Parameter(torch.tensor(offset_c))
+        self.offset_u = nn.Parameter(torch.tensor(offset_u))
+        self.offset_s = nn.Parameter(torch.tensor(offset_s))
         # self.scaling_s = nn.Parameter(torch.tensor(np.log(scaling_s) if self.log_params else scaling_s))
         # self.register_buffer('scaling_u', torch.tensor(scaling_u))
-        self.register_buffer('scaling_s', torch.tensor(scaling_s))
+        # self.register_buffer('scaling_s', torch.tensor(scaling_s))
+        # self.offset_c = nn.Parameter(torch.tensor(np.log(scaling_c) if self.log_params else softplusinv(scaling_c)))
+        # self.offset_u = nn.Parameter(torch.tensor(np.log(scaling_u) if self.log_params else softplusinv(scaling_u)))
+        # self.register_buffer('offset_s', torch.tensor(scaling_s))
 
         self.c0 = nn.Parameter(torch.tensor(np.log(c0+1e-10) if self.log_params else c0))
         self.u0 = nn.Parameter(torch.tensor(np.log(u0+1e-10) if self.log_params else u0))
@@ -407,114 +433,103 @@ class Decoder(nn.Module):
         self.register_buffer('sigma_u', torch.tensor(sigma_u))
         self.register_buffer('sigma_s', torch.tensor(sigma_s))
         self.register_buffer('zero_vec', torch.zeros_like(self.u0))
+        if self.cvae:
+            self.register_buffer('one_mat', torch.ones_like(self.scaling_u))
+            self.register_buffer('zero_mat', torch.zeros_like(self.scaling_u))
 
     def get_param(self, x):
         if x == 'ton':
-            return self.ton
+            out = self.ton
         elif x == 'c0':
-            return self.c0
+            out = self.c0
         elif x == 'u0':
-            return self.u0
+            out = self.u0
         elif x == 's0':
-            return self.s0
+            out = self.s0
         elif x == 'alpha_c':
-            return self.alpha_c
+            out = self.alpha_c
         elif x == 'alpha':
-            return self.alpha
+            out = self.alpha
         elif x == 'beta':
-            return self.beta
+            out = self.beta
         elif x == 'gamma':
-            return self.gamma
+            out = self.gamma
         elif x == 'scaling_c':
-            return self.scaling_c
+            out = self.scaling_c
         elif x == 'scaling_u':
-            return self.scaling_u
+            out = self.scaling_u
         elif x == 'scaling_s':
-            return self.scaling_s
+            out = self.scaling_s
+        elif x == 'offset_c':
+            out = self.offset_c
+        elif x == 'offset_u':
+            out = self.offset_u
+        elif x == 'offset_s':
+            out = self.offset_s
+        return out
 
-    def reparameterize(self, condition=None, sample=True, four_basis=False):
-        if self.is_full_vb:
+    def get_param_1d(self, x, condition=None, four_basis=False, is_full_vb=False, sample=True, mask_idx=None, mask_to=1, positive=True, detach=False):
+        param = self.get_param(x)
+        if detach:
+            param = param.detach()
+        if is_full_vb:
             if sample:
                 G = self.adata.n_vars
-                eps = torch.randn((5, G), device=self.alpha_c.device)
-                if self.cvae:
-                    alpha_c = self.alpha_c[:, 0] + eps[0]*(self.alpha_c[:, 1].exp())
-                    alpha = self.alpha[:, 0] + eps[1]*(self.alpha[:, 1].exp())
-                    beta = self.beta[:, 0] + eps[2]*(self.beta[:, 1].exp())
-                    gamma = self.gamma[:, 0] + eps[3]*(self.gamma[:, 1].exp())
+                eps = torch.randn(G, device=self.alpha_c.device)
+                if condition is not None:
+                    y = param[:, 0] + eps*(param[:, 1].exp())
                 else:
-                    alpha_c = self.alpha_c[0] + eps[0]*(self.alpha_c[1].exp())
-                    alpha = self.alpha[0] + eps[1]*(self.alpha[1].exp())
-                    beta = self.beta[0] + eps[2]*(self.beta[1].exp())
-                    gamma = self.gamma[0] + eps[3]*(self.gamma[1].exp())
+                    y = param[0] + eps*(param[1].exp())
             else:
-                if self.cvae:
-                    alpha_c = self.alpha_c[:, 0]
-                    alpha = self.alpha[:, 0]
-                    beta = self.beta[:, 0]
-                    gamma = self.gamma[:, 0]
+                if condition is not None:
+                    y = param[:, 0]
                 else:
-                    alpha_c = self.alpha_c[0]
-                    alpha = self.alpha[0]
-                    beta = self.beta[0]
-                    gamma = self.gamma[0]
+                    y = param[0]
         else:
-            alpha_c = self.alpha_c
-            alpha = self.alpha
-            beta = self.beta
-            gamma = self.gamma
-        scaling_c = self.scaling_c
-        scaling_u = self.scaling_u
-        scaling_s = self.scaling_s
+            y = param
 
-        if self.log_params:
-            alpha_c = alpha_c.exp()
-            alpha = alpha.exp()
-            beta = beta.exp()
-            gamma = gamma.exp()
-            scaling_c = scaling_c.exp()
-            scaling_u = scaling_u.exp()
-            # scaling_s = scaling_s.exp()
-        else:
-            alpha_c = F.softplus(alpha_c)
-            alpha = F.softplus(alpha)
-            beta = F.softplus(beta)
-            gamma = F.softplus(gamma)
-            scaling_c = F.softplus(scaling_c)
-            scaling_u = F.softplus(scaling_u)
-            # scaling_s = F.softplus(scaling_s)
+        if positive:
+            if self.log_params:
+                y = y.exp()
+            else:
+                y = F.softplus(y)
 
         if condition is not None:
-            alpha_c = torch.mm(condition, alpha_c)
-            alpha = torch.mm(condition, alpha)
-            beta = torch.mm(condition, beta)
-            gamma = torch.mm(condition, gamma)
-            scaling_c = torch.mm(condition, scaling_c)
-            scaling_u = torch.mm(condition, scaling_u)
-            scaling_s = torch.mm(condition, scaling_s)
+            if mask_idx is not None:
+                mask = torch.ones_like(condition)
+                mask[:, mask_idx] = 0
+                mask_flip = (~mask.bool()).int()
+                y = torch.mm(condition * mask, y) + torch.mm(condition * mask_flip, self.one_mat if mask_to == 1 else self.zero_mat)
+            else:
+                y = torch.mm(condition, y)
 
-        if self.cvae and four_basis:
-            alpha_c = alpha_c.unsqueeze(1)
-            alpha = alpha.unsqueeze(1)
-            beta = beta.unsqueeze(1)
-            gamma = gamma.unsqueeze(1)
-            scaling_c = scaling_c.unsqueeze(1)
-            scaling_u = scaling_u.unsqueeze(1)
-            scaling_s = scaling_s.unsqueeze(1)
+        if condition is not None and four_basis:
+            y = y.unsqueeze(1)
+        return y
 
-        return alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s
+    def reparameterize(self, condition=None, sample=True, four_basis=False):
+        alpha_c = self.get_param_1d('alpha_c', condition, four_basis, self.is_full_vb, sample)
+        alpha = self.get_param_1d('alpha', condition, four_basis, self.is_full_vb, sample)
+        beta = self.get_param_1d('beta', condition, four_basis, self.is_full_vb, sample)
+        gamma = self.get_param_1d('gamma', condition, four_basis, self.is_full_vb, sample)
+        scaling_c = self.get_param_1d('scaling_c', condition, four_basis)
+        scaling_u = self.get_param_1d('scaling_u', condition, four_basis)
+        scaling_s = self.get_param_1d('scaling_s', condition, four_basis, mask_idx=self.ref_batch)
+        offset_c = self.get_param_1d('offset_c', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, positive=False)
+        offset_u = self.get_param_1d('offset_u', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, positive=False)
+        offset_s = self.get_param_1d('offset_s', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, positive=False)
+
+        return alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s, offset_c, offset_u, offset_s
 
     def forward(self, t, z, c0=None, u0=None, s0=None, t0=None, condition=None, neg_slope=0.0, sample=True, four_basis=False, return_velocity=False, use_input_time=False, backward=False):
-        alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s = self.reparameterize(condition, sample, four_basis)
+        alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s, offset_c, offset_u, offset_s = self.reparameterize(condition, sample, four_basis)
         if condition is None:
             self.rho = self.net_rho(z)
             self.kc = self.net_kc(z if self.parallel_arch else self.rho)
-            # t_ = F.sigmoid(self.net_t(t) if self.t_network and (not use_input_time) else t) * self.tmax
             # t_ = self.net_t(t) if self.t_network and (not use_input_time) else t
         else:
             self.rho = self.net_rho(torch.cat((z, condition), 1))
             self.kc = self.net_kc(torch.cat((z, condition), 1) if self.parallel_arch else self.rho)
-            # t_ = F.sigmoid(self.net_t(torch.cat((t, condition), 1)) if self.t_network and (not use_input_time) else t) * self.tmax
             # t_ = self.net_t(torch.cat((t, condition), 1)) if self.t_network and (not use_input_time) else t
         t_ = self.net_t(t) if self.t_network and (not use_input_time) else t
         if backward:
@@ -557,18 +572,18 @@ class Decoder(nn.Module):
 
         else:
             chat, uhat, shat = pred_func(F.leaky_relu(t_ - t0, neg_slope),
-                                         c0/scaling_c,
-                                         u0/scaling_u,
-                                         s0/scaling_s,
+                                         (c0-offset_c)/scaling_c,
+                                         (u0-offset_u)/scaling_u,
+                                         (s0-offset_s)/scaling_s,
                                          self.kc,
                                          alpha_c,
                                          self.rho,
                                          alpha,
                                          beta,
                                          gamma)
-        chat = chat * scaling_c
-        uhat = uhat * scaling_u
-        shat = shat * scaling_s
+        chat = F.relu(chat * scaling_c + offset_c)
+        uhat = F.relu(uhat * scaling_u + offset_u)
+        shat = F.relu(shat * scaling_s + offset_s)
 
         if return_velocity:
             vc = self.kc * alpha_c - alpha_c * chat
@@ -677,6 +692,7 @@ class VAEChrom():
             "k_alt": 0,
             "train_ton": False,
             "train_scaling": True,
+            "train_offset": True,
             "knn_use_pred": True,
             "run_2nd_stage": run_2nd_stage,
             "velocity_continuity": velocity_continuity,
@@ -883,29 +899,13 @@ class VAEChrom():
         gind, gene_plot = get_gene_index(self.adata.var_names, gene_plot)
         os.makedirs(figure_path, exist_ok=True)
 
-        if self.enable_cvae:
-            onehot = F.one_hot(self.batch, self.n_batch).detach().cpu().numpy()[self.train_idx, :]
-            if self.config['log_params']:
-                scaling_c = np.dot(onehot, np.exp(self.decoder.scaling_c.detach().cpu().numpy()))
-                scaling_u = np.dot(onehot, np.exp(self.decoder.scaling_u.detach().cpu().numpy()))
-                # scaling_s = np.dot(onehot, np.exp(self.decoder.scaling_s.detach().cpu().numpy()))
-            else:
-                scaling_c = np.dot(onehot, F.softplus(self.decoder.scaling_c.detach().cpu()).numpy())
-                scaling_u = np.dot(onehot, F.softplus(self.decoder.scaling_u.detach().cpu()).numpy())
-                # scaling_s = np.dot(onehot, F.softplus(self.decoder.scaling_s.detach().cpu()).numpy())
-            # scaling_u = np.dot(onehot, self.decoder.scaling_u.detach().cpu().numpy())
-            scaling_s = np.dot(onehot, self.decoder.scaling_s.detach().cpu().numpy())
-        else:
-            if self.config['log_params']:
-                scaling_c = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
-                scaling_u = np.exp(self.decoder.scaling_u.detach().cpu().numpy())
-                # scaling_s = np.exp(self.decoder.scaling_s.detach().cpu().numpy())
-            else:
-                scaling_c = F.softplus(self.decoder.scaling_c.detach().cpu()).numpy()
-                scaling_u = F.softplus(self.decoder.scaling_u.detach().cpu()).numpy()
-                # scaling_s = F.softplus(self.decoder.scaling_s.detach().cpu()).numpy()
-            # scaling_u = self.decoder.scaling_u.detach().cpu().numpy()
-            scaling_s = self.decoder.scaling_s.detach().cpu().numpy()
+        onehot = F.one_hot(self.batch.detach()[self.train_idx], self.n_batch).float() if self.enable_cvae else None
+        scaling_c = self.decoder.get_param_1d('scaling_c', onehot, False, False, detach=True).cpu().numpy()
+        scaling_u = self.decoder.get_param_1d('scaling_u', onehot, False, False, detach=True).cpu().numpy()
+        scaling_s = self.decoder.get_param_1d('scaling_s', onehot, False, False, detach=True).cpu().numpy()
+        offset_c = self.decoder.get_param_1d('offset_c', onehot, False, False, positive=False, detach=True).cpu().numpy()
+        offset_u = self.decoder.get_param_1d('offset_u', onehot, False, False, positive=False, detach=True).cpu().numpy()
+        offset_s = self.decoder.get_param_1d('offset_s', onehot, False, False, positive=False, detach=True).cpu().numpy()
 
         t = self.decoder.t_[:, gind]
         c = self.adata_atac.layers['Mc'][self.train_idx, :][:, gind]
@@ -920,6 +920,14 @@ class VAEChrom():
             Xembed_train = Xembed[self.train_idx]
             plot_time(np.quantile(self.decoder.t_, 0.5, 1), Xembed_train, save=f"{figure_path}/time-init.png")
         for i in range(len(gind)):
+            idx = gind[i]
+            scaling_c_ = scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]
+            scaling_u_ = scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]
+            scaling_s_ = scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]
+            offset_c_ = offset_c[:, idx] if self.enable_cvae else offset_c[idx]
+            offset_u_ = offset_u[:, idx] if self.enable_cvae else offset_u[idx]
+            offset_s_ = offset_s[:, idx] if self.enable_cvae else offset_s[idx]
+
             plot_sig(t[:, i].squeeze(),
                      c[:, i],
                      u[:, i],
@@ -933,12 +941,12 @@ class VAEChrom():
                      sparsify=self.config['sparsify'])
 
             plot_sig(t[:, i].squeeze(),
-                     c[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
-                     u[:, i] / (scaling_u[:, gind][:, i] if self.enable_cvae else scaling_u[gind][i]),
-                     s[:, i] / (scaling_s[:, gind][:, i] if self.enable_cvae else scaling_s[gind][i]),
-                     chat[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
-                     uhat[:, i] / (scaling_u[:, gind][:, i] if self.enable_cvae else scaling_u[gind][i]),
-                     shat[:, i] / (scaling_s[:, gind][:, i] if self.enable_cvae else scaling_s[gind][i]),
+                     (c[:, i] - offset_c_) / scaling_c_,
+                     (u[:, i] - offset_u_) / scaling_u_,
+                     (s[:, i] - offset_s_) / scaling_s_,
+                     (chat[:, i] - offset_c_) / scaling_c_,
+                     (uhat[:, i] - offset_u_) / scaling_u_,
+                     (shat[:, i] - offset_s_) / scaling_s_,
                      cell_labels_raw[self.train_idx],
                      gene_plot[i],
                      save=f"{figure_path}/sigscaled-{gene_plot[i]}-init.png",
@@ -972,12 +980,12 @@ class VAEChrom():
                        cell_types_raw,
                        save=f"{figure_path}/phase-{gene_plot[i]}-init-us.png")
 
-            plot_phase(c[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
-                       u[:, i] / (scaling_u[:, gind][:, i] if self.enable_cvae else scaling_u[gind][i]),
-                       s[:, i] / (scaling_s[:, gind][:, i] if self.enable_cvae else scaling_s[gind][i]),
-                       chat[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
-                       uhat[:, i] / (scaling_u[:, gind][:, i] if self.enable_cvae else scaling_u[gind][i]),
-                       shat[:, i] / (scaling_s[:, gind][:, i] if self.enable_cvae else scaling_s[gind][i]),
+            plot_phase((c[:, i] - offset_c_) / scaling_c_,
+                       (u[:, i] - offset_u_) / scaling_u_,
+                       (s[:, i] - offset_s_) / scaling_s_,
+                       (chat[:, i] - offset_c_) / scaling_c_,
+                       (uhat[:, i] - offset_u_) / scaling_u_,
+                       (shat[:, i] - offset_s_) / scaling_s_,
                        gene_plot[i],
                        'cu',
                        None,
@@ -986,12 +994,12 @@ class VAEChrom():
                        cell_types_raw,
                        save=f"{figure_path}/phasescaled-{gene_plot[i]}-init-cu.png")
 
-            plot_phase(c[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
-                       u[:, i] / (scaling_u[:, gind][:, i] if self.enable_cvae else scaling_u[gind][i]),
-                       s[:, i] / (scaling_s[:, gind][:, i] if self.enable_cvae else scaling_s[gind][i]),
-                       chat[:, i] / (scaling_c[:, gind][:, i] if self.enable_cvae else scaling_c[gind][i]),
-                       uhat[:, i] / (scaling_u[:, gind][:, i] if self.enable_cvae else scaling_u[gind][i]),
-                       shat[:, i] / (scaling_s[:, gind][:, i] if self.enable_cvae else scaling_s[gind][i]),
+            plot_phase((c[:, i] - offset_c_) / scaling_c_,
+                       (u[:, i] - offset_u_) / scaling_u_,
+                       (s[:, i] / scaling_s_) - offset_s_,
+                       (chat[:, i] - offset_c_) / scaling_c_,
+                       (uhat[:, i] - offset_u_) / scaling_u_,
+                       (shat[:, i] - offset_s_) / scaling_s_,
                        gene_plot[i],
                        'us',
                        None,
@@ -1009,31 +1017,15 @@ class VAEChrom():
                                        data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]/sigma_u,
                                        data_in[:, data_in.shape[1]//3*2:]/sigma_s), 1)
         else:
-            if condition is not None:
-                if self.config['log_params']:
-                    scaling_c = torch.exp(torch.mm(condition, self.decoder.scaling_c))
-                    scaling_u = torch.exp(torch.mm(condition, self.decoder.scaling_u))
-                    # scaling_s = torch.exp(torch.mm(condition, self.decoder.scaling_s))
-                else:
-                    scaling_c = F.softplus(torch.mm(condition, self.decoder.scaling_c))
-                    scaling_u = F.softplus(torch.mm(condition, self.decoder.scaling_u))
-                    # scaling_s = F.softplus(torch.mm(condition, self.decoder.scaling_s))
-                # scaling_u = torch.mm(condition, self.decoder.scaling_u)
-                scaling_s = torch.mm(condition, self.decoder.scaling_s)
-            else:
-                if self.config['log_params']:
-                    scaling_c = torch.exp(self.decoder.scaling_c)
-                    scaling_u = torch.exp(self.decoder.scaling_u)
-                    # scaling_s = torch.exp(self.decoder.scaling_s)
-                else:
-                    scaling_c = F.softplus(self.decoder.scaling_c)
-                    scaling_u = F.softplus(self.decoder.scaling_u)
-                    # scaling_s = F.softplus(self.decoder.scaling_s)
-                # scaling_u = self.decoder.scaling_u
-                scaling_s = self.decoder.scaling_s
-            data_in_scale = torch.cat((data_in[:, :data_in.shape[1]//3]/scaling_c,
-                                       data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]/scaling_u,
-                                       data_in[:, data_in.shape[1]//3*2:]/scaling_s), 1)
+            scaling_c = self.decoder.get_param_1d('scaling_c', condition, False, False)
+            scaling_u = self.decoder.get_param_1d('scaling_u', condition, False, False)
+            scaling_s = self.decoder.get_param_1d('scaling_s', condition, False, False, mask_idx=self.ref_batch)
+            offset_c = self.decoder.get_param_1d('offset_c', condition, False, False, mask_idx=self.ref_batch, mask_to=0, positive=False)
+            offset_u = self.decoder.get_param_1d('offset_u', condition, False, False, mask_idx=self.ref_batch, mask_to=0, positive=False)
+            offset_s = self.decoder.get_param_1d('offset_s', condition, False, False, mask_idx=self.ref_batch, mask_to=0, positive=False)
+            data_in_scale = torch.cat(((data_in[:, :data_in.shape[1]//3]-offset_c)/scaling_c,
+                                       (data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]-offset_u)/scaling_u,
+                                       (data_in[:, data_in.shape[1]//3*2:]-offset_s)/scaling_s), 1)
         mu_t, std_t, mu_z, std_z = self.encoder.forward(data_in_scale, condition)
         if t is None or z is None:
             if sample and not self.use_knn:
@@ -1114,7 +1106,7 @@ class VAEChrom():
                  s1=None,
                  t=None,
                  s_knn=None,
-                 onehot=None,
+                 condition=None,
                  sample=True,
                  idx=None):
         kldt = kl_gaussian(q_tx[0], q_tx[1], p_t[0], p_t[1])
@@ -1219,57 +1211,27 @@ class VAEChrom():
             loss = loss + self.config["kl_param"]*kld_params
 
         if self.use_knn and self.config["velocity_continuity"]:
-            if onehot is not None:
-                if self.config['log_params']:
-                    scaling_c = torch.exp(torch.mm(onehot, self.decoder.scaling_c))
-                    scaling_u = torch.exp(torch.mm(onehot, self.decoder.scaling_u))
-                    # scaling_s = torch.exp(torch.mm(onehot, self.decoder.scaling_s))
-                else:
-                    scaling_c = F.softplus(torch.mm(onehot, self.decoder.scaling_c))
-                    scaling_u = F.softplus(torch.mm(onehot, self.decoder.scaling_u))
-                    # scaling_s = F.softplus(torch.mm(onehot, self.decoder.scaling_s))
-                # scaling_u = torch.mm(onehot, self.decoder.scaling_u)
-                scaling_s = torch.mm(onehot, self.decoder.scaling_s)
-            else:
-                if self.config['log_params']:
-                    scaling_c = torch.exp(self.decoder.scaling_c)
-                    scaling_u = torch.exp(self.decoder.scaling_u)
-                    # scaling_s = torch.exp(self.decoder.scaling_s)
-                else:
-                    scaling_c = F.softplus(self.decoder.scaling_c)
-                    scaling_u = F.softplus(self.decoder.scaling_u)
-                    # scaling_s = F.softplus(self.decoder.scaling_s)
-                # scaling_u = self.decoder.scaling_u
-                scaling_s = self.decoder.scaling_s
-            forward_loss = (self.loss_vel(c0/scaling_c, chat/scaling_c, vc,
-                                          u0/scaling_u, uhat/scaling_u, vu,
-                                          s0/scaling_s, shat/scaling_s, vs)
-                            + self.loss_vel(chat/scaling_c, chat_fw/scaling_c, vc_fw,
-                                            uhat/scaling_u, uhat_fw/scaling_u, vu_fw,
-                                            shat/scaling_s, shat_fw/scaling_s, vs_fw))
+            scaling_c = self.decoder.get_param_1d('scaling_c', condition, False, False)
+            scaling_u = self.decoder.get_param_1d('scaling_u', condition, False, False)
+            scaling_s = self.decoder.get_param_1d('scaling_s', condition, False, False, mask_idx=self.ref_batch)
+            offset_c = self.decoder.get_param_1d('offset_c', condition, False, False, mask_idx=self.ref_batch, mask_to=0, positive=False)
+            offset_u = self.decoder.get_param_1d('offset_u', condition, False, False, mask_idx=self.ref_batch, mask_to=0, positive=False)
+            offset_s = self.decoder.get_param_1d('offset_s', condition, False, False, mask_idx=self.ref_batch, mask_to=0, positive=False)
+            forward_loss = (self.loss_vel((c0-offset_c)/scaling_c, (chat-offset_c)/scaling_c, vc,
+                                          (u0-offset_u)/scaling_u, (uhat-offset_u)/scaling_u, vu,
+                                          (s0-offset_s)/scaling_s, (shat-offset_s)/scaling_s, vs)
+                            + self.loss_vel((chat-offset_c)/scaling_c, (chat_fw-offset_c)/scaling_c, vc_fw,
+                                            (uhat-offset_u)/scaling_u, (uhat_fw-offset_u)/scaling_u, vu_fw,
+                                            (shat-offset_s)/scaling_s, (shat_fw-offset_s)/scaling_s, vs_fw))
             loss = loss - self.config["reg_forward"]*forward_loss
 
         if self.reg_velocity:
-            if onehot is not None:
-                if self.config['log_params']:
-                    scaling_u = torch.exp(torch.mm(onehot, self.decoder.scaling_u))
-                #     scaling_s = torch.exp(torch.mm(onehot, self.decoder.scaling_s))
-                else:
-                    scaling_u = F.softplus(torch.mm(onehot, self.decoder.scaling_u))
-                #     scaling_s = F.softplus(torch.mm(onehot, self.decoder.scaling_s))
-                # scaling_u = torch.mm(onehot, self.decoder.scaling_u)
-                scaling_s = torch.mm(onehot, self.decoder.scaling_s)
-            else:
-                if self.config['log_params']:
-                    scaling_u = torch.exp(self.decoder.scaling_u)
-                #     scaling_s = torch.exp(self.decoder.scaling_s)
-                else:
-                    scaling_u = F.softplus(self.decoder.scaling_u)
-                #     scaling_s = F.softplus(self.decoder.scaling_s)
-                # scaling_u = self.decoder.scaling_u
-                scaling_s = self.decoder.scaling_s
-            _, _, beta, gamma = self.decoder.reparameterize(onehot, sample)
-            cos_sim = cosine_similarity(uhat/scaling_u, shat/scaling_s, beta, gamma, s_knn)
+            scaling_u = self.decoder.get_param_1d('scaling_u', condition, False, False)
+            scaling_s = self.decoder.get_param_1d('scaling_s', condition, False, False, mask_idx=self.ref_batch)
+            offset_u = self.decoder.get_param_1d('offset_u', condition, False, False, mask_idx=self.ref_batch, mask_to=0, positive=False)
+            offset_s = self.decoder.get_param_1d('offset_s', condition, False, False, mask_idx=self.ref_batch, mask_to=0, positive=False)
+            _, _, beta, gamma, _, _, _ = self.decoder.reparameterize(condition, sample)
+            cos_sim = cosine_similarity((uhat-offset_u)/scaling_u, (shat-offset_s)/scaling_s, beta, gamma, s_knn)
             loss = loss - self.config["reg_cos"]*cos_sim
 
         # print(err_rec, self.config["kl_t"]*kldt, self.config["kl_z"]*kldz,
@@ -1470,29 +1432,13 @@ class VAEChrom():
 
         if plot:
             cell_idx = self.test_idx if test_mode else self.train_idx
-            if self.enable_cvae:
-                onehot = F.one_hot(self.batch[cell_idx], self.n_batch).detach().cpu().numpy()
-                if self.config['log_params']:
-                    scaling_c = np.dot(onehot, np.exp(self.decoder.scaling_c.detach().cpu().numpy()))
-                    scaling_u = np.dot(onehot, np.exp(self.decoder.scaling_u.detach().cpu().numpy()))
-                    # scaling_s = np.dot(onehot, np.exp(self.decoder.scaling_s.detach().cpu().numpy()))
-                else:
-                    scaling_c = np.dot(onehot, F.softplus(self.decoder.scaling_c.detach().cpu()).numpy())
-                    scaling_u = np.dot(onehot, F.softplus(self.decoder.scaling_u.detach().cpu()).numpy())
-                    # scaling_s = np.dot(onehot, F.softplus(self.decoder.scaling_s.detach().cpu()).numpy())
-                # scaling_u = np.dot(onehot, self.decoder.scaling_u.detach().cpu().numpy())
-                scaling_s = np.dot(onehot, self.decoder.scaling_s.detach().cpu().numpy())
-            else:
-                if self.config['log_params']:
-                    scaling_c = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
-                    scaling_u = np.exp(self.decoder.scaling_u.detach().cpu().numpy())
-                    # scaling_s = np.exp(self.decoder.scaling_s.detach().cpu().numpy())
-                else:
-                    scaling_c = F.softplus(self.decoder.scaling_c.detach().cpu()).numpy()
-                    scaling_u = F.softplus(self.decoder.scaling_u.detach().cpu()).numpy()
-                    # scaling_s = F.softplus(self.decoder.scaling_s.detach().cpu()).numpy()
-                # scaling_u = self.decoder.scaling_u.detach().cpu().numpy()
-                scaling_s = self.decoder.scaling_s.detach().cpu().numpy()
+            onehot = F.one_hot(self.batch.detach()[cell_idx], self.n_batch).float() if self.enable_cvae else None
+            scaling_c = self.decoder.get_param_1d('scaling_c', onehot, False, False, detach=True).cpu().numpy()
+            scaling_u = self.decoder.get_param_1d('scaling_u', onehot, False, False, detach=True).cpu().numpy()
+            scaling_s = self.decoder.get_param_1d('scaling_s', onehot, False, False, detach=True).cpu().numpy()
+            offset_c = self.decoder.get_param_1d('offset_c', onehot, False, False, positive=False, detach=True).cpu().numpy()
+            offset_u = self.decoder.get_param_1d('offset_u', onehot, False, False, positive=False, detach=True).cpu().numpy()
+            offset_s = self.decoder.get_param_1d('offset_s', onehot, False, False, positive=False, detach=True).cpu().numpy()
 
             if not self.use_knn:
                 plot_time(t_, Xembed, save=f"{path}/time-{testid_str}.png")
@@ -1505,6 +1451,13 @@ class VAEChrom():
                     print(gene_plot[i], uhat[:, i])
                 if np.any(np.isnan(shat[:, i])):
                     print(gene_plot[i], shat[:, i])
+
+                scaling_c_ = scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]
+                scaling_u_ = scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]
+                scaling_s_ = scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]
+                offset_c_ = offset_c[:, idx] if self.enable_cvae else offset_c[idx]
+                offset_u_ = offset_u[:, idx] if self.enable_cvae else offset_u[idx]
+                offset_s_ = offset_s[:, idx] if self.enable_cvae else offset_s[idx]
 
                 plot_sig(t_.squeeze(),
                          dataset.data[:, idx].cpu().numpy(),
@@ -1519,12 +1472,12 @@ class VAEChrom():
                          sparsify=self.config['sparsify'])
 
                 plot_sig(t_.squeeze(),
-                         dataset.data[:, idx].cpu().numpy() / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
-                         dataset.data[:, idx+G].cpu().numpy() / (scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]),
-                         dataset.data[:, idx+G*2].cpu().numpy() / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
-                         chat[:, i] / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
-                         uhat[:, i] / (scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]),
-                         shat[:, i] / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
+                         (dataset.data[:, idx].cpu().numpy() - offset_c_) / scaling_c_,
+                         (dataset.data[:, idx+G].cpu().numpy() - offset_u_) / scaling_u_,
+                         (dataset.data[:, idx+G*2].cpu().numpy() - offset_s_) / scaling_s_,
+                         (chat[:, i] - offset_c_) / scaling_c_,
+                         (uhat[:, i] - offset_u_) / scaling_u_,
+                         (shat[:, i] - offset_s_) / scaling_s_,
                          np.array([self.label_dic_rev[x] for x in dataset.labels]),
                          gene_plot[i],
                          save=f"{path}/sigscaled-{gene_plot[i]}-{testid_str}.png",
@@ -1532,14 +1485,14 @@ class VAEChrom():
 
                 if self.use_knn and self.config['velocity_continuity']:
                     plot_vel(t_.squeeze(),
-                             chat[:, i] / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
-                             uhat[:, i] / (scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]),
-                             shat[:, i] / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
+                             (chat[:, i] - offset_c_) / scaling_c_,
+                             (uhat[:, i] - offset_u_) / scaling_u_,
+                             (shat[:, i] - offset_s_) / scaling_s_,
                              out["vc"][:, i], out["vu"][:, i], out["vs"][:, i],
                              self.t0[cell_idx].squeeze().detach().cpu().numpy(),
-                             self.c0[cell_idx, idx].detach().cpu().numpy() / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
-                             self.u0[cell_idx, idx].detach().cpu().numpy() / (scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]),
-                             self.s0[cell_idx, idx].detach().cpu().numpy() / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
+                             (self.c0[cell_idx, idx].detach().cpu().numpy() - offset_c_) / scaling_c_,
+                             (self.u0[cell_idx, idx].detach().cpu().numpy() - offset_u_) / scaling_u_,
+                             (self.s0[cell_idx, idx].detach().cpu().numpy() - offset_s_) / scaling_s_,
                              title=gene_plot[i],
                              save=f"{path}/vel-{gene_plot[i]}-{testid_str}.png")
 
@@ -1556,12 +1509,12 @@ class VAEChrom():
                              sparsify=self.config['sparsify'])
 
                     plot_sig(t_.squeeze(),
-                             dataset.data[:, idx].cpu().numpy() / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
-                             dataset.data[:, idx+G].cpu().numpy() / (scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]),
-                             dataset.data[:, idx+G*2].cpu().numpy() / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
-                             out["chat_fw"][:, i] / (scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]),
-                             out["uhat_fw"][:, i] / (scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]),
-                             out["shat_fw"][:, i] / (scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]),
+                             (dataset.data[:, idx].cpu().numpy() - offset_c_) / scaling_c_,
+                             (dataset.data[:, idx+G].cpu().numpy() - offset_u_) / scaling_u_,
+                             (dataset.data[:, idx+G*2].cpu().numpy() - offset_s_) / scaling_s_,
+                             (out["chat_fw"][:, i] - offset_c_) / scaling_c_,
+                             (out["uhat_fw"][:, i] - offset_u_) / scaling_u_,
+                             (out["shat_fw"][:, i] - offset_s_) / scaling_s_,
                              np.array([self.label_dic_rev[x] for x in dataset.labels]),
                              gene_plot[i],
                              save=f"{path}/sigscaled-{gene_plot[i]}-{testid_str}-bw.png",
@@ -1837,6 +1790,13 @@ class VAEChrom():
         if self.config['train_scaling']:
             param_ode.extend([self.decoder.scaling_c,
                               self.decoder.scaling_u])
+            if self.enable_cvae:
+                param_ode.extend([self.decoder.scaling_s])
+        if self.config['train_offset']:
+            param_ode.extend([self.decoder.offset_c,
+                              self.decoder.offset_u])
+            if self.enable_cvae:
+                param_ode.extend([self.decoder.offset_s])
         if self.config['four_basis']:
             param_ode.extend([self.decoder.c0,
                               self.decoder.u0,
@@ -2032,7 +1992,7 @@ class VAEChrom():
                 s0_prev = self.s0.detach().cpu().numpy()
 
             if plot and self.config['n_refine'] > 1:
-                plot_time(self.t0.detach().cpu().numpy().squeeze(), Xembed, save=f"{figure_path}/time-t0-updated.png")
+                plot_time(self.t0.detach().cpu().numpy().squeeze(), Xembed, save=f"{figure_path}/timet0-updated.png")
                 t0_plot = self.t0[self.train_idx].detach().cpu().numpy().squeeze()
                 for i in range(len(gind)):
                     idx = gind[i]
@@ -2049,7 +2009,7 @@ class VAEChrom():
 
         elbo_train = self.test(train_set,
                                Xembed_train,
-                               "final-train",
+                               "train-final",
                                False,
                                gind,
                                gene_plot,
@@ -2057,7 +2017,7 @@ class VAEChrom():
                                figure_path)
         elbo_test = self.test(test_set,
                               Xembed_test,
-                              "final-test",
+                              "test-final",
                               True,
                               gind,
                               gene_plot,
@@ -2143,24 +2103,30 @@ class VAEChrom():
                 if self.config['log_params']:
                     self.adata.var[f"{mode}_scaling_c_{i}"] = np.exp(self.decoder.scaling_c[i].detach().cpu().numpy())
                     self.adata.var[f"{mode}_scaling_u_{i}"] = np.exp(self.decoder.scaling_u[i].detach().cpu().numpy())
-                    # self.adata.var[f"{mode}_scaling_s_{i}"] = np.exp(self.decoder.scaling_s[i].detach().cpu().numpy())
+                    self.adata.var[f"{mode}_scaling_s_{i}"] = np.exp(self.decoder.scaling_s[i].detach().cpu().numpy())
                 else:
                     self.adata.var[f"{mode}_scaling_c_{i}"] = F.softplus(self.decoder.scaling_c[i].detach().cpu()).numpy()
                     self.adata.var[f"{mode}_scaling_u_{i}"] = F.softplus(self.decoder.scaling_u[i].detach().cpu()).numpy()
-                    # self.adata.var[f"{mode}_scaling_s_{i}"] = F.softplus(self.decoder.scaling_s[i].detach().cpu()).numpy()
+                    self.adata.var[f"{mode}_scaling_s_{i}"] = F.softplus(self.decoder.scaling_s[i].detach().cpu()).numpy()
                 # self.adata.var[f"{mode}_scaling_u_{i}"] = self.decoder.scaling_u[i].detach().cpu().numpy()
-                self.adata.var[f"{mode}_scaling_s_{i}"] = self.decoder.scaling_s[i].detach().cpu().numpy()
+                # self.adata.var[f"{mode}_scaling_s_{i}"] = self.decoder.scaling_s[i].detach().cpu().numpy()
+                self.adata.var[f"{mode}_offset_c_{i}"] = self.decoder.scaling_c[i].detach().cpu().numpy()
+                self.adata.var[f"{mode}_offset_u_{i}"] = self.decoder.scaling_u[i].detach().cpu().numpy()
+                self.adata.var[f"{mode}_offset_s_{i}"] = self.decoder.scaling_s[i].detach().cpu().numpy()
         else:
             if self.config['log_params']:
                 self.adata.var[f"{mode}_scaling_c"] = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
                 self.adata.var[f"{mode}_scaling_u"] = np.exp(self.decoder.scaling_u.detach().cpu().numpy())
-                # self.adata.var[f"{mode}_scaling_s"] = np.exp(self.decoder.scaling_s.detach().cpu().numpy())
+                self.adata.var[f"{mode}_scaling_s"] = np.exp(self.decoder.scaling_s.detach().cpu().numpy())
             else:
                 self.adata.var[f"{mode}_scaling_c"] = F.softplus(self.decoder.scaling_c.detach().cpu()).numpy()
                 self.adata.var[f"{mode}_scaling_u"] = F.softplus(self.decoder.scaling_u.detach().cpu()).numpy()
-                # self.adata.var[f"{mode}_scaling_s"] = F.softplus(self.decoder.scaling_s.detach().cpu()).numpy()
+                self.adata.var[f"{mode}_scaling_s"] = F.softplus(self.decoder.scaling_s.detach().cpu()).numpy()
             # self.adata.var[f"{mode}_scaling_u"] = self.decoder.scaling_u.detach().cpu().numpy()
-            self.adata.var[f"{mode}_scaling_s"] = self.decoder.scaling_s.detach().cpu().numpy()
+            # self.adata.var[f"{mode}_scaling_s"] = self.decoder.scaling_s.detach().cpu().numpy()
+            self.adata.var[f"{mode}_offset_c"] = np.exp(self.decoder.offset_c.detach().cpu().numpy())
+            self.adata.var[f"{mode}_offset_u"] = np.exp(self.decoder.offset_u.detach().cpu().numpy())
+            self.adata.var[f"{mode}_offset_s"] = np.exp(self.decoder.offset_s.detach().cpu().numpy())
         self.adata.var[f"{mode}_sigma_c"] = self.decoder.sigma_c.detach().cpu().numpy()
         self.adata.var[f"{mode}_sigma_u"] = self.decoder.sigma_u.detach().cpu().numpy()
         self.adata.var[f"{mode}_sigma_s"] = self.decoder.sigma_s.detach().cpu().numpy()
@@ -2171,17 +2137,20 @@ class VAEChrom():
                             self.adata.layers['Mu'].A if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu'],
                             self.adata.layers['Ms'].A if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']), 1).astype(float)
         G = x.shape[1]//3
+        out, _ = self.pred_all(x, "both")
+        t_batch, z_batch, std_z_batch = out["t"], out["mu_z"], out["std_z"]
         if self.enable_cvae and self.ref_batch >= 0:
             out, _ = self.pred_all(x, "both", batch=torch.full((self.adata.n_obs,), self.ref_batch, dtype=int, device=self.device))
-        else:
-            out, _ = self.pred_all(x, "both")
         chat, uhat, shat, t, std_t, t_, z, std_z = out["chat"], out["uhat"], out["shat"], out["mu_t"], out["std_t"], out["t"], out["mu_z"], out["std_z"]
 
         self.adata.obs[f"{mode}_time"] = t_
+        self.adata.obs[f"{mode}_time_batch"] = t_batch
         self.adata.obsm[f"{mode}_t"] = t
         self.adata.obsm[f"{mode}_std_t"] = std_t
         self.adata.obsm[f"{mode}_z"] = z
         self.adata.obsm[f"{mode}_std_z"] = std_z
+        self.adata.obsm[f"{mode}_z_batch"] = z_batch
+        self.adata.obsm[f"{mode}_std_z_batch"] = std_z_batch
         self.adata.layers[f"{mode}_chat"] = chat
         self.adata.layers[f"{mode}_uhat"] = uhat
         self.adata.layers[f"{mode}_shat"] = shat
@@ -2199,7 +2168,7 @@ class VAEChrom():
                 i = n*B
                 j = min([(n+1)*B, uhat.shape[0]])
                 if self.enable_cvae:
-                    y_onehot = F.one_hot(self.batch[i:j], self.n_batch).float()
+                    y_onehot = F.one_hot(self.batch.detach()[i:j], self.n_batch).float()
                     z_onehot = torch.cat((torch.tensor(z[i:j], dtype=torch.float, device=self.device), y_onehot), 1)
                     rho_batch = self.decoder.net_rho(z_onehot)
                     kc_batch = self.decoder.net_kc(z_onehot if self.parallel_arch else rho_batch)
