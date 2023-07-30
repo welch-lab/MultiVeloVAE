@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from .model_util_chrom import pred_exp_numpy
-from .TransitionGraph import encode_type
+from .transition_graph import encode_type
 
 
 def rna_velocity_vae(adata,
@@ -9,10 +9,9 @@ def rna_velocity_vae(adata,
                      key,
                      batch_key=None,
                      use_raw=False,
-                     use_scv_genes=False,
                      sigma=None,
                      approx=False,
-                     full_vb=False):
+                     return_copy=False):
     n_batch = 0
     batch = None
     if batch_key is not None and batch_key in adata.obs:
@@ -31,20 +30,44 @@ def rna_velocity_vae(adata,
         alpha = np.zeros((n_batch, adata.n_vars))
         beta = np.zeros((n_batch, adata.n_vars))
         gamma = np.zeros((n_batch, adata.n_vars))
+        scaling_c = np.zeros((n_batch, adata.n_vars))
+        scaling_u = np.zeros((n_batch, adata.n_vars))
+        scaling_s = np.zeros((n_batch, adata.n_vars))
+        offset_c = np.zeros((n_batch, adata.n_vars))
+        offset_u = np.zeros((n_batch, adata.n_vars))
+        offset_s = np.zeros((n_batch, adata.n_vars))
         for i in range(n_batch):
             alpha_c[i, :] = adata.var[f"{key}_alpha_c_{i}"].to_numpy()
             alpha[i, :] = adata.var[f"{key}_alpha_{i}"].to_numpy()
             beta[i, :] = adata.var[f"{key}_beta_{i}"].to_numpy()
             gamma[i, :] = adata.var[f"{key}_gamma_{i}"].to_numpy()
+            scaling_c[i, :] = adata.var[f"{key}_scaling_c_{i}"].to_numpy()
+            scaling_u[i, :] = adata.var[f"{key}_scaling_u_{i}"].to_numpy()
+            scaling_s[i, :] = adata.var[f"{key}_scaling_s_{i}"].to_numpy()
+            offset_c[i, :] = adata.var[f"{key}_offset_c_{i}"].to_numpy()
+            offset_u[i, :] = adata.var[f"{key}_offset_u_{i}"].to_numpy()
+            offset_s[i, :] = adata.var[f"{key}_offset_s_{i}"].to_numpy()
         alpha_c = np.dot(onehot, alpha_c)
         alpha = np.dot(onehot, alpha)
         beta = np.dot(onehot, beta)
         gamma = np.dot(onehot, gamma)
+        scaling_c = np.dot(onehot, scaling_c)
+        scaling_u = np.dot(onehot, scaling_u)
+        scaling_s = np.dot(onehot, scaling_s)
+        offset_c = np.dot(onehot, offset_c)
+        offset_u = np.dot(onehot, offset_u)
+        offset_s = np.dot(onehot, offset_s)
     else:
         alpha_c = adata.var[f"{key}_alpha_c"].to_numpy()
         alpha = adata.var[f"{key}_alpha"].to_numpy()
         beta = adata.var[f"{key}_beta"].to_numpy()
         gamma = adata.var[f"{key}_gamma"].to_numpy()
+        scaling_c = adata.var[f"{key}_scaling_c"].to_numpy()
+        scaling_u = adata.var[f"{key}_scaling_u"].to_numpy()
+        scaling_s = adata.var[f"{key}_scaling_s"].to_numpy()
+        offset_c = adata.var[f"{key}_offset_c"].to_numpy()
+        offset_u = adata.var[f"{key}_offset_u"].to_numpy()
+        offset_s = adata.var[f"{key}_offset_s"].to_numpy()
     t = adata.obs[f"{key}_time"].to_numpy()
     t0 = adata.obs[f"{key}_t0"].to_numpy()
     c0 = adata.layers[f"{key}_c0"]
@@ -52,29 +75,35 @@ def rna_velocity_vae(adata,
     s0 = adata.layers[f"{key}_s0"]
 
     if use_raw:
-        C, U, S = adata_atac.layers['Mc'], adata.layers['Mu'], adata.layers['Ms']
+        c, u, s = adata_atac.layers['Mc'], adata.layers['Mu'], adata.layers['Ms']
     else:
-        scaling_c = adata.var[f"{key}_scaling_c"].to_numpy()
-        scaling = adata.var[f"{key}_scaling"].to_numpy()
         if f"{key}_chat" in adata.layers and f"{key}_uhat" in adata.layers and f"{key}_shat" in adata.layers:
-            C, U, S = adata.layers[f"{key}_chat"], adata.layers[f"{key}_uhat"], adata.layers[f"{key}_shat"]
-            C = C/scaling_c
-            U = U/scaling
+            c = (adata.layers[f"{key}_chat"]-offset_c)/scaling_c
+            u = (adata.layers[f"{key}_uhat"]-offset_u)/scaling_u
+            s = (adata.layers[f"{key}_shat"]-offset_s)/scaling_s
         else:
-            C, U, S = pred_exp_numpy(t, t0, c0/scaling_c, u0/scaling, s0, kc, alpha_c, rho, alpha, beta, gamma)
-            C, U, S = np.clip(C, 0, None), np.clip(U, 0, None), np.clip(S, 0, None)
-            adata.layers["chat"] = C * scaling_c
-            adata.layers["uhat"] = U * scaling
-            adata.layers["shat"] = S
+            tau = np.clip(t - t0, 0, None).reshape(-1, 1)
+            c, u, s = pred_exp_numpy(tau, (c0-offset_c)/scaling_c, (u0-offset_u)/scaling_u, (s0-offset_s)/scaling_s, kc, alpha_c, rho, alpha, beta, gamma)
+            c, u, s = np.clip(c, 0, 1), np.clip(u, 0, None), np.clip(s, 0, None)
+            adata.layers["chat"] = c * scaling_c + offset_c
+            adata.layers["uhat"] = u * scaling_u + offset_u
+            adata.layers["shat"] = s * scaling_s + offset_s
     if approx:
-        V = (S - s0)/((t - t0).reshape(-1, 1))
+        v = (s - s0)/((t - t0).reshape(-1, 1))
+        vu = (u - u0)/((t - t0).reshape(-1, 1))
+        vc = (c - c0)/((t - t0).reshape(-1, 1))
     else:
-        V = (beta * U - gamma * S)
+        v = beta * u - gamma * s
+        vu = rho * alpha * c - beta * u
+        vc = kc * alpha_c - alpha_c * c
     if sigma is not None:
         time_order = np.argsort(t)
-        V[time_order] = gaussian_filter1d(V[time_order], sigma, axis=0, mode="nearest")
-    adata.layers[f"{key}_velocity"] = V
-    if use_scv_genes:
-        gene_mask = np.isnan(adata.var['fit_scaling'].to_numpy())
-        V[:, gene_mask] = np.nan
-    return V, C, U, S
+        v[time_order] = gaussian_filter1d(v[time_order], sigma, axis=0, mode="nearest")
+        vu[time_order] = gaussian_filter1d(vu[time_order], sigma, axis=0, mode="nearest")
+        vc[time_order] = gaussian_filter1d(vc[time_order], sigma, axis=0, mode="nearest")
+    adata.layers[f"{key}_velocity"] = v
+    adata.layers[f"{key}_velocity_u"] = vu
+    adata.layers[f"{key}_velocity_c"] = vc
+    adata.var[f'{key}_velocity_genes'] = True
+    if return_copy:
+        return vc, vu, v, c, u, s
