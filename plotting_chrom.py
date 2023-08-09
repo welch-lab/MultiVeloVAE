@@ -525,7 +525,7 @@ def ellipse_fit(adata,
     gn = len(genes)
     if gn < n_cols:
         n_cols = gn
-    fig, axs = plt.subplots(-(-gn // n_cols), n_cols, figsize=(2 * n_cols, 2.4 * (-(-gn // n_cols))) if figsize is None else figsize)
+    fig, axs = plt.subplots(-(-gn // n_cols), n_cols, squeeze=False, figsize=(2 * n_cols, 2.4 * (-(-gn // n_cols))) if figsize is None else figsize)
     count = 0
     for gene in genes:
         u = np.array(adata[:, gene].layers['Mu'])
@@ -556,8 +556,7 @@ def ellipse_fit(adata,
         good_fit = good_fit & (theta < np.pi/2) & (theta > 0)
         if not good_fit:
             count += 1
-            fig.delaxes(axs[row, col])
-            continue
+
         x_coord = np.linspace((-mean_s)/std_s, (np.max(s)-mean_s)/std_s, 500)
         y_coord = np.linspace((-mean_u)/std_u, (np.max(u)-mean_u)/std_u, 500)
         X_coord, Y_coord = np.meshgrid(x_coord, y_coord)
@@ -597,7 +596,6 @@ def ellipse_fit(adata,
         quant4 = (major_bit < 0) & (minor_bit < 0)
         if (np.sum(quant1 | quant4) < 10) or (np.sum(quant2 | quant3) < 10):
             count += 1
-            continue
 
         if by_quantile:
             axs[row, col].scatter(s_[quant1], u_[quant1], s=pointsize, c='tab:red', alpha=0.6)
