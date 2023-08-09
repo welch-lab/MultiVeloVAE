@@ -8,10 +8,10 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.cluster import AgglomerativeClustering, KMeans
 from scipy.spatial import KDTree
 from scipy.sparse import csr_matrix
-from scipy.stats import dirichlet, kstest
+from scipy.stats import dirichlet, bernoulli, kstest
 import scanpy as sc
 from tqdm.notebook import tqdm_notebook
-from .model_util import sample_dir_mix, assign_gene_mode_binary
+from .model_util import assign_gene_mode_binary
 
 
 def inv(x):
@@ -273,25 +273,19 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1):
         spred[:, i] = spred_i
 
     if global_std:
-        # c[c == 0] = np.nan
-        # u[u == 0] = np.nan
-        # s[s == 0] = np.nan
-        sigma_c = np.clip(np.nanstd(c, 0), 0.01, None)
-        sigma_u = np.clip(np.nanstd(u, 0), 0.01, None)
-        sigma_s = np.clip(np.nanstd(s, 0), 0.01, None)
+        sigma_c = np.nanstd(c, 0)
+        sigma_u = np.nanstd(u, 0)
+        sigma_s = np.nanstd(s, 0)
     else:
         dist_c = c - cpred
         dist_u = u - upred
         dist_s = s - spred
-        sigma_c = np.clip(np.nanstd(dist_c, 0), 0.01, None)
-        sigma_u = np.clip(np.nanstd(dist_u, 0), 0.01, None)
-        sigma_s = np.clip(np.nanstd(dist_s, 0), 0.01, None)
-    sigma_c[np.isnan(sigma_c)] = 1
-    sigma_u[np.isnan(sigma_u)] = 1
-    sigma_s[np.isnan(sigma_s)] = 1
+        sigma_c = np.nanstd(dist_c, 0)
+        sigma_u = np.nanstd(dist_u, 0)
+        sigma_s = np.nanstd(dist_s, 0)
 
     alpha_c, alpha, beta, gamma = params[:, 0], params[:, 1], params[:, 2], params[:, 3]
-    scaling_c, scaling, = params[:, 4], params[:, 5]
+    scaling_c, scaling = params[:, 4], params[:, 5]
 
     return alpha_c, alpha, beta, gamma, scaling_c, scaling, ts, c0, u0, s0, sigma_c, sigma_u, sigma_s, t.T, cpred, upred, spred
 
@@ -614,7 +608,7 @@ def cosine_similarity(u, s, beta, gamma, s_knn):
     return res
 
 
-def elipse_axis(x, y, xc, yc, slope):
+def ellipse_axis(x, y, xc, yc, slope):
     return (y - yc) - (slope * (x - xc))
 
 
@@ -651,8 +645,8 @@ def compute_quantile_scores(adata, n_pcs=30, n_neighbors=30):
         x, _, _, _ = np.linalg.lstsq(A, b)
         x = x.squeeze()
         A, B, C, D, E = x
-        good_fit = B**2 - 4*A*C < 0
-        theta = np.arctan(B/(A - C))/2 if x[0] > x[2] else np.pi/2 + np.arctan(B/(A - C))/2
+        good_fit = B**2 - 4*A*C < 0  # being ellipse
+        theta = np.arctan(B/(A - C))/2 if x[0] > x[2] else np.pi/2 + np.arctan(B/(A - C))/2  # major axis points upper right
         good_fit = good_fit & (theta < np.pi/2) & (theta > 0)
 
         xc = (B*E - 2*C*D)/(4*A*C - B**2)
@@ -661,12 +655,15 @@ def compute_quantile_scores(adata, n_pcs=30, n_neighbors=30):
         theta2 = np.pi/2 + theta
         slope_minor = np.tan(theta2)
 
-        major_bit = elipse_axis(s_, u_, xc, yc, slope_major)
-        minor_bit = elipse_axis(s_, u_, xc, yc, slope_minor)
+        major_bit = ellipse_axis(s_, u_, xc, yc, slope_major)
+        minor_bit = ellipse_axis(s_, u_, xc, yc, slope_minor)
         quant1 = (major_bit > 0) & (minor_bit < 0)
         quant2 = (major_bit > 0) & (minor_bit > 0)
         quant3 = (major_bit < 0) & (minor_bit > 0)
         quant4 = (major_bit < 0) & (minor_bit < 0)
+
+        if (np.sum(quant1 | quant4) < 10) or (np.sum(quant2 | quant3) < 10):
+            good_fit = False
 
         quantile_scores[:, idx:idx+1] = (-3.) * quant1 + (-1.) * quant2 + 1. * quant3 + 3. * quant4
         quantile_scores_2bit[:, idx:idx+1, 0] = 1. * (quant1 | quant2)
@@ -706,11 +703,28 @@ def cluster_by_quantile(adata,
     return cluster
 
 
+def sample_dir_mix(w, yw, std_prior):
+    # Sample from a mixture of dirichlet distributions
+    mu_0, mu_1 = np.mean(w[yw == 0]), np.mean(w[yw == 1])
+    alpha_w_0 = find_dirichlet_param(mu_0, std_prior)
+    alpha_w_1 = find_dirichlet_param(mu_1, std_prior)
+    np.random.seed(42)
+    q1 = dirichlet.rvs(alpha_w_0, size=len(w))[:, 0]
+    np.random.seed(42)
+    q2 = dirichlet.rvs(alpha_w_1, size=len(w))[:, 0]
+    wq = np.sum(yw == 1)/len(yw)
+    np.random.seed(42)
+    b = bernoulli.rvs(wq, size=len(w))
+    q = (b == 0)*q1 + (b == 1)*q2
+    return q
+
+
 def assign_gene_mode_auto(adata,
                           w_noisy,
                           thred=0.05,
                           std_prior=0.1,
                           n_clusters=7):
+    # Cluster by ellipse fit
     y = cluster_by_quantile(adata, n_clusters=n_clusters)
     adata.var['quantile_cluster'] = y
 

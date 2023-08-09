@@ -288,6 +288,15 @@ class Decoder(nn.Module):
             dyn_mask = (t > self.tmax*0.01) & (np.abs(t-toff) > self.tmax*0.01)
             w = np.sum(((t < toff) & dyn_mask), 0) / (np.sum(dyn_mask, 0) + 1e-10)
             w = assign_gene_mode(self.adata, w, 'auto', 0.05, 0.1, 7)
+            print(np.min(sigma_c[self.adata.var['quantile_genes']]), np.min(sigma_c), np.max(sigma_c[self.adata.var['quantile_genes']]), np.max(sigma_c),
+                  np.min(sigma_u[self.adata.var['quantile_genes']]), np.min(sigma_u), np.max(sigma_u[self.adata.var['quantile_genes']]), np.max(sigma_u),
+                  np.min(sigma_s[self.adata.var['quantile_genes']]), np.min(sigma_s), np.max(sigma_s[self.adata.var['quantile_genes']]), np.max(sigma_s))
+            sigma_c = np.clip(sigma_c, 0.01, None)
+            sigma_u = np.clip(sigma_u, 0.01, None)
+            sigma_s = np.clip(sigma_s, 0.01, None)
+            sigma_c[np.isnan(sigma_c)] = 1
+            sigma_u[np.isnan(sigma_u)] = 1
+            sigma_s[np.isnan(sigma_s)] = 1
             sigma_c = np.clip(sigma_c, np.min(sigma_c[self.adata.var['quantile_genes']]), np.max(sigma_c[self.adata.var['quantile_genes']]))
             sigma_u = np.clip(sigma_u, np.min(sigma_u[self.adata.var['quantile_genes']]), np.max(sigma_u[self.adata.var['quantile_genes']]))
             sigma_s = np.clip(sigma_s, np.min(sigma_s[self.adata.var['quantile_genes']]), np.max(sigma_s[self.adata.var['quantile_genes']]))
@@ -635,7 +644,7 @@ class VAEChrom():
             # model parameters
             "dim_z": dim_z,
             "hidden_size": hidden_size,
-            "mode": 'fullvb' if full_vb else 'vae',
+            "key": 'fullvb' if full_vb else 'vae',
             "indicator_arch": 'parallel' if parallel_arch else 'series',
             "t_network": t_network,
             "batch_key": batch_key,
@@ -695,15 +704,10 @@ class VAEChrom():
             "sparsify": 1}
 
         self.set_device(device)
-        self.set_lr(adata, adata_atac, learning_rate)
         self.split_train_test(adata.n_obs)
         self.encode_batch(adata)
+        self.set_lr(adata, adata_atac, learning_rate)
         self.get_prior(adata)
-        if self.config['early_stop_thred'] is None:
-            if self.enable_cvae:
-                self.config['early_stop_thred'] = 0.4 * self.n_batch
-            else:
-                self.config['early_stop_thred'] = 0.4
 
         self.encoder = Encoder(3*self.adata.n_vars,
                                dim_z,
@@ -781,18 +785,6 @@ class VAEChrom():
         else:
             self.device = torch.device('cpu')
 
-    def set_lr(self, adata, adata_atac, learning_rate):
-        if learning_rate is None:
-            p = np.sum(adata_atac.layers['Mc'] > 0) + np.sum(adata.layers['Mu'] > 0) + (np.sum(adata.layers['Ms'] > 0))
-            p /= adata.n_obs * adata.n_vars * 3
-            self.config["learning_rate"] = 10**(p-4)
-            print(f'Learning rate set to {self.config["learning_rate"]*10000:.1f}e-4 based on data sparsity.')
-        else:
-            self.config["learning_rate"] = learning_rate
-        self.config["learning_rate_post"] = self.config["learning_rate"]
-        self.config["learning_rate_ode"] = 10*self.config["learning_rate"]
-        self.config["learning_rate_t0"] = self.config["learning_rate"]
-
     def set_mode(self, mode, net='both'):
         if mode == 'train':
             if net == 'both':
@@ -856,6 +848,25 @@ class VAEChrom():
             print('Warning: number of batch classes is larger than half of dim_z. Consider increasing dim_z.')
         if self.enable_cvae and 10*self.n_batch < self.config['dim_z']:
             print('Warning: number of batch classes is smaller than 1/10 of dim_z. Consider decreasing dim_z.')
+
+    def set_lr(self, adata, adata_atac, learning_rate):
+        if learning_rate is None:
+            p = np.sum(adata_atac.layers['Mc'] > 0) + np.sum(adata.layers['Mu'] > 0) + (np.sum(adata.layers['Ms'] > 0))
+            p /= adata.n_obs * adata.n_vars * 3
+            print(p, np.sum(adata.layers['unspliced'] > 0) / (adata.n_obs * adata.n_vars), np.sum(adata.layers['spliced'] > 0) / (adata.n_obs * adata.n_vars))
+            self.config["learning_rate"] = 10**(p-4)
+            print(f'Learning rate set to {self.config["learning_rate"]*10000:.1f}e-4 based on data sparsity.')
+        else:
+            self.config["learning_rate"] = learning_rate
+        self.config["learning_rate_post"] = self.config["learning_rate"]
+        self.config["learning_rate_ode"] = 10*self.config["learning_rate"]
+        self.config["learning_rate_t0"] = self.config["learning_rate"]
+        if self.config['early_stop_thred'] is None:
+            if self.enable_cvae:
+                self.config['early_stop_thred'] = 0.4 + 0.2 * (self.n_batch-1)
+            else:
+                self.config['early_stop_thred'] = 0.4
+            print(f"Early stop threshold set to {self.config['early_stop_thred']}.")
 
     def get_prior(self, adata):
         if self.config['tprior'] is None:
@@ -1153,7 +1164,7 @@ class VAEChrom():
             kldw = elbo_collapsed_categorical(self.decoder.logit_pw, self.alpha_w, 4, self.decoder.scaling_u.shape[0])
             loss += self.config["kl_w"]*kldw
 
-        if self.config["mode"] == 'fullvb':
+        if self.config["key"] == 'fullvb':
             kld_params = None
             for i, x in enumerate(['alpha_c', 'alpha', 'beta', 'gamma']):
                 if self.enable_cvae:
@@ -1829,7 +1840,6 @@ class VAEChrom():
             x0_change_prev = np.inf
 
             for r in range(self.config['n_refine']):
-                # self.config['early_stop_thred'] *= 0.95
                 stop_training = (x0_change - x0_change_prev >= -0.01 and r > 1) or (x0_change < 0.01)
                 if self.config['loss_std_type'] == 'deming' and noise_change > 0.001 and r < self.config['n_refine']-1:
                     self.update_std_noise(train_set)
@@ -2017,118 +2027,131 @@ class VAEChrom():
         self.set_mode('eval')
         os.makedirs(file_path, exist_ok=True)
 
-        mode = self.config['mode']
-        if mode == 'fullvb':
+        key = self.config['key']
+        if key == 'fullvb':
             if self.enable_cvae:
                 for i in range(self.n_batch):
                     if self.config['log_params']:
-                        self.adata.var[f"{mode}_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i, 0].detach().cpu().numpy())
-                        self.adata.var[f"{mode}_alpha_{i}"] = np.exp(self.decoder.alpha[i, 0].detach().cpu().numpy())
-                        self.adata.var[f"{mode}_beta_{i}"] = np.exp(self.decoder.beta[i, 0].detach().cpu().numpy())
-                        self.adata.var[f"{mode}_gamma_{i}"] = np.exp(self.decoder.gamma[i, 0].detach().cpu().numpy())
+                        self.adata.var[f"{key}_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i, 0].detach().cpu().numpy())
+                        self.adata.var[f"{key}_alpha_{i}"] = np.exp(self.decoder.alpha[i, 0].detach().cpu().numpy())
+                        self.adata.var[f"{key}_beta_{i}"] = np.exp(self.decoder.beta[i, 0].detach().cpu().numpy())
+                        self.adata.var[f"{key}_gamma_{i}"] = np.exp(self.decoder.gamma[i, 0].detach().cpu().numpy())
                     else:
-                        self.adata.var[f"{mode}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i, 0].detach().cpu()).numpy()
-                        self.adata.var[f"{mode}_alpha_{i}"] = F.softplus(self.decoder.alpha[i, 0].detach().cpu()).numpy()
-                        self.adata.var[f"{mode}_beta_{i}"] = F.softplus(self.decoder.beta[i, 0].detach().cpu()).numpy()
-                        self.adata.var[f"{mode}_gamma_{i}"] = F.softplus(self.decoder.gamma[i, 0].detach().cpu()).numpy()
-                    self.adata.var[f"{mode}_logstd_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i, 1].detach().cpu().numpy())
-                    self.adata.var[f"{mode}_logstd_alpha_{i}"] = np.exp(self.decoder.alpha[i, 1].detach().cpu().numpy())
-                    self.adata.var[f"{mode}_logstd_beta_{i}"] = np.exp(self.decoder.beta[i, 1].detach().cpu().numpy())
-                    self.adata.var[f"{mode}_logstd_gamma_{i}"] = np.exp(self.decoder.gamma[i, 1].detach().cpu().numpy())
+                        self.adata.var[f"{key}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i, 0].detach().cpu()).numpy()
+                        self.adata.var[f"{key}_alpha_{i}"] = F.softplus(self.decoder.alpha[i, 0].detach().cpu()).numpy()
+                        self.adata.var[f"{key}_beta_{i}"] = F.softplus(self.decoder.beta[i, 0].detach().cpu()).numpy()
+                        self.adata.var[f"{key}_gamma_{i}"] = F.softplus(self.decoder.gamma[i, 0].detach().cpu()).numpy()
+                    self.adata.var[f"{key}_logstd_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i, 1].detach().cpu().numpy())
+                    self.adata.var[f"{key}_logstd_alpha_{i}"] = np.exp(self.decoder.alpha[i, 1].detach().cpu().numpy())
+                    self.adata.var[f"{key}_logstd_beta_{i}"] = np.exp(self.decoder.beta[i, 1].detach().cpu().numpy())
+                    self.adata.var[f"{key}_logstd_gamma_{i}"] = np.exp(self.decoder.gamma[i, 1].detach().cpu().numpy())
             else:
                 if self.config['log_params']:
-                    self.adata.var[f"{mode}_alpha_c"] = np.exp(self.decoder.alpha_c[0].detach().cpu().numpy())
-                    self.adata.var[f"{mode}_alpha"] = np.exp(self.decoder.alpha[0].detach().cpu().numpy())
-                    self.adata.var[f"{mode}_beta"] = np.exp(self.decoder.beta[0].detach().cpu().numpy())
-                    self.adata.var[f"{mode}_gamma"] = np.exp(self.decoder.gamma[0].detach().cpu().numpy())
+                    self.adata.var[f"{key}_alpha_c"] = np.exp(self.decoder.alpha_c[0].detach().cpu().numpy())
+                    self.adata.var[f"{key}_alpha"] = np.exp(self.decoder.alpha[0].detach().cpu().numpy())
+                    self.adata.var[f"{key}_beta"] = np.exp(self.decoder.beta[0].detach().cpu().numpy())
+                    self.adata.var[f"{key}_gamma"] = np.exp(self.decoder.gamma[0].detach().cpu().numpy())
                 else:
-                    self.adata.var[f"{mode}_alpha_c"] = F.softplus(self.decoder.alpha_c[0].detach().cpu()).numpy()
-                    self.adata.var[f"{mode}_alpha"] = F.softplus(self.decoder.alpha[0].detach().cpu()).numpy()
-                    self.adata.var[f"{mode}_beta"] = F.softplus(self.decoder.beta[0].detach().cpu()).numpy()
-                    self.adata.var[f"{mode}_gamma"] = F.softplus(self.decoder.gamma[0].detach().cpu()).numpy()
-                self.adata.var[f"{mode}_logstd_alpha_c"] = np.exp(self.decoder.alpha_c[1].detach().cpu().numpy())
-                self.adata.var[f"{mode}_logstd_alpha"] = np.exp(self.decoder.alpha[1].detach().cpu().numpy())
-                self.adata.var[f"{mode}_logstd_beta"] = np.exp(self.decoder.beta[1].detach().cpu().numpy())
-                self.adata.var[f"{mode}_logstd_gamma"] = np.exp(self.decoder.gamma[1].detach().cpu().numpy())
+                    self.adata.var[f"{key}_alpha_c"] = F.softplus(self.decoder.alpha_c[0].detach().cpu()).numpy()
+                    self.adata.var[f"{key}_alpha"] = F.softplus(self.decoder.alpha[0].detach().cpu()).numpy()
+                    self.adata.var[f"{key}_beta"] = F.softplus(self.decoder.beta[0].detach().cpu()).numpy()
+                    self.adata.var[f"{key}_gamma"] = F.softplus(self.decoder.gamma[0].detach().cpu()).numpy()
+                self.adata.var[f"{key}_logstd_alpha_c"] = np.exp(self.decoder.alpha_c[1].detach().cpu().numpy())
+                self.adata.var[f"{key}_logstd_alpha"] = np.exp(self.decoder.alpha[1].detach().cpu().numpy())
+                self.adata.var[f"{key}_logstd_beta"] = np.exp(self.decoder.beta[1].detach().cpu().numpy())
+                self.adata.var[f"{key}_logstd_gamma"] = np.exp(self.decoder.gamma[1].detach().cpu().numpy())
         else:
             if self.enable_cvae:
                 for i in range(self.n_batch):
                     if self.config['log_params']:
-                        self.adata.var[f"{mode}_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i].detach().cpu().numpy())
-                        self.adata.var[f"{mode}_alpha_{i}"] = np.exp(self.decoder.alpha[i].detach().cpu().numpy())
-                        self.adata.var[f"{mode}_beta_{i}"] = np.exp(self.decoder.beta[i].detach().cpu().numpy())
-                        self.adata.var[f"{mode}_gamma_{i}"] = np.exp(self.decoder.gamma[i].detach().cpu().numpy())
+                        self.adata.var[f"{key}_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i].detach().cpu().numpy())
+                        self.adata.var[f"{key}_alpha_{i}"] = np.exp(self.decoder.alpha[i].detach().cpu().numpy())
+                        self.adata.var[f"{key}_beta_{i}"] = np.exp(self.decoder.beta[i].detach().cpu().numpy())
+                        self.adata.var[f"{key}_gamma_{i}"] = np.exp(self.decoder.gamma[i].detach().cpu().numpy())
                     else:
-                        self.adata.var[f"{mode}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i].detach().cpu()).numpy()
-                        self.adata.var[f"{mode}_alpha_{i}"] = F.softplus(self.decoder.alpha[i].detach().cpu()).numpy()
-                        self.adata.var[f"{mode}_beta_{i}"] = F.softplus(self.decoder.beta[i].detach().cpu()).numpy()
-                        self.adata.var[f"{mode}_gamma_{i}"] = F.softplus(self.decoder.gamma[i].detach().cpu()).numpy()
+                        self.adata.var[f"{key}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i].detach().cpu()).numpy()
+                        self.adata.var[f"{key}_alpha_{i}"] = F.softplus(self.decoder.alpha[i].detach().cpu()).numpy()
+                        self.adata.var[f"{key}_beta_{i}"] = F.softplus(self.decoder.beta[i].detach().cpu()).numpy()
+                        self.adata.var[f"{key}_gamma_{i}"] = F.softplus(self.decoder.gamma[i].detach().cpu()).numpy()
             else:
                 if self.config['log_params']:
-                    self.adata.var[f"{mode}_alpha_c"] = np.exp(self.decoder.alpha_c.detach().cpu().numpy())
-                    self.adata.var[f"{mode}_alpha"] = np.exp(self.decoder.alpha.detach().cpu().numpy())
-                    self.adata.var[f"{mode}_beta"] = np.exp(self.decoder.beta.detach().cpu().numpy())
-                    self.adata.var[f"{mode}_gamma"] = np.exp(self.decoder.gamma.detach().cpu().numpy())
+                    self.adata.var[f"{key}_alpha_c"] = np.exp(self.decoder.alpha_c.detach().cpu().numpy())
+                    self.adata.var[f"{key}_alpha"] = np.exp(self.decoder.alpha.detach().cpu().numpy())
+                    self.adata.var[f"{key}_beta"] = np.exp(self.decoder.beta.detach().cpu().numpy())
+                    self.adata.var[f"{key}_gamma"] = np.exp(self.decoder.gamma.detach().cpu().numpy())
                 else:
-                    self.adata.var[f"{mode}_alpha_c"] = F.softplus(self.decoder.alpha_c.detach().cpu()).numpy()
-                    self.adata.var[f"{mode}_alpha"] = F.softplus(self.decoder.alpha.detach().cpu()).numpy()
-                    self.adata.var[f"{mode}_beta"] = F.softplus(self.decoder.beta.detach().cpu()).numpy()
-                    self.adata.var[f"{mode}_gamma"] = F.softplus(self.decoder.gamma.detach().cpu()).numpy()
+                    self.adata.var[f"{key}_alpha_c"] = F.softplus(self.decoder.alpha_c.detach().cpu()).numpy()
+                    self.adata.var[f"{key}_alpha"] = F.softplus(self.decoder.alpha.detach().cpu()).numpy()
+                    self.adata.var[f"{key}_beta"] = F.softplus(self.decoder.beta.detach().cpu()).numpy()
+                    self.adata.var[f"{key}_gamma"] = F.softplus(self.decoder.gamma.detach().cpu()).numpy()
         if self.enable_cvae:
             for i in range(self.n_batch):
                 if self.config['log_params']:
-                    self.adata.var[f"{mode}_scaling_c_{i}"] = np.exp(self.decoder.scaling_c[i].detach().cpu().numpy())
-                    self.adata.var[f"{mode}_scaling_u_{i}"] = np.exp(self.decoder.scaling_u[i].detach().cpu().numpy())
-                    self.adata.var[f"{mode}_scaling_s_{i}"] = np.exp(self.decoder.scaling_s[i].detach().cpu().numpy())
+                    self.adata.var[f"{key}_scaling_c_{i}"] = np.exp(self.decoder.scaling_c[i].detach().cpu().numpy())
+                    self.adata.var[f"{key}_scaling_u_{i}"] = np.exp(self.decoder.scaling_u[i].detach().cpu().numpy())
+                    self.adata.var[f"{key}_scaling_s_{i}"] = np.exp(self.decoder.scaling_s[i].detach().cpu().numpy())
                 else:
-                    self.adata.var[f"{mode}_scaling_c_{i}"] = F.softplus(self.decoder.scaling_c[i].detach().cpu()).numpy()
-                    self.adata.var[f"{mode}_scaling_u_{i}"] = F.softplus(self.decoder.scaling_u[i].detach().cpu()).numpy()
-                    self.adata.var[f"{mode}_scaling_s_{i}"] = F.softplus(self.decoder.scaling_s[i].detach().cpu()).numpy()
-                self.adata.var[f"{mode}_offset_c_{i}"] = self.decoder.offset_c[i].detach().cpu().numpy()
-                self.adata.var[f"{mode}_offset_u_{i}"] = self.decoder.offset_u[i].detach().cpu().numpy()
-                self.adata.var[f"{mode}_offset_s_{i}"] = self.decoder.offset_s[i].detach().cpu().numpy()
+                    self.adata.var[f"{key}_scaling_c_{i}"] = F.softplus(self.decoder.scaling_c[i].detach().cpu()).numpy()
+                    self.adata.var[f"{key}_scaling_u_{i}"] = F.softplus(self.decoder.scaling_u[i].detach().cpu()).numpy()
+                    self.adata.var[f"{key}_scaling_s_{i}"] = F.softplus(self.decoder.scaling_s[i].detach().cpu()).numpy()
+                self.adata.var[f"{key}_offset_c_{i}"] = self.decoder.offset_c[i].detach().cpu().numpy()
+                self.adata.var[f"{key}_offset_u_{i}"] = self.decoder.offset_u[i].detach().cpu().numpy()
+                self.adata.var[f"{key}_offset_s_{i}"] = self.decoder.offset_s[i].detach().cpu().numpy()
         else:
             if self.config['log_params']:
-                self.adata.var[f"{mode}_scaling_c"] = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
-                self.adata.var[f"{mode}_scaling_u"] = np.exp(self.decoder.scaling_u.detach().cpu().numpy())
-                self.adata.var[f"{mode}_scaling_s"] = np.exp(self.decoder.scaling_s.detach().cpu().numpy())
+                self.adata.var[f"{key}_scaling_c"] = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
+                self.adata.var[f"{key}_scaling_u"] = np.exp(self.decoder.scaling_u.detach().cpu().numpy())
+                self.adata.var[f"{key}_scaling_s"] = np.exp(self.decoder.scaling_s.detach().cpu().numpy())
             else:
-                self.adata.var[f"{mode}_scaling_c"] = F.softplus(self.decoder.scaling_c.detach().cpu()).numpy()
-                self.adata.var[f"{mode}_scaling_u"] = F.softplus(self.decoder.scaling_u.detach().cpu()).numpy()
-                self.adata.var[f"{mode}_scaling_s"] = F.softplus(self.decoder.scaling_s.detach().cpu()).numpy()
-            self.adata.var[f"{mode}_offset_c"] = self.decoder.offset_c.detach().cpu().numpy()
-            self.adata.var[f"{mode}_offset_u"] = self.decoder.offset_u.detach().cpu().numpy()
-            self.adata.var[f"{mode}_offset_s"] = self.decoder.offset_s.detach().cpu().numpy()
-        self.adata.var[f"{mode}_sigma_c"] = self.decoder.sigma_c.detach().cpu().numpy()
-        self.adata.var[f"{mode}_sigma_u"] = self.decoder.sigma_u.detach().cpu().numpy()
-        self.adata.var[f"{mode}_sigma_s"] = self.decoder.sigma_s.detach().cpu().numpy()
-        self.adata.var[f"{mode}_ton"] = self.decoder.ton.detach().cpu().numpy()
-        self.adata.varm[f"{mode}_basis"] = F.softmax(self.decoder.logit_pw, 1).detach().cpu().numpy()
+                self.adata.var[f"{key}_scaling_c"] = F.softplus(self.decoder.scaling_c.detach().cpu()).numpy()
+                self.adata.var[f"{key}_scaling_u"] = F.softplus(self.decoder.scaling_u.detach().cpu()).numpy()
+                self.adata.var[f"{key}_scaling_s"] = F.softplus(self.decoder.scaling_s.detach().cpu()).numpy()
+            self.adata.var[f"{key}_offset_c"] = self.decoder.offset_c.detach().cpu().numpy()
+            self.adata.var[f"{key}_offset_u"] = self.decoder.offset_u.detach().cpu().numpy()
+            self.adata.var[f"{key}_offset_s"] = self.decoder.offset_s.detach().cpu().numpy()
+        self.adata.var[f"{key}_sigma_c"] = self.decoder.sigma_c.detach().cpu().numpy()
+        self.adata.var[f"{key}_sigma_u"] = self.decoder.sigma_u.detach().cpu().numpy()
+        self.adata.var[f"{key}_sigma_s"] = self.decoder.sigma_s.detach().cpu().numpy()
+        self.adata.var[f"{key}_ton"] = self.decoder.ton.detach().cpu().numpy()
+        self.adata.varm[f"{key}_basis"] = F.softmax(self.decoder.logit_pw, 1).detach().cpu().numpy()
 
         x = np.concatenate((self.adata_atac.layers['Mc'].A if issparse(self.adata_atac.layers['Mc']) else self.adata_atac.layers['Mc'],
                             self.adata.layers['Mu'].A if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu'],
                             self.adata.layers['Ms'].A if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']), 1).astype(float)
         G = x.shape[1]//3
         out, _, _, _, _ = self.pred_all(x, "both")
-        t_batch, z_batch, std_z_batch = out["t"], out["mu_z"], out["std_z"]
-        if self.enable_cvae and self.ref_batch >= 0:
-            out, _, _, _, _ = self.pred_all(x, "both", batch=torch.full((self.adata.n_obs,), self.ref_batch, dtype=int, device=self.device))
         chat, uhat, shat, t, std_t, t_, z, std_z = out["chat"], out["uhat"], out["shat"], out["mu_t"], out["std_t"], out["t"], out["mu_z"], out["std_z"]
+        std_c = np.clip(np.nanstd(x[:, :G], axis=0), 0.01, None)
+        std_u = np.clip(np.nanstd(x[:, G:G*2], axis=0), 0.01, None)
+        std_s = np.clip(np.nanstd(x[:, G*2:], axis=0), 0.01, None)
+        diff_c = (x[:, :G] - chat) / std_c
+        diff_u = (x[:, G:G*2] - uhat) / std_u
+        diff_s = (x[:, G*2:] - shat) / std_s
+        sigma_c = np.clip(np.nanstd(diff_c, axis=0), 1e-3, None)
+        sigma_u = np.clip(np.nanstd(diff_u, axis=0), 1e-3, None)
+        sigma_s = np.clip(np.nanstd(diff_s, axis=0), 1e-3, None)
+        nll_c = 0.5 * np.log(2 * np.pi) + np.log(sigma_c) + 0.5 * np.nanmean(diff_c**2, axis=0) / (sigma_c**2)
+        nll_u = 0.5 * np.log(2 * np.pi) + np.log(sigma_u) + 0.5 * np.nanmean(diff_u**2, axis=0) / (sigma_u**2)
+        nll_s = 0.5 * np.log(2 * np.pi) + np.log(sigma_s) + 0.5 * np.nanmean(diff_s**2, axis=0) / (sigma_s**2)
+        nll = nll_c + nll_u + nll_s
+        self.adata.var[f"{key}_likelihood"] = np.exp(-nll)
 
-        self.adata.obs[f"{mode}_time"] = t_
-        self.adata.obsm[f"{mode}_t"] = t
-        self.adata.obsm[f"{mode}_std_t"] = std_t
-        self.adata.obsm[f"{mode}_z"] = z
-        self.adata.obsm[f"{mode}_std_z"] = std_z
         if self.enable_cvae and self.ref_batch >= 0:
-            self.adata.obs[f"{mode}_time_batch"] = t_batch
-            self.adata.obsm[f"{mode}_z_batch"] = z_batch
-            self.adata.obsm[f"{mode}_std_z_batch"] = std_z_batch
-        self.adata.layers[f"{mode}_chat"] = chat
-        self.adata.layers[f"{mode}_uhat"] = uhat
-        self.adata.layers[f"{mode}_shat"] = shat
-        sigma_c, sigma_u, sigma_s = self.adata.var[f"{mode}_sigma_c"].to_numpy(), self.adata.var[f"{mode}_sigma_u"].to_numpy(), self.adata.var[f"{mode}_sigma_s"].to_numpy()
-        self.adata.var[f"{mode}_likelihood"] = np.mean(-0.5*((x[:, :G]-chat)/sigma_c)**2-0.5*((x[:, G:G*2]-uhat)/sigma_u)**2-0.5*((x[:, G*2:]-shat)/sigma_s)**2-np.log(sigma_c)-np.log(sigma_u)-np.log(sigma_s)-np.log(2*np.pi), 0)
+            self.adata.obs[f"{key}_time_batch"] = t_
+            self.adata.obsm[f"{key}_t_batch"] = t
+            self.adata.obsm[f"{key}_std_t_batch"] = std_t
+            self.adata.obsm[f"{key}_z_batch"] = z
+            self.adata.obsm[f"{key}_std_z_batch"] = std_z
+            out, _, _, _, _ = self.pred_all(x, "both", batch=torch.full((self.adata.n_obs,), self.ref_batch, dtype=int, device=self.device))
+            chat, uhat, shat, t, std_t, t_, z, std_z = out["chat"], out["uhat"], out["shat"], out["mu_t"], out["std_t"], out["t"], out["mu_z"], out["std_z"]
+        self.adata.obs[f"{key}_time"] = t_
+        self.adata.obsm[f"{key}_t"] = t
+        self.adata.obsm[f"{key}_std_t"] = std_t
+        self.adata.obsm[f"{key}_z"] = z
+        self.adata.obsm[f"{key}_std_z"] = std_z
+        self.adata.layers[f"{key}_chat"] = chat
+        self.adata.layers[f"{key}_uhat"] = uhat
+        self.adata.layers[f"{key}_shat"] = shat
 
         rho = np.zeros_like(uhat)
         kc = np.zeros_like(uhat)
@@ -2151,18 +2174,20 @@ class VAEChrom():
                 rho[i:j] = rho_batch.detach().cpu().numpy()
                 kc[i:j] = kc_batch.detach().cpu().numpy()
 
-        self.adata.layers[f"{mode}_rho"] = rho
-        self.adata.layers[f"{mode}_kc"] = kc
+        self.adata.layers[f"{key}_rho"] = rho
+        self.adata.layers[f"{key}_kc"] = kc
 
-        self.adata.obs[f"{mode}_t0"] = self.t0.detach().cpu().numpy().squeeze() if self.t0 is not None else 0
-        self.adata.layers[f"{mode}_c0"] = self.c0.detach().cpu().numpy() if self.c0 is not None else np.zeros_like(self.adata.layers['Mu'])
-        self.adata.layers[f"{mode}_u0"] = self.u0.detach().cpu().numpy() if self.u0 is not None else np.zeros_like(self.adata.layers['Mu'])
-        self.adata.layers[f"{mode}_s0"] = self.s0.detach().cpu().numpy() if self.s0 is not None else np.zeros_like(self.adata.layers['Mu'])
+        self.adata.obs[f"{key}_t0"] = self.t0.detach().cpu().numpy().squeeze() if self.t0 is not None else 0
+        self.adata.layers[f"{key}_c0"] = self.c0.detach().cpu().numpy() if self.c0 is not None else np.zeros_like(self.adata.layers['Mu'])
+        self.adata.layers[f"{key}_u0"] = self.u0.detach().cpu().numpy() if self.u0 is not None else np.zeros_like(self.adata.layers['Mu'])
+        self.adata.layers[f"{key}_s0"] = self.s0.detach().cpu().numpy() if self.s0 is not None else np.zeros_like(self.adata.layers['Mu'])
 
-        self.adata.uns[f"{mode}_train_idx"] = self.train_idx.detach().cpu().numpy()
-        self.adata.uns[f"{mode}_test_idx"] = self.test_idx.detach().cpu().numpy()
+        self.adata.uns[f"{key}_train_idx"] = self.train_idx.detach().cpu().numpy()
+        self.adata.uns[f"{key}_test_idx"] = self.test_idx.detach().cpu().numpy()
 
-        rna_velocity_vae(self.adata, self.adata_atac, mode, batch_key=self.config['batch_key'], use_raw=False)
+        print("Computing velocity.")
+        rna_velocity_vae(self.adata, self.adata_atac, key, batch_key=self.config['batch_key'], use_raw=False)
 
         if file_name is not None:
+            print("Writing anndata output to file.")
             self.adata.write_h5ad(f"{file_path}/{file_name}")
