@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .scvelo_util import tau_inv, test_bimodality
+from .scvelo_util import mRNA, tau_inv, test_bimodality
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 from sklearn.cluster import AgglomerativeClustering, KMeans
@@ -140,6 +140,37 @@ def linreg(u, s):
     return k
 
 
+def assign_time_rna(u, s, u0_, s0_, alpha, beta, gamma, t_num=1000, t_max=20):
+    tau = np.linspace(0, t_max, t_num)
+    exp_mat = np.hstack((np.full((len(u), 1), 1), np.reshape(u, (-1, 1)), np.reshape(s, (-1, 1))))
+    ct, ut, st = compute_exp(tau, 1, 0, 0, 1, 0, 1, alpha, beta, gamma)
+    anchor_mat = np.hstack((np.reshape(ct, (-1, 1)), np.reshape(ut, (-1, 1)), np.reshape(st, (-1, 1))))
+    tree = KDTree(anchor_mat)
+    dd, ii = tree.query(exp_mat, k=1)
+    dd = dd**2
+    t_pred = tau[ii]
+
+    exp_ss = np.array([[1, u0_, s0_]])
+    ii_ss = tree.query(exp_ss, k=1)[1]
+    t_ = tau[ii_ss][0]
+    c0_pred, u0_pred, s0_pred = compute_exp(t_, 1, 0, 0, 1, 0, 1, alpha, beta, gamma)
+
+    ct_, ut_, st_ = compute_exp(tau, c0_pred, u0_pred, s0_pred, 1, 0, 0, alpha, beta, gamma)
+    anchor_mat_ = np.hstack((np.reshape(ct_, (-1, 1)), np.reshape(ut_, (-1, 1)), np.reshape(st_, (-1, 1))))
+    tree_ = KDTree(anchor_mat_)
+    dd_, ii_ = tree_.query(exp_mat, k=1)
+    dd_ = dd_**2
+    t_pred_ = tau[ii_]
+
+    res = np.array([dd, dd_])
+    # t = np.array([t_pred, t_pred_+np.ones((len(t_pred_)))*t_])
+    t = np.array([t_pred, t_pred_+t_])
+    o = np.argmin(res, axis=0)
+    t_latent = np.array([t[o[i], i] for i in range(len(t_pred))])
+
+    return t_latent, t_
+
+
 def assign_time(c, u, s, c0_, u0_, s0_, alpha_c, alpha, beta, gamma, std_c_=None, std_s=None, weight_c=0.6, t_num=1000, t_max=20):
     tau = np.linspace(0, t_max, t_num)
     exp_mat = np.hstack((np.reshape(c, (-1, 1))/std_c_*std_s*weight_c, np.reshape(u, (-1, 1)), np.reshape(s, (-1, 1))))
@@ -171,6 +202,62 @@ def assign_time(c, u, s, c0_, u0_, s0_, alpha_c, alpha, beta, gamma, std_c_=None
     return t_latent, t_
 
 
+def init_gene_rna(u, s, percent, fit_scaling=True, tmax=1):
+    std_u, std_s = np.std(u), np.std(s)
+    scaling = np.clip(std_u / std_s, 1e-6, 1e6) if fit_scaling else 1.0
+    if np.isnan(scaling):
+        scaling = 1.0
+    u = u/scaling
+
+    # initialize beta and gamma from extreme quantiles of s
+    mask_s = s >= np.percentile(s, percent, axis=0)
+    mask_u = u >= np.percentile(u, percent, axis=0)
+    mask = mask_s & mask_u
+    if np.sum(mask) < 10:
+        mask = mask_s
+
+    # initialize alpha, beta and gamma
+    beta = 1.0
+    gamma = linreg(u[mask], s[mask]) + 1e-6
+    if gamma < 0.05 / scaling:
+        gamma *= 1.2
+    elif gamma > 1.5 / scaling:
+        gamma /= 1.2
+    u_inf, s_inf = u[mask].mean(), s[mask].mean()
+    u0_, s0_ = u_inf, s_inf
+    alpha = u_inf*beta
+
+    # initialize switching from u quantiles and alpha from s quantiles
+    tstat_u, pval_u, means_u = test_bimodality(u, kde=True)
+    tstat_s, pval_s, means_s = test_bimodality(s, kde=True)
+    pval_steady = max(pval_u, pval_s)
+    steady_u = means_u[1]
+    if pval_steady < 1e-3:
+        u_inf = np.mean([u_inf, steady_u])
+        alpha = gamma * s_inf
+        beta = alpha / u_inf
+        u0_, s0_ = u_inf, s_inf
+    t_ = tau_inv(u0_, s0_, 0, 0, alpha, beta, gamma)
+    tau = tau_inv(u, s, 0, 0, alpha, beta, gamma)
+    tau = np.clip(tau, 0, t_)
+    tau_ = tau_inv(u, s, u0_, s0_, 0, beta, gamma)
+    tau_ = np.clip(tau_, 0, np.max(tau_[s > 0]))
+    ut, st = mRNA(tau, 0, 0, alpha, beta, gamma)
+    ut_, st_ = mRNA(tau_, u0_, s0_, 0, beta, gamma)
+    distu, distu_ = (u - ut), (u - ut_)
+    dists, dists_ = (s - st), (s - st_)
+    res = np.array([distu ** 2 + dists ** 2, distu_ ** 2 + dists_ ** 2])
+    t = np.array([tau, tau_+np.ones((len(tau_)))*t_])
+    o = np.argmin(res, axis=0)
+    t_latent = np.array([t[o[i], i] for i in range(len(tau))])
+
+    realign_ratio = tmax / np.max(t_latent)
+    alpha, beta, gamma = alpha/realign_ratio, beta/realign_ratio, gamma/realign_ratio
+    t_ *= realign_ratio
+    t_latent *= realign_ratio
+    return alpha, beta, gamma, t_latent, u0_, s0_, t_, scaling
+
+
 def init_gene(c, u, s, percent, fit_scaling=True, tmax=1):
     std_u, std_s = np.std(u), np.std(s)
     scaling = np.clip(std_u / std_s, 1e-6, 1e6) if fit_scaling else 1.0
@@ -180,7 +267,7 @@ def init_gene(c, u, s, percent, fit_scaling=True, tmax=1):
     scaling_c = np.clip(np.percentile(c, 99.5), 1e-3, None)
     # scaling_c = np.clip(np.max(c), 1e-3, None)
     c = c/scaling_c
-    std_c_ = np.std(c)
+    std_c_ = np.clip(np.std(c), 1e-6, None)
 
     # initialize beta and gamma from extreme quantiles of s
     thresh = np.mean(c) + np.std(c)
@@ -230,9 +317,9 @@ def init_gene(c, u, s, percent, fit_scaling=True, tmax=1):
     return alpha_c, alpha, beta, gamma, t_latent, c0_, u0_, s0_, t_, scaling_c, scaling
 
 
-def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1):
+def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rna_only=False):
     ngene = u.shape[1]
-    params = np.ones((ngene, 6))
+    params = np.ones((ngene, 6))  # alpha_c, alpha, beta, gamma, scaling_c, scaling
     params[:, 0] = 0.1
     params[:, 1] = np.clip(np.max(u, 0), 0.001, None)
     params[:, 3] = np.clip(np.max(u, 0), 0.001, None)/np.clip(np.max(s, 0), 0.001, None)
@@ -248,9 +335,15 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1):
         ufilt = ui[(si > 0) & (ui > 0) & (ci > 0)]
         sfilt = si[(si > 0) & (ui > 0) & (ci > 0)]
         if (len(sfilt) > 5):
-            out = init_gene(cfilt, ufilt, sfilt, percent, fit_scaling, tmax)
-            alpha_c, alpha, beta, gamma, t_, c0_, u0_, s0_, ts_, scaling_c, scaling = out
-            params[i, :] = np.array([alpha_c, alpha, beta, gamma, scaling_c, scaling])
+            if rna_only:
+                out = init_gene_rna(ufilt, sfilt, percent, fit_scaling, tmax)
+                alpha, beta, gamma, t_, u0_, s0_, ts_, scaling = out
+                c0_ = 1
+                params[i, :] = np.array([0, alpha, beta, gamma, 1, scaling])
+            else:
+                out = init_gene(cfilt, ufilt, sfilt, percent, fit_scaling, tmax)
+                alpha_c, alpha, beta, gamma, t_, c0_, u0_, s0_, ts_, scaling_c, scaling = out
+                params[i, :] = np.array([alpha_c, alpha, beta, gamma, scaling_c, scaling])
             t[i, (si > 0) & (ui > 0) & (ci > 0)] = t_
             c0[i] = c0_
             u0[i] = u0_
@@ -260,13 +353,18 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1):
             c0[i] = np.percentile(c, 95)
             u0[i] = np.max(u)
             s0[i] = np.max(s)
+        if rna_only:
+            c0[i] = 1
+            params[i, 0] = 0
+            params[i, 4] = 1
 
         cpred_i, upred_i, spred_i = pred_single(t[i],
                                                 params[i, 0],
                                                 params[i, 1],
                                                 params[i, 2],
                                                 params[i, 3],
-                                                ts[i])
+                                                ts[i],
+                                                cinit=1 if rna_only else 0)
 
         cpred[:, i] = cpred_i * params[i, 4]
         upred[:, i] = upred_i * params[i, 5]

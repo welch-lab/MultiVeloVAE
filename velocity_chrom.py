@@ -9,6 +9,7 @@ def rna_velocity_vae(adata,
                      key,
                      batch_key=None,
                      use_raw=False,
+                     rna_only=False,
                      sigma=None,
                      approx=False,
                      return_copy=False):
@@ -105,9 +106,9 @@ def rna_velocity_vae(adata,
     adata.layers[f"{key}_velocity_u"] = vu
     adata.layers[f"{key}_velocity_c"] = vc
     if batch_key is None:
-        adata.var[f'{key}_velocity_genes'] = adata.var['quantile_genes'] & (adata.var[f"{key}_likelihood"] > 0.025)
+        adata.var[f'{key}_velocity_genes'] = adata.var['quantile_genes'] & (adata.var[f"{key}_likelihood"] > (0.025 if not rna_only else 0.05))
     else:
-        adata.var[f'{key}_velocity_genes'] = adata.var[f"{key}_likelihood"] > 0.025
+        adata.var[f'{key}_velocity_genes'] = adata.var[f"{key}_likelihood"] > (0.025 if not rna_only else 0.05)
     if np.sum(adata.var[f'{key}_velocity_genes']) < 0.2 * adata.n_vars:
         print('Warning: less than 1/5 of genes assigned as velocity genes.')
     if return_copy:
