@@ -26,7 +26,7 @@ def rna_velocity_vae(adata,
 
     kc = adata.layers[f"{key}_kc"]
     rho = adata.layers[f"{key}_rho"]
-    if batch_key is not None:
+    if batch_key is not None and batch_key in adata.obs:
         alpha_c = np.zeros((n_batch, adata.n_vars))
         alpha = np.zeros((n_batch, adata.n_vars))
         beta = np.zeros((n_batch, adata.n_vars))

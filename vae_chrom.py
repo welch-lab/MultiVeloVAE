@@ -94,6 +94,7 @@ class Decoder(nn.Module):
                  global_std=False,
                  log_params=False,
                  rna_only=False,
+                 rna_only_idx=[],
                  p=98,
                  tmax=1,
                  reinit=False,
@@ -117,6 +118,7 @@ class Decoder(nn.Module):
         self.global_std = global_std
         self.log_params = log_params
         self.rna_only = rna_only
+        self.rna_only_idx = np.array(rna_only_idx)
         self.reinit = reinit
         self.init_ton_zero = init_ton_zero
         self.init_method = init_method
@@ -223,12 +225,13 @@ class Decoder(nn.Module):
             else:
                 self.params_shape = G
 
-    def to_param(self, x):
+    def to_param(self, x, sigma=0.1):
         if self.is_full_vb:
             if self.cvae:
-                return nn.Parameter(torch.tensor(np.tile(np.stack([np.log(x) if self.log_params else softplusinv(x), np.log(0.05)*np.ones(self.params_shape[2])]), (self.params_shape[0], 1, 1))))
+                y = np.tile(np.stack([x, sigma*np.ones(self.params_shape[2])]), (self.params_shape[0], 1, 1))
             else:
-                return nn.Parameter(torch.tensor(np.stack([np.log(x) if self.log_params else softplusinv(x), np.log(0.05)*np.ones(self.params_shape[1])])))
+                y = np.stack([x, sigma*np.ones(self.params_shape[1])])
+            return nn.Parameter(torch.tensor(np.log(y) if self.log_params else softplusinv(y)))
         else:
             if self.cvae:
                 return nn.Parameter(torch.tensor(np.tile(np.log(x) if self.log_params else softplusinv(x), (self.params_shape[0], 1))))
@@ -356,7 +359,8 @@ class Decoder(nn.Module):
             ui[~filt] = np.nan
             si[~filt] = np.nan
             std_u_ref, std_s_ref = np.nanstd(ui, axis=0), np.nanstd(si, axis=0)
-            scaling_c[self.ref_batch] = np.clip(np.nanpercentile(ci, 99.5, axis=0), 1e-3, None)
+            if not self.rna_only:
+                scaling_c[self.ref_batch] = np.clip(np.nanpercentile(ci, 99.5, axis=0), 1e-3, None)
             scaling_u[self.ref_batch] = np.clip(std_u_ref / std_s_ref, 1e-6, 1e6)
             scaling_s[self.ref_batch] = 1.0
             for i in range(self.dim_cond):
@@ -369,7 +373,8 @@ class Decoder(nn.Module):
                     ui[~filt] = np.nan
                     si[~filt] = np.nan
                     std_u, std_s = np.nanstd(ui, axis=0), np.nanstd(si, axis=0)
-                    scaling_c[i] = np.clip(np.nanpercentile(ci, 99.5, axis=0), 1e-3, None)
+                    if not self.rna_only and i not in self.rna_only_idx:
+                        scaling_c[i] = np.clip(np.nanpercentile(ci, 99.5, axis=0), 1e-3, None)
                     scaling_u[i] = np.clip(std_u / (std_s_ref*(~np.isnan(std_s_ref)) + std_s*np.isnan(std_s_ref)), 1e-6, 1e6)
                     scaling_s[i] = np.clip(std_s / (std_s_ref*(~np.isnan(std_s_ref)) + std_s*np.isnan(std_s_ref)), 1e-6, 1e6)
             offset_c = np.zeros((self.dim_cond, G))
@@ -420,7 +425,7 @@ class Decoder(nn.Module):
             self.offset_c.requires_grad = False
             self.c0.requires_grad = False
 
-    def get_param(self, x):
+    def get_param(self, x, enforce_positive=True, idx=None):
         if x == 'ton':
             out = self.ton
         elif x == 'c0':
@@ -449,10 +454,19 @@ class Decoder(nn.Module):
             out = self.offset_u
         elif x == 'offset_s':
             out = self.offset_s
+
+        if idx is not None:
+            out = out[idx]
+
+        if enforce_positive:
+            if self.log_params:
+                out = out.exp()
+            else:
+                out = F.softplus(out)
         return out
 
     def get_param_1d(self, x, condition=None, four_basis=False, is_full_vb=False, sample=True, mask_idx=None, mask_to=1, enforce_positive=True, detach=False):
-        param = self.get_param(x)
+        param = self.get_param(x, enforce_positive=enforce_positive)
         if detach:
             param = param.detach()
         if is_full_vb:
@@ -460,9 +474,9 @@ class Decoder(nn.Module):
                 G = self.adata.n_vars
                 eps = torch.randn(G, device=self.alpha_c.device)
                 if condition is not None:
-                    y = param[:, 0] + eps*(param[:, 1].exp())
+                    y = torch.exp(param[:, 0].log() + eps*(param[:, 1]))
                 else:
-                    y = param[0] + eps*(param[1].exp())
+                    y = torch.exp(param[0].log() + eps*(param[1]))
             else:
                 if condition is not None:
                     y = param[:, 0]
@@ -471,18 +485,12 @@ class Decoder(nn.Module):
         else:
             y = param
 
-        if enforce_positive:
-            if self.log_params:
-                y = y.exp()
-            else:
-                y = F.softplus(y)
-
         if condition is not None:
-            if mask_idx is not None:
-                mask = torch.ones_like(condition)
-                mask[:, mask_idx] = 0
+            if isinstance(mask_idx, int) or (isinstance(mask_idx, np.ndarray) and len(mask_idx) > 0):
+                mask = torch.zeros_like(condition)
+                mask[:, mask_idx] = 1
                 mask_flip = (~mask.bool()).int()
-                y = torch.mm(condition * mask, y) + torch.mm(condition * mask_flip, self.one_mat if mask_to == 1 else self.zero_mat)
+                y = torch.mm(condition * mask_flip, y) + torch.mm(condition * mask, self.one_mat if mask_to == 1 else self.zero_mat)
             else:
                 y = torch.mm(condition, y)
 
@@ -491,14 +499,14 @@ class Decoder(nn.Module):
         return y
 
     def reparameterize(self, condition=None, sample=True, four_basis=False):
-        alpha_c = self.get_param_1d('alpha_c', condition, four_basis, self.is_full_vb, sample)
+        alpha_c = self.get_param_1d('alpha_c', condition, four_basis, self.is_full_vb, sample, mask_idx=self.rna_only_idx, mask_to=0)
         alpha = self.get_param_1d('alpha', condition, four_basis, self.is_full_vb, sample)
         beta = self.get_param_1d('beta', condition, four_basis, self.is_full_vb, sample)
         gamma = self.get_param_1d('gamma', condition, four_basis, self.is_full_vb, sample)
-        scaling_c = self.get_param_1d('scaling_c', condition, four_basis)
+        scaling_c = self.get_param_1d('scaling_c', condition, four_basis, mask_idx=self.rna_only_idx, mask_to=1)
         scaling_u = self.get_param_1d('scaling_u', condition, four_basis)
         scaling_s = self.get_param_1d('scaling_s', condition, four_basis, mask_idx=self.ref_batch)
-        offset_c = self.get_param_1d('offset_c', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
+        offset_c = self.get_param_1d('offset_c', condition, four_basis, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False)
         offset_u = self.get_param_1d('offset_u', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
         offset_s = self.get_param_1d('offset_s', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
 
@@ -509,13 +517,13 @@ class Decoder(nn.Module):
         if condition is None:
             self.rho = self.net_rho(z)
             if self.rna_only:
-                self.kc = torch.full_like(self.rho, 1.0)
+                self.kc = torch.ones_like(self.rho)
             else:
                 self.kc = self.net_kc(z if self.parallel_arch else self.rho)
         else:
             self.rho = self.net_rho(torch.cat((z, condition), 1))
             if self.rna_only:
-                self.kc = torch.full_like(self.rho, 1.0)
+                self.kc = torch.ones_like(self.rho)
             else:
                 self.kc = self.net_kc(torch.cat((z, condition), 1) if self.parallel_arch else self.rho)
         t_ = self.net_t(t) if self.t_network and (not use_input_time) else t
@@ -549,6 +557,18 @@ class Decoder(nn.Module):
 
             if self.rna_only:
                 c0 = torch.ones_like(c0)
+            if len(self.rna_only_idx) > 0 and condition is not None:
+                if four_basis:
+                    c0 = c0.reshape((1, 4, -1)).tile((2, 1, 1))
+                else:
+                    c0 = c0.reshape((1, -1)).tile((2, 1))
+                mask = torch.zeros_like(condition)
+                mask[:, self.rna_only_idx] = 1
+                mask_flip = (~mask.bool()).int()
+                if four_basis:
+                    c0 = torch.einsum('bi,ijm->bjm', condition * mask_flip, c0) + torch.einsum('bi,ijm->bjm', condition * mask, torch.ones_like(c0))
+                else:
+                    c0 = torch.mm(condition * mask_flip, c0) + torch.mm(condition * mask, torch.ones_like(c0))
 
             chat, uhat, shat = pred_func(tau,
                                          c0,
@@ -572,6 +592,9 @@ class Decoder(nn.Module):
                                          alpha,
                                          beta,
                                          gamma)
+            if len(self.rna_only_idx) > 0 and condition is not None:
+                mask = np.in1d(np.arange(self.dim_cond), self.rna_only_idx)
+                chat = chat * condition[:, ~mask] + torch.ones_like(chat) * condition[:, mask]
         chat = chat * scaling_c + offset_c
         uhat = uhat * scaling_u + offset_u
         shat = shat * scaling_s + offset_s
@@ -611,6 +634,7 @@ class VAEChrom():
                  deming_std=False,
                  log_params=False,
                  rna_only=False,
+                 rna_only_idx=[],
                  learning_rate=None,
                  early_stop_thred=None,
                  checkpoints=[None, None],
@@ -624,6 +648,15 @@ class VAEChrom():
             adata_atac = ad.AnnData(X=np.ones((adata.n_obs, adata.n_vars)))
             adata_atac.layers['Mc'] = adata_atac.X
             print('Running in RNA-only mode.')
+        if rna_only_idx is None:
+            rna_only_idx = []
+        elif isinstance(rna_only_idx, int):
+            rna_only_idx = [rna_only_idx]
+        if len(rna_only_idx) > 0:
+            print('Running in partial RNA-only mode.')
+            if ref_batch is not None and ref_batch in rna_only_idx:
+                print('Error: reference batch cannot be RNA only when inferring chromatin. Exiting the program...')
+                return
         if dim_z is None:
             dim_z = 5 if rna_only else 7
         if ('Mc' not in adata_atac.layers) or ('Mu' not in adata.layers) or ('Ms' not in adata.layers):
@@ -649,9 +682,12 @@ class VAEChrom():
             # model parameters
             "dim_z": dim_z,
             "hidden_size": hidden_size,
-            "key": 'fullvb' if full_vb else 'vae',
+            "key": 'vae',
+            "is_full_vb": full_vb,
             "indicator_arch": 'parallel' if parallel_arch else 'series',
             "t_network": t_network,
+            "velocity_continuity": velocity_continuity,
+            "four_basis": four_basis,
             "batch_key": batch_key,
             "ref_batch": ref_batch,
             "reinit_params": reinit_params,
@@ -660,6 +696,7 @@ class VAEChrom():
             'loss_std_type': 'deming' if deming_std else 'global',
             "log_params": log_params,
             "rna_only": rna_only,
+            "rna_only_idx": rna_only_idx,
             "tmax": tmax,
             "init_method": init_method,
             "init_key": init_key,
@@ -684,7 +721,7 @@ class VAEChrom():
             "kl_t": 1.0,
             "kl_z": 1.0,
             "kl_w": 0.01,
-            "kl_param": 1.0,
+            "kl_param": 0.1,
             "reg_forward": 10.0,
             "reg_cos": 0.0,
             "test_iter": None,
@@ -703,8 +740,6 @@ class VAEChrom():
             "train_offset": True,
             "knn_use_pred": True,
             "run_2nd_stage": run_2nd_stage,
-            "velocity_continuity": velocity_continuity,
-            "four_basis": four_basis,
 
             # plotting
             "sparsify": 1}
@@ -714,6 +749,10 @@ class VAEChrom():
         self.encode_batch(adata)
         self.set_lr(adata, adata_atac, learning_rate)
         self.get_prior(adata)
+
+        self.rna_only_idx = np.array(self.config['rna_only_idx'])
+        if not self.enable_cvae and len(self.rna_only_idx) == 1 and self.rna_only_idx[0] == 0:
+            self.config['rna_only'] = True
 
         self.encoder = Encoder(3*self.adata.n_vars,
                                dim_z,
@@ -736,6 +775,7 @@ class VAEChrom():
                                global_std=(not deming_std),
                                log_params=log_params,
                                rna_only=rna_only,
+                               rna_only_idx=rna_only_idx,
                                p=98,
                                tmax=tmax,
                                reinit=reinit_params,
@@ -771,10 +811,10 @@ class VAEChrom():
         self.cossim = nn.CosineSimilarity(dim=1, eps=1e-6)
 
         if full_vb:
-            self.p_log_alpha_c = torch.tensor([[-1.0], [1.0]], dtype=torch.float, device=self.device)
-            self.p_log_alpha = torch.tensor([[4.0], [2.0]], dtype=torch.float, device=self.device)
-            self.p_log_beta = torch.tensor([[2.0], [1.0]], dtype=torch.float, device=self.device)
-            self.p_log_gamma = torch.tensor([[2.0], [1.0]], dtype=torch.float, device=self.device)
+            self.p_log_alpha_c = torch.tensor([[2.5], [0.5]], dtype=torch.float, device=self.device)
+            self.p_log_alpha = torch.tensor([[2.5], [0.5]], dtype=torch.float, device=self.device)
+            self.p_log_beta = torch.tensor([[2.5], [0.5]], dtype=torch.float, device=self.device)
+            self.p_log_gamma = torch.tensor([[2.5], [0.5]], dtype=torch.float, device=self.device)
             self.p_params = [self.p_log_alpha_c, self.p_log_alpha, self.p_log_beta, self.p_log_gamma]
 
         if plot_init:
@@ -866,14 +906,17 @@ class VAEChrom():
         self.config["learning_rate_ode"] = 10*self.config["learning_rate"]
         self.config["learning_rate_t0"] = self.config["learning_rate"]
         if self.config['early_stop_thred'] is None:
-            if self.config['rna_only']:
-                self.config['early_stop_thred'] = 0.4
+            if self.enable_cvae:
+                if self.config['rna_only']:
+                    self.config['early_stop_thred'] = 0.3 + (self.n_batch-1) * 0.1
+                else:
+                    self.config['early_stop_thred'] = 0.4 + (self.n_batch-1) * 0.2
             else:
-                if self.enable_cvae:
-                    self.config['early_stop_thred'] = 0.4 + 0.2 * (self.n_batch-1)
+                if self.config['rna_only']:
+                    self.config['early_stop_thred'] = 0.3
                 else:
                     self.config['early_stop_thred'] = 0.4
-            print(f"Early stop threshold set to {self.config['early_stop_thred']}.")
+            print(f"Early stop threshold set to {self.config['early_stop_thred']:.1f}.")
 
     def get_prior(self, adata):
         if self.config['tprior'] is None:
@@ -918,12 +961,12 @@ class VAEChrom():
         os.makedirs(figure_path, exist_ok=True)
 
         onehot = F.one_hot(self.batch.detach()[self.train_idx], self.n_batch).float() if self.enable_cvae else None
-        scaling_c = self.decoder.get_param_1d('scaling_c', onehot, False, False, detach=True).cpu().numpy()
+        scaling_c = self.decoder.get_param_1d('scaling_c', onehot, False, False, mask_idx=self.rna_only_idx, mask_to=1, detach=True).cpu().numpy()
         scaling_u = self.decoder.get_param_1d('scaling_u', onehot, False, False, detach=True).cpu().numpy()
-        scaling_s = self.decoder.get_param_1d('scaling_s', onehot, False, False, detach=True).cpu().numpy()
-        offset_c = self.decoder.get_param_1d('offset_c', onehot, False, False, enforce_positive=False, detach=True).cpu().numpy()
-        offset_u = self.decoder.get_param_1d('offset_u', onehot, False, False, enforce_positive=False, detach=True).cpu().numpy()
-        offset_s = self.decoder.get_param_1d('offset_s', onehot, False, False, enforce_positive=False, detach=True).cpu().numpy()
+        scaling_s = self.decoder.get_param_1d('scaling_s', onehot, False, False, mask_idx=self.ref_batch, detach=True).cpu().numpy()
+        offset_c = self.decoder.get_param_1d('offset_c', onehot, False, False, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
+        offset_u = self.decoder.get_param_1d('offset_u', onehot, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
+        offset_s = self.decoder.get_param_1d('offset_s', onehot, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
 
         t = self.decoder.t_[:, gind]
         c = self.adata_atac.layers['Mc'][self.train_idx, :][:, gind]
@@ -1035,10 +1078,10 @@ class VAEChrom():
                                        data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]/sigma_u,
                                        data_in[:, data_in.shape[1]//3*2:]/sigma_s), 1)
         else:
-            scaling_c = self.decoder.get_param_1d('scaling_c', condition, False, False)
+            scaling_c = self.decoder.get_param_1d('scaling_c', condition, False, False, mask_idx=self.rna_only_idx, mask_to=1)
             scaling_u = self.decoder.get_param_1d('scaling_u', condition, False, False)
             scaling_s = self.decoder.get_param_1d('scaling_s', condition, False, False, mask_idx=self.ref_batch)
-            offset_c = self.decoder.get_param_1d('offset_c', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
+            offset_c = self.decoder.get_param_1d('offset_c', condition, False, False, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False)
             offset_u = self.decoder.get_param_1d('offset_u', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
             offset_s = self.decoder.get_param_1d('offset_s', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
             data_in_scale = torch.cat(((data_in[:, :data_in.shape[1]//3]-offset_c)/scaling_c,
@@ -1085,15 +1128,23 @@ class VAEChrom():
                                                         t0,
                                                         condition,
                                                         neg_slope=self.config["neg_slope"],
-                                                        four_basis=self.config["four_basis"],
+                                                        four_basis=self.config["four_basis"] if not self.use_knn else False,
                                                         sample=sample,
                                                         use_input_time=self.use_knn)
             chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = None, None, None, None, None, None, None, None, None
         return mu_t, std_t, mu_z, std_z, chat, uhat, shat, t_, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw
 
-    def loss_vel(self, c0, chat, vc, u0, uhat, vu, s0, shat, vs):
-        delta_x = torch.cat([chat-c0, uhat-u0, shat-s0], 1)
-        v = torch.cat([vc, vu, vs], 1)
+    def loss_vel(self, c0, chat, vc, u0, uhat, vu, s0, shat, vs, condition=None):
+        if self.config['rna_only']:
+            delta_x = torch.cat([uhat-u0, shat-s0], 1)
+            v = torch.cat([vu, vs], 1)
+        else:
+            if len(self.rna_only_idx) > 0 and condition is not None:
+                mask = np.in1d(np.arange(self.n_batch), self.rna_only_idx)
+                c0 = c0 * condition[:, ~mask] + torch.ones_like(c0) * condition[:, mask]
+                chat = chat * condition[:, ~mask] + torch.ones_like(chat) * condition[:, mask]
+            delta_x = torch.cat([chat-c0, uhat-u0, shat-s0], 1)
+            v = torch.cat([vc, vu, vs], 1)
         return self.cossim(delta_x, v).mean()
 
     def vae_risk(self,
@@ -1166,39 +1217,42 @@ class VAEChrom():
             kldw = elbo_collapsed_categorical(self.decoder.logit_pw, self.alpha_w, 4, self.decoder.scaling_u.shape[0])
             loss += self.config["kl_w"]*kldw
 
-        if self.config["key"] == 'fullvb':
+        if self.config["is_full_vb"]:
             kld_params = None
-            for i, x in enumerate(['alpha_c', 'alpha', 'beta', 'gamma']):
+            params_eval = ['alpha', 'beta', 'gamma'] if self.config['rna_only'] else ['alpha_c', 'alpha', 'beta', 'gamma']
+            for i, x in enumerate(params_eval):
                 if self.enable_cvae:
                     for j in range(self.n_batch):
-                        mu_param = self.decoder.get_param(x)[j, 0].view(1, -1)
+                        if j in self.rna_only_idx and x == 'alpha_c':
+                            continue
                         if kld_params is None:
-                            kld_params = kl_gaussian(mu_param if self.config['log_params'] else mu_param.log(), self.decoder.get_param(x)[j, 1].exp().view(1, -1), self.p_params[i][0], self.p_params[i][1])
+                            kld_params = kl_gaussian(self.decoder.get_param(x, idx=(j, 0)).log().view(1, -1), self.decoder.get_param(x, idx=(j, 1)).view(1, -1), self.p_params[i][0], self.p_params[i][1])
                         else:
-                            kld_params += kl_gaussian(mu_param if self.config['log_params'] else mu_param.log(), self.decoder.get_param(x)[j, 1].exp().view(1, -1), self.p_params[i][0], self.p_params[i][1])
+                            kld_params += kl_gaussian(self.decoder.get_param(x, idx=(j, 0)).log().view(1, -1), self.decoder.get_param(x, idx=(j, 1)).view(1, -1), self.p_params[i][0], self.p_params[i][1])
 
                 else:
-                    mu_param = self.decoder.get_param(x)[0].view(1, -1)
                     if kld_params is None:
-                        kld_params = kl_gaussian(mu_param if self.config['log_params'] else mu_param.log(), self.decoder.get_param(x)[1].exp().view(1, -1), self.p_params[i][0], self.p_params[i][1])
+                        kld_params = kl_gaussian(self.decoder.get_param(x, idx=0).log().view(1, -1), self.decoder.get_param(x, idx=1).view(1, -1), self.p_params[i][0], self.p_params[i][1])
                     else:
-                        kld_params += kl_gaussian(mu_param if self.config['log_params'] else mu_param.log(), self.decoder.get_param(x)[1].exp().view(1, -1), self.p_params[i][0], self.p_params[i][1])
+                        kld_params += kl_gaussian(self.decoder.get_param(x, idx=0).log().view(1, -1), self.decoder.get_param(x, idx=1).view(1, -1), self.p_params[i][0], self.p_params[i][1])
             kld_params /= u.shape[0]
             loss = loss + self.config["kl_param"]*kld_params
 
         if self.use_knn and self.config["velocity_continuity"]:
-            scaling_c = self.decoder.get_param_1d('scaling_c', condition, False, False)
+            scaling_c = self.decoder.get_param_1d('scaling_c', condition, False, False, mask_idx=self.rna_only_idx, mask_to=1)
             scaling_u = self.decoder.get_param_1d('scaling_u', condition, False, False)
             scaling_s = self.decoder.get_param_1d('scaling_s', condition, False, False, mask_idx=self.ref_batch)
-            offset_c = self.decoder.get_param_1d('offset_c', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
+            offset_c = self.decoder.get_param_1d('offset_c', condition, False, False, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False)
             offset_u = self.decoder.get_param_1d('offset_u', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
             offset_s = self.decoder.get_param_1d('offset_s', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
             forward_loss = (self.loss_vel((c0-offset_c)/scaling_c, (chat-offset_c)/scaling_c, vc,
                                           (u0-offset_u)/scaling_u, (uhat-offset_u)/scaling_u, vu,
-                                          (s0-offset_s)/scaling_s, (shat-offset_s)/scaling_s, vs)
+                                          (s0-offset_s)/scaling_s, (shat-offset_s)/scaling_s, vs,
+                                          condition)
                             + self.loss_vel((chat-offset_c)/scaling_c, (chat_fw-offset_c)/scaling_c, vc_fw,
                                             (uhat-offset_u)/scaling_u, (uhat_fw-offset_u)/scaling_u, vu_fw,
-                                            (shat-offset_s)/scaling_s, (shat_fw-offset_s)/scaling_s, vs_fw))
+                                            (shat-offset_s)/scaling_s, (shat_fw-offset_s)/scaling_s, vs_fw,
+                                            condition))
             loss = loss - self.config["reg_forward"]*forward_loss
 
         if self.reg_velocity:
@@ -1407,12 +1461,12 @@ class VAEChrom():
         if plot:
             cell_idx = self.test_idx if test_mode else self.train_idx
             onehot = F.one_hot(self.batch.detach()[cell_idx], self.n_batch).float() if self.enable_cvae else None
-            scaling_c = self.decoder.get_param_1d('scaling_c', onehot, False, False, detach=True).cpu().numpy()
+            scaling_c = self.decoder.get_param_1d('scaling_c', onehot, False, False, mask_idx=self.rna_only_idx, mask_to=1, detach=True).cpu().numpy()
             scaling_u = self.decoder.get_param_1d('scaling_u', onehot, False, False, detach=True).cpu().numpy()
-            scaling_s = self.decoder.get_param_1d('scaling_s', onehot, False, False, detach=True).cpu().numpy()
-            offset_c = self.decoder.get_param_1d('offset_c', onehot, False, False, enforce_positive=False, detach=True).cpu().numpy()
-            offset_u = self.decoder.get_param_1d('offset_u', onehot, False, False, enforce_positive=False, detach=True).cpu().numpy()
-            offset_s = self.decoder.get_param_1d('offset_s', onehot, False, False, enforce_positive=False, detach=True).cpu().numpy()
+            scaling_s = self.decoder.get_param_1d('scaling_s', onehot, False, False, mask_idx=self.ref_batch, detach=True).cpu().numpy()
+            offset_c = self.decoder.get_param_1d('offset_c', onehot, False, False, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
+            offset_u = self.decoder.get_param_1d('offset_u', onehot, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
+            offset_s = self.decoder.get_param_1d('offset_s', onehot, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
 
             if not self.use_knn:
                 plot_time(t_, Xembed, save=f"{path}/time-{testid_str}.png")
@@ -1602,13 +1656,17 @@ class VAEChrom():
         c0_init = np.mean(c[init_mask], 0)
         u0_init = np.mean(u[init_mask], 0)
         s0_init = np.mean(s[init_mask], 0)
-        c_in = chat[train_idx]
-        u_in = uhat[train_idx]
-        s_in = shat[train_idx]
+        if len(self.rna_only_idx) > 0:
+            use_index = train_idx[~np.isin(self.batch_[train_idx], self.rna_only_idx)]
+        else:
+            use_index = train_idx
+        c_in = chat[use_index]
+        u_in = uhat[use_index]
+        s_in = shat[use_index]
         print("Cell-wise KNN estimation.")
         if self.x0_index is None:
-            self.x0_index = knnx0_index(t[train_idx],
-                                        z[train_idx],
+            self.x0_index = knnx0_index(t[use_index],
+                                        z[use_index],
                                         t,
                                         z,
                                         dt,
@@ -1617,7 +1675,7 @@ class VAEChrom():
         c0, u0, s0, t0 = get_x0(c_in,
                                 u_in,
                                 s_in,
-                                t[train_idx],
+                                t[use_index],
                                 dt,
                                 self.x0_index,
                                 c0_init,
@@ -1625,8 +1683,8 @@ class VAEChrom():
                                 s0_init)
         if self.config["velocity_continuity"]:
             if self.x1_index is None:
-                self.x1_index = knnx0_index(t[train_idx],
-                                            z[train_idx],
+                self.x1_index = knnx0_index(t[use_index],
+                                            z[use_index],
                                             t,
                                             z,
                                             dt,
@@ -1636,7 +1694,7 @@ class VAEChrom():
             c1, u1, s1, t1 = get_x0(c_in,
                                     u_in,
                                     s_in,
-                                    t[train_idx],
+                                    t[use_index],
                                     dt,
                                     self.x1_index,
                                     None,
@@ -1712,7 +1770,7 @@ class VAEChrom():
         else:
             self.cell_labels = np.full(self.adata.n_obs, '')
 
-        print("*********        Creating Training and Validation Datasets        *********")
+        print("*********      Creating Training and Validation Datasets      *********")
         train_set = SCData(X[self.train_idx],
                            self.cell_labels[self.train_idx],
                            batch=self.batch[self.train_idx] if self.enable_cvae else None,
@@ -1792,7 +1850,7 @@ class VAEChrom():
                                                 figure_path)
                 self.set_mode('train')
                 elbo_test = -self.loss_test[-1] if len(self.loss_test) > 0 else -np.inf
-                print(f"Epoch {epoch+1}: Train ELBO = {elbo_train:.3f}, Test ELBO = {elbo_test:.3f} \t\t Total Time = {convert_time(time.time()-start)}")
+                print(f"Epoch {epoch+1}: Train ELBO = {elbo_train:.3f}, Test ELBO = {elbo_test:.3f}\t\tTotal Time = {convert_time(time.time()-start)}")
 
             if stop_training:
                 print(f"*********       Stage 1: Early Stop Triggered at epoch {epoch+1}.       *********")
@@ -1920,7 +1978,7 @@ class VAEChrom():
                                                         figure_path)
                         self.set_mode('train', 'decoder')
                         elbo_test = -self.loss_test[-1] if len(self.loss_test) > n_test1 else -np.inf
-                        print(f"Epoch {epoch+count_epoch+1}: Train ELBO = {elbo_train:.3f}, Test ELBO = {elbo_test:.3f} \t\t Total Time = {convert_time(time.time()-start)}")
+                        print(f"Epoch {epoch+count_epoch+1}: Train ELBO = {elbo_train:.3f}, Test ELBO = {elbo_test:.3f}\t\tTotal Time = {convert_time(time.time()-start)}")
 
                     if stop_training:
                         print(f"*********       Round {r+1}: Early Stop Triggered at epoch {epoch+count_epoch+1}.       *********")
@@ -2000,7 +2058,7 @@ class VAEChrom():
                 plot_test_loss(self.klt_test, [i*self.config["test_iter"] for i in range(1, len(self.klt_test)+1)], save=f'{figure_path}/test_loss_klt_velovae.png')
                 plot_test_loss(self.klz_test, [i*self.config["test_iter"] for i in range(1, len(self.klz_test)+1)], save=f'{figure_path}/test_loss_klz_velovae.png')
         print(f"Final: Train ELBO = {elbo_train:.3f},\tTest ELBO = {elbo_test:.3f}")
-        print(f"*********              Finished. Total Time = {convert_time(time.time()-start)}             *********")
+        print(f"*********      Finished. Total Time = {convert_time(time.time()-start)}     *********")
 
     def save_model(self, file_path, enc_name='encoder', dec_name='decoder'):
         os.makedirs(file_path, exist_ok=True)
@@ -2012,87 +2070,83 @@ class VAEChrom():
         os.makedirs(file_path, exist_ok=True)
 
         key = self.config['key']
-        if key == 'fullvb':
+        if self.config['is_full_vb']:
             if self.enable_cvae:
                 for i in range(self.n_batch):
-                    if self.config['log_params']:
-                        self.adata.var[f"{key}_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i, 0].detach().cpu().numpy())
-                        self.adata.var[f"{key}_alpha_{i}"] = np.exp(self.decoder.alpha[i, 0].detach().cpu().numpy())
-                        self.adata.var[f"{key}_beta_{i}"] = np.exp(self.decoder.beta[i, 0].detach().cpu().numpy())
-                        self.adata.var[f"{key}_gamma_{i}"] = np.exp(self.decoder.gamma[i, 0].detach().cpu().numpy())
+                    if self.config['rna_only'] or i in self.rna_only_idx:
+                        self.adata.var[f"{key}_alpha_c_{i}"] = 0
                     else:
-                        self.adata.var[f"{key}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i, 0].detach().cpu()).numpy()
-                        self.adata.var[f"{key}_alpha_{i}"] = F.softplus(self.decoder.alpha[i, 0].detach().cpu()).numpy()
-                        self.adata.var[f"{key}_beta_{i}"] = F.softplus(self.decoder.beta[i, 0].detach().cpu()).numpy()
-                        self.adata.var[f"{key}_gamma_{i}"] = F.softplus(self.decoder.gamma[i, 0].detach().cpu()).numpy()
-                    self.adata.var[f"{key}_logstd_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i, 1].detach().cpu().numpy())
-                    self.adata.var[f"{key}_logstd_alpha_{i}"] = np.exp(self.decoder.alpha[i, 1].detach().cpu().numpy())
-                    self.adata.var[f"{key}_logstd_beta_{i}"] = np.exp(self.decoder.beta[i, 1].detach().cpu().numpy())
-                    self.adata.var[f"{key}_logstd_gamma_{i}"] = np.exp(self.decoder.gamma[i, 1].detach().cpu().numpy())
+                        self.adata.var[f"{key}_alpha_c_{i}"] = self.decoder.get_param('alpha_c', idx=(i, 0)).detach().cpu().numpy()
+                    self.adata.var[f"{key}_alpha_{i}"] = self.decoder.get_param('alpha', idx=(i, 0)).detach().cpu().numpy()
+                    self.adata.var[f"{key}_beta_{i}"] = self.decoder.get_param('beta', idx=(i, 0)).detach().cpu().numpy()
+                    self.adata.var[f"{key}_gamma_{i}"] = self.decoder.get_param('gamma', idx=(i, 0)).detach().cpu().numpy()
+                    if self.config['rna_only'] or i in self.rna_only_idx:
+                        self.adata.var[f"{key}_std_log_alpha_c_{i}"] = 0
+                    else:
+                        self.adata.var[f"{key}_std_log_alpha_c_{i}"] = self.decoder.get_param('alpha_c', idx=(i, 1)).detach().cpu().numpy()
+                    self.adata.var[f"{key}_std_log_alpha_{i}"] = self.decoder.get_param('alpha', idx=(i, 1)).detach().cpu().numpy()
+                    self.adata.var[f"{key}_std_log_beta_{i}"] = self.decoder.get_param('beta', idx=(i, 1)).detach().cpu().numpy()
+                    self.adata.var[f"{key}_std_log_gamma_{i}"] = self.decoder.get_param('gamma', idx=(i, 1)).detach().cpu().numpy()
             else:
-                if self.config['log_params']:
-                    self.adata.var[f"{key}_alpha_c"] = np.exp(self.decoder.alpha_c[0].detach().cpu().numpy())
-                    self.adata.var[f"{key}_alpha"] = np.exp(self.decoder.alpha[0].detach().cpu().numpy())
-                    self.adata.var[f"{key}_beta"] = np.exp(self.decoder.beta[0].detach().cpu().numpy())
-                    self.adata.var[f"{key}_gamma"] = np.exp(self.decoder.gamma[0].detach().cpu().numpy())
+                if self.config['rna_only']:
+                    self.adata.var[f"{key}_alpha_c"] = 0
                 else:
-                    self.adata.var[f"{key}_alpha_c"] = F.softplus(self.decoder.alpha_c[0].detach().cpu()).numpy()
-                    self.adata.var[f"{key}_alpha"] = F.softplus(self.decoder.alpha[0].detach().cpu()).numpy()
-                    self.adata.var[f"{key}_beta"] = F.softplus(self.decoder.beta[0].detach().cpu()).numpy()
-                    self.adata.var[f"{key}_gamma"] = F.softplus(self.decoder.gamma[0].detach().cpu()).numpy()
-                self.adata.var[f"{key}_logstd_alpha_c"] = np.exp(self.decoder.alpha_c[1].detach().cpu().numpy())
-                self.adata.var[f"{key}_logstd_alpha"] = np.exp(self.decoder.alpha[1].detach().cpu().numpy())
-                self.adata.var[f"{key}_logstd_beta"] = np.exp(self.decoder.beta[1].detach().cpu().numpy())
-                self.adata.var[f"{key}_logstd_gamma"] = np.exp(self.decoder.gamma[1].detach().cpu().numpy())
+                    self.adata.var[f"{key}_alpha_c"] = self.decoder.get_param('alpha_c', idx=0).detach().cpu().numpy()
+                self.adata.var[f"{key}_alpha"] = self.decoder.get_param('alpha', idx=0).detach().cpu().numpy()
+                self.adata.var[f"{key}_beta"] = self.decoder.get_param('beta', idx=0).detach().cpu().numpy()
+                self.adata.var[f"{key}_gamma"] = self.decoder.get_param('gamma', idx=0).detach().cpu().numpy()
+                if self.config['rna_only']:
+                    self.adata.var[f"{key}_std_log_alpha_c"] = 0
+                else:
+                    self.adata.var[f"{key}_std_log_alpha_c"] = self.decoder.get_param('alpha_c', idx=1).detach().cpu().numpy()
+                self.adata.var[f"{key}_std_log_alpha"] = self.decoder.get_param('alpha', idx=1).detach().cpu().numpy()
+                self.adata.var[f"{key}_std_log_beta"] = self.decoder.get_param('beta', idx=1).detach().cpu().numpy()
+                self.adata.var[f"{key}_std_log_gamma"] = self.decoder.get_param('gamma', idx=1).detach().cpu().numpy()
         else:
             if self.enable_cvae:
                 for i in range(self.n_batch):
-                    if self.config['log_params']:
-                        self.adata.var[f"{key}_alpha_c_{i}"] = np.exp(self.decoder.alpha_c[i].detach().cpu().numpy())
-                        self.adata.var[f"{key}_alpha_{i}"] = np.exp(self.decoder.alpha[i].detach().cpu().numpy())
-                        self.adata.var[f"{key}_beta_{i}"] = np.exp(self.decoder.beta[i].detach().cpu().numpy())
-                        self.adata.var[f"{key}_gamma_{i}"] = np.exp(self.decoder.gamma[i].detach().cpu().numpy())
+                    if self.config['rna_only'] or i in self.rna_only_idx:
+                        self.adata.var[f"{key}_alpha_c_{i}"] = 0
                     else:
-                        self.adata.var[f"{key}_alpha_c_{i}"] = F.softplus(self.decoder.alpha_c[i].detach().cpu()).numpy()
-                        self.adata.var[f"{key}_alpha_{i}"] = F.softplus(self.decoder.alpha[i].detach().cpu()).numpy()
-                        self.adata.var[f"{key}_beta_{i}"] = F.softplus(self.decoder.beta[i].detach().cpu()).numpy()
-                        self.adata.var[f"{key}_gamma_{i}"] = F.softplus(self.decoder.gamma[i].detach().cpu()).numpy()
+                        self.adata.var[f"{key}_alpha_c_{i}"] = self.decoder.get_param('alpha_c', idx=i).detach().cpu().numpy()
+                    self.adata.var[f"{key}_alpha_{i}"] = self.decoder.get_param('alpha', idx=i).detach().cpu().numpy()
+                    self.adata.var[f"{key}_beta_{i}"] = self.decoder.get_param('beta', idx=i).detach().cpu().numpy()
+                    self.adata.var[f"{key}_gamma_{i}"] = self.decoder.get_param('gamma', idx=i).detach().cpu().numpy()
             else:
-                if self.config['log_params']:
-                    self.adata.var[f"{key}_alpha_c"] = np.exp(self.decoder.alpha_c.detach().cpu().numpy())
-                    self.adata.var[f"{key}_alpha"] = np.exp(self.decoder.alpha.detach().cpu().numpy())
-                    self.adata.var[f"{key}_beta"] = np.exp(self.decoder.beta.detach().cpu().numpy())
-                    self.adata.var[f"{key}_gamma"] = np.exp(self.decoder.gamma.detach().cpu().numpy())
+                if self.config['rna_only']:
+                    self.adata.var[f"{key}_alpha_c"] = 0
                 else:
-                    self.adata.var[f"{key}_alpha_c"] = F.softplus(self.decoder.alpha_c.detach().cpu()).numpy()
-                    self.adata.var[f"{key}_alpha"] = F.softplus(self.decoder.alpha.detach().cpu()).numpy()
-                    self.adata.var[f"{key}_beta"] = F.softplus(self.decoder.beta.detach().cpu()).numpy()
-                    self.adata.var[f"{key}_gamma"] = F.softplus(self.decoder.gamma.detach().cpu()).numpy()
+                    self.adata.var[f"{key}_alpha_c"] = self.decoder.get_param('alpha_c').detach().cpu().numpy()
+                self.adata.var[f"{key}_alpha"] = self.decoder.get_param('alpha').detach().cpu().numpy()
+                self.adata.var[f"{key}_beta"] = self.decoder.get_param('beta').detach().cpu().numpy()
+                self.adata.var[f"{key}_gamma"] = self.decoder.get_param('gamma').detach().cpu().numpy()
         if self.enable_cvae:
             for i in range(self.n_batch):
-                if self.config['log_params']:
-                    self.adata.var[f"{key}_scaling_c_{i}"] = np.exp(self.decoder.scaling_c[i].detach().cpu().numpy())
-                    self.adata.var[f"{key}_scaling_u_{i}"] = np.exp(self.decoder.scaling_u[i].detach().cpu().numpy())
-                    self.adata.var[f"{key}_scaling_s_{i}"] = np.exp(self.decoder.scaling_s[i].detach().cpu().numpy())
+                if self.config['rna_only'] or i in self.rna_only_idx:
+                    self.adata.var[f"{key}_scaling_c_{i}"] = 1
                 else:
-                    self.adata.var[f"{key}_scaling_c_{i}"] = F.softplus(self.decoder.scaling_c[i].detach().cpu()).numpy()
-                    self.adata.var[f"{key}_scaling_u_{i}"] = F.softplus(self.decoder.scaling_u[i].detach().cpu()).numpy()
-                    self.adata.var[f"{key}_scaling_s_{i}"] = F.softplus(self.decoder.scaling_s[i].detach().cpu()).numpy()
-                self.adata.var[f"{key}_offset_c_{i}"] = self.decoder.offset_c[i].detach().cpu().numpy()
-                self.adata.var[f"{key}_offset_u_{i}"] = self.decoder.offset_u[i].detach().cpu().numpy()
-                self.adata.var[f"{key}_offset_s_{i}"] = self.decoder.offset_s[i].detach().cpu().numpy()
+                    self.adata.var[f"{key}_scaling_c_{i}"] = self.decoder.get_param('scaling_c', idx=i).detach().cpu().numpy()
+                self.adata.var[f"{key}_scaling_u_{i}"] = self.decoder.get_param('scaling_u', idx=i).detach().cpu().numpy()
+                self.adata.var[f"{key}_scaling_s_{i}"] = self.decoder.get_param('scaling_s', idx=i).detach().cpu().numpy()
+                if self.config['rna_only'] or i in self.rna_only_idx:
+                    self.adata.var[f"{key}_offset_c_{i}"] = 0
+                else:
+                    self.adata.var[f"{key}_offset_c_{i}"] = self.decoder.get_param('offset_c', enforce_positive=False, idx=i).detach().cpu().numpy()
+                self.adata.var[f"{key}_offset_u_{i}"] = self.decoder.get_param('offset_u', enforce_positive=False, idx=i).detach().cpu().numpy()
+                self.adata.var[f"{key}_offset_s_{i}"] = self.decoder.get_param('offset_s', enforce_positive=False, idx=i).detach().cpu().numpy()
         else:
-            if self.config['log_params']:
-                self.adata.var[f"{key}_scaling_c"] = np.exp(self.decoder.scaling_c.detach().cpu().numpy())
-                self.adata.var[f"{key}_scaling_u"] = np.exp(self.decoder.scaling_u.detach().cpu().numpy())
-                self.adata.var[f"{key}_scaling_s"] = np.exp(self.decoder.scaling_s.detach().cpu().numpy())
+            if self.config['rna_only']:
+                self.adata.var[f"{key}_scaling_c"] = 1
             else:
-                self.adata.var[f"{key}_scaling_c"] = F.softplus(self.decoder.scaling_c.detach().cpu()).numpy()
-                self.adata.var[f"{key}_scaling_u"] = F.softplus(self.decoder.scaling_u.detach().cpu()).numpy()
-                self.adata.var[f"{key}_scaling_s"] = F.softplus(self.decoder.scaling_s.detach().cpu()).numpy()
-            self.adata.var[f"{key}_offset_c"] = self.decoder.offset_c.detach().cpu().numpy()
-            self.adata.var[f"{key}_offset_u"] = self.decoder.offset_u.detach().cpu().numpy()
-            self.adata.var[f"{key}_offset_s"] = self.decoder.offset_s.detach().cpu().numpy()
+                self.adata.var[f"{key}_scaling_c"] = self.decoder.get_param('scaling_c').detach().cpu().numpy()
+            self.adata.var[f"{key}_scaling_u"] = self.decoder.get_param('scaling_u').detach().cpu().numpy()
+            self.adata.var[f"{key}_scaling_s"] = self.decoder.get_param('scaling_s').detach().cpu().numpy()
+            if self.config['rna_only']:
+                self.adata.var[f"{key}_offset_c"] = 0
+            else:
+                self.adata.var[f"{key}_offset_c"] = self.decoder.get_param('offset_c', enforce_positive=False).detach().cpu().numpy()
+            self.adata.var[f"{key}_offset_u"] = self.decoder.get_param('offset_u', enforce_positive=False).detach().cpu().numpy()
+            self.adata.var[f"{key}_offset_s"] = self.decoder.get_param('offset_s', enforce_positive=False).detach().cpu().numpy()
         self.adata.var[f"{key}_sigma_c"] = self.decoder.sigma_c.detach().cpu().numpy()
         self.adata.var[f"{key}_sigma_u"] = self.decoder.sigma_u.detach().cpu().numpy()
         self.adata.var[f"{key}_sigma_s"] = self.decoder.sigma_s.detach().cpu().numpy()
@@ -2124,6 +2178,9 @@ class VAEChrom():
         self.adata.var[f"{key}_likelihood"] = np.exp(-nll)
 
         if self.enable_cvae and self.ref_batch >= 0:
+            self.adata.layers[f"{key}_chat_"] = chat
+            self.adata.layers[f"{key}_uhat_"] = uhat
+            self.adata.layers[f"{key}_shat_"] = shat
             self.adata.obs[f"{key}_time_batch"] = t_
             self.adata.obsm[f"{key}_t_batch"] = t
             self.adata.obsm[f"{key}_std_t_batch"] = std_t

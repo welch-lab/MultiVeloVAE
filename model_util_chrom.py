@@ -272,6 +272,8 @@ def init_gene(c, u, s, percent, fit_scaling=True, tmax=1):
     # initialize beta and gamma from extreme quantiles of s
     thresh = np.mean(c) + np.std(c)
     mask_c = c >= thresh
+    if np.sum(mask_c) < 5:
+        mask_c = c >= np.mean(c)
     u_, s_ = u[mask_c], s[mask_c]
     mask_s = s >= np.percentile(s_, percent, axis=0)
     mask_u = u >= np.percentile(u_, percent, axis=0)
@@ -406,6 +408,8 @@ def get_ts_global(tgl, c, u, s, perc):
 
 def reinit_gene(c, u, s, t, ts):
     mask_c = (c > np.mean(c[c < 1])) & (c < 1)
+    if np.sum(mask_c) < 5:
+        mask_c = c >= np.mean(c)
     mask1_u = u > np.quantile(u[mask_c], 0.95)
     mask1_s = s > np.quantile(s[mask_c], 0.95)
     c1, u1, s1 = np.median(c[mask_c & (mask1_u | mask1_s)]), np.median(u[mask_c & (mask1_u | mask1_s)]), np.median(s[mask_c & (mask1_s | mask1_u)])
