@@ -559,9 +559,9 @@ class Decoder(nn.Module):
                 c0 = torch.ones_like(c0)
             if len(self.rna_only_idx) > 0 and condition is not None:
                 if four_basis:
-                    c0 = c0.reshape((1, 4, -1)).tile((2, 1, 1))
+                    c0 = c0.reshape((1, 4, -1)).tile((self.dim_cond, 1, 1))
                 else:
-                    c0 = c0.reshape((1, -1)).tile((2, 1))
+                    c0 = c0.reshape((1, -1)).tile((self.dim_cond, 1))
                 mask = torch.zeros_like(condition)
                 mask[:, self.rna_only_idx] = 1
                 mask_flip = (~mask.bool()).int()
@@ -594,7 +594,8 @@ class Decoder(nn.Module):
                                          gamma)
             if len(self.rna_only_idx) > 0 and condition is not None:
                 mask = np.in1d(np.arange(self.dim_cond), self.rna_only_idx)
-                chat = chat * condition[:, ~mask] + torch.ones_like(chat) * condition[:, mask]
+                mask = torch.tensor(mask, device=chat.device).int()
+                chat = chat * ((condition * (~mask.bool()).int()).sum(1, keepdim=True) > 0) + torch.ones_like(chat) * ((condition * mask).sum(1, keepdim=True) > 0)
         chat = chat * scaling_c + offset_c
         uhat = uhat * scaling_u + offset_u
         shat = shat * scaling_s + offset_s
@@ -655,13 +656,9 @@ class VAEChrom():
         if len(rna_only_idx) > 0:
             print('Running in partial RNA-only mode.')
             if ref_batch is not None and ref_batch in rna_only_idx:
-                print('Error: reference batch cannot be RNA only when inferring chromatin. Exiting the program...')
-                return
-        if dim_z is None:
-            dim_z = 5 if rna_only else 7
+                raise ValueError('Error: reference batch cannot be RNA only when inferring chromatin. Exiting the program...')
         if ('Mc' not in adata_atac.layers) or ('Mu' not in adata.layers) or ('Ms' not in adata.layers):
-            print('Chromatin/Unspliced/Spliced count matrices not found in the layers! Exiting the program...')
-            return
+            raise ValueError('Chromatin/Unspliced/Spliced count matrices not found in the layers! Exiting the program...')
         if issparse(adata_atac.layers['Mc']):
             adata_atac.layers['Mc'] = adata_atac.layers['Mc'].A
         if issparse(adata.layers['Mu']):
@@ -753,9 +750,11 @@ class VAEChrom():
         self.rna_only_idx = np.array(self.config['rna_only_idx'])
         if not self.enable_cvae and len(self.rna_only_idx) == 1 and self.rna_only_idx[0] == 0:
             self.config['rna_only'] = True
+        if self.enable_cvae and np.any(np.array(self.rna_only_idx) > self.n_batch):
+            raise ValueError('RNA-only index out of range.')
 
         self.encoder = Encoder(3*self.adata.n_vars,
-                               dim_z,
+                               self.config['dim_z'],
                                dim_cond=self.n_batch,
                                N1=hidden_size,
                                t_network=t_network,
@@ -764,7 +763,7 @@ class VAEChrom():
         self.decoder = Decoder(self.adata,
                                self.adata_atac,
                                self.train_idx,
-                               dim_z,
+                               self.config['dim_z'],
                                dim_cond=self.n_batch,
                                batch_idx=self.batch_,
                                ref_batch=self.ref_batch,
@@ -889,10 +888,20 @@ class VAEChrom():
             self.ref_batch = self.batch_names[np.argmax(batch_count)]
             print(f'Reference batch set to {self.ref_batch} ({batch_names_raw[self.ref_batch]}).')
         self.enable_cvae = self.n_batch > 0
-        if self.enable_cvae and 2*self.n_batch > self.config['dim_z']:
-            print('Warning: number of batch classes is larger than half of dim_z. Consider increasing dim_z.')
-        if self.enable_cvae and 10*self.n_batch < self.config['dim_z']:
-            print('Warning: number of batch classes is smaller than 1/10 of dim_z. Consider decreasing dim_z.')
+        if self.config['dim_z'] is not None:
+            if self.enable_cvae and 2*self.n_batch > self.config['dim_z']:
+                print('Warning: number of batch classes is larger than half of dim_z. Consider increasing dim_z.')
+            if self.enable_cvae and 10*self.n_batch < self.config['dim_z']:
+                print('Warning: number of batch classes is smaller than 1/10 of dim_z. Consider decreasing dim_z.')
+        else:
+            if self.config['rna_only']:
+                dim_z = 3 + self.adata.n_vars // 512
+            else:
+                dim_z = 4 + self.adata.n_vars // 256
+            if self.enable_cvae:
+                dim_z += 1
+            self.config['dim_z'] = dim_z
+            print(f'Latent dimension set to {dim_z}.')
 
     def set_lr(self, adata, adata_atac, learning_rate):
         if learning_rate is None:
