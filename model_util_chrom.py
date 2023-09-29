@@ -210,8 +210,8 @@ def init_gene_rna(u, s, percent, fit_scaling=True, tmax=1):
     u = u/scaling
 
     # initialize beta and gamma from extreme quantiles of s
-    mask_s = s >= np.percentile(s, percent, axis=0)
-    mask_u = u >= np.percentile(u, percent, axis=0)
+    mask_s = s >= np.percentile(s, percent)
+    mask_u = u >= np.percentile(u, percent)
     mask = mask_s & mask_u
     if np.sum(mask) < 10:
         mask = mask_s
@@ -265,7 +265,6 @@ def init_gene(c, u, s, percent, fit_scaling=True, tmax=1):
         scaling = 1.0
     u = u/scaling
     scaling_c = np.clip(np.percentile(c, 99.5), 1e-3, None)
-    # scaling_c = np.clip(np.max(c), 1e-3, None)
     c = c/scaling_c
     std_c_ = np.clip(np.std(c), 1e-6, None)
 
@@ -275,8 +274,8 @@ def init_gene(c, u, s, percent, fit_scaling=True, tmax=1):
     if np.sum(mask_c) < 5:
         mask_c = c >= np.mean(c)
     u_, s_ = u[mask_c], s[mask_c]
-    mask_s = s >= np.percentile(s_, percent, axis=0)
-    mask_u = u >= np.percentile(u_, percent, axis=0)
+    mask_s = s >= np.percentile(s_, percent)
+    mask_u = u >= np.percentile(u_, percent)
     mask = mask_s & mask_u & mask_c
     if np.sum(mask) < 10:
         mask = mask_s & mask_c
@@ -336,7 +335,7 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
         cfilt = ci[(si > 0) & (ui > 0) & (ci > 0)]
         ufilt = ui[(si > 0) & (ui > 0) & (ci > 0)]
         sfilt = si[(si > 0) & (ui > 0) & (ci > 0)]
-        if (len(sfilt) > 5):
+        if (len(sfilt) >= 5):
             if rna_only:
                 out = init_gene_rna(ufilt, sfilt, percent, fit_scaling, tmax)
                 alpha, beta, gamma, t_, u0_, s0_, ts_, scaling = out
@@ -352,9 +351,9 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
             s0[i] = s0_
             ts[i] = ts_
         else:
-            c0[i] = np.percentile(c, 95)
-            u0[i] = np.max(u)
-            s0[i] = np.max(s)
+            c0[i] = 1.0
+            u0[i] = np.max(ui)
+            s0[i] = np.max(si)
         if rna_only:
             c0[i] = 1
             params[i, 0] = 0
@@ -407,11 +406,11 @@ def get_ts_global(tgl, c, u, s, perc):
 
 
 def reinit_gene(c, u, s, t, ts):
-    mask_c = (c > np.mean(c[c < 1])) & (c < 1)
+    mask_c = (c >= np.mean(c[c < 1])) & (c < 1)
     if np.sum(mask_c) < 5:
         mask_c = c >= np.mean(c)
-    mask1_u = u > np.quantile(u[mask_c], 0.95)
-    mask1_s = s > np.quantile(s[mask_c], 0.95)
+    mask1_u = u >= np.quantile(u[mask_c], 0.95)
+    mask1_s = s >= np.quantile(s[mask_c], 0.95)
     c1, u1, s1 = np.median(c[mask_c & (mask1_u | mask1_s)]), np.median(u[mask_c & (mask1_u | mask1_s)]), np.median(s[mask_c & (mask1_s | mask1_u)])
 
     if u1 == 0 or np.isnan(u1):

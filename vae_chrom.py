@@ -17,13 +17,7 @@ from .transition_graph import encode_type
 from .training_data_chrom import SCData
 from .velocity_chrom import rna_velocity_vae
 
-P_MAX = 1e30
-GRAD_MAX = 1e7
 
-
-##############################################################
-# VAE
-##############################################################
 class Encoder(nn.Module):
     def __init__(self,
                  Cin,
@@ -130,28 +124,6 @@ class Decoder(nn.Module):
     def construct_nn(self, dim_z, dim_cond, N1, p):
         G = self.adata.n_vars
         self.set_shape(G, dim_cond)
-
-        # self.fc1 = nn.Linear(dim_z+dim_cond, N1)
-        # self.bn1 = nn.BatchNorm1d(num_features=N1)
-        # self.dpt1 = nn.Dropout(p=0.25)
-        # self.fc2 = nn.Linear(N1, N2)
-        # self.bn2 = nn.BatchNorm1d(num_features=N2)
-        # self.dpt2 = nn.Dropout(p=0.25)
-        # self.fc_out1 = nn.Linear(N2, G)
-        # self.net_rho = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1,
-        #                              self.fc2, self.bn2, nn.LeakyReLU(), self.dpt2,
-        #                              self.fc_out1, nn.Hardtanh(0, 1))
-
-        # self.fc3 = nn.Linear(dim_z+dim_cond if self.parallel_arch else G, N1)
-        # self.bn3 = nn.BatchNorm1d(num_features=N1)
-        # self.dpt3 = nn.Dropout(p=0.25)
-        # self.fc4 = nn.Linear(N1, N2)
-        # self.bn4 = nn.BatchNorm1d(num_features=N2)
-        # self.dpt4 = nn.Dropout(p=0.25)
-        # self.fc_out2 = nn.Linear(N2, G)
-        # self.net_kc = nn.Sequential(self.fc3, self.bn3, nn.LeakyReLU(), self.dpt3,
-        #                             self.fc4, self.bn4, nn.LeakyReLU(), self.dpt4,
-        #                             self.fc_out2, nn.Hardtanh(0, 1))
 
         self.fc1 = nn.Linear(dim_z+dim_cond, N1)
         self.bn1 = nn.BatchNorm1d(N1)
@@ -618,9 +590,10 @@ class VAEChrom():
                  ref_batch=None,
                  device='cpu',
                  hidden_size=256,
+                 batch_size=256,
                  full_vb=False,
                  parallel_arch=True,
-                 t_network=False,
+                 t_network=True,
                  velocity_continuity=False,
                  four_basis=False,
                  run_2nd_stage=True,
@@ -654,7 +627,7 @@ class VAEChrom():
         elif isinstance(rna_only_idx, int):
             rna_only_idx = [rna_only_idx]
         if len(rna_only_idx) > 0:
-            print('Running in partial RNA-only mode.')
+            print('Running in mixed RNA-only mode.')
             if ref_batch is not None and ref_batch in rna_only_idx:
                 raise ValueError('Error: reference batch cannot be RNA only when inferring chromatin. Exiting the program...')
         if ('Mc' not in adata_atac.layers) or ('Mu' not in adata.layers) or ('Ms' not in adata.layers):
@@ -682,7 +655,7 @@ class VAEChrom():
             "key": 'vae',
             "is_full_vb": full_vb,
             "indicator_arch": 'parallel' if parallel_arch else 'series',
-            "t_network": t_network,
+            "t_network": t_network if tprior is None else False,
             "velocity_continuity": velocity_continuity,
             "four_basis": four_basis,
             "batch_key": batch_key,
@@ -708,7 +681,7 @@ class VAEChrom():
             "n_epochs": 2000,
             "n_epochs_post": 500,
             "n_refine": 20 if refine_velocity else 1,
-            "batch_size": 256,
+            "batch_size": batch_size,
             "learning_rate": None,
             "learning_rate_ode": None,
             "learning_rate_x0": None,
@@ -806,7 +779,7 @@ class VAEChrom():
         self.counter = 0
         self.n_drop = 0
 
-        self.clip_fn = nn.Hardtanh(-P_MAX, P_MAX)
+        self.clip_fn = nn.Hardtanh(-1e30, 1e30)
         self.cossim = nn.CosineSimilarity(dim=1, eps=1e-6)
 
         if full_vb:
@@ -1634,8 +1607,8 @@ class VAEChrom():
                                  onehot)
 
             loss[0].backward()
-            torch.nn.utils.clip_grad_value_(self.encoder.parameters(), GRAD_MAX)
-            torch.nn.utils.clip_grad_value_(self.decoder.parameters(), GRAD_MAX)
+            torch.nn.utils.clip_grad_value_(self.encoder.parameters(), 1e7)
+            torch.nn.utils.clip_grad_value_(self.decoder.parameters(), 1e7)
             if k == 0:
                 optimizer.step()
                 if optimizer2 is not None:
@@ -1862,7 +1835,7 @@ class VAEChrom():
                 print(f"Epoch {epoch+1}: Train ELBO = {elbo_train:.3f}, Test ELBO = {elbo_test:.3f}\t\tTotal Time = {convert_time(time.time()-start)}")
 
             if stop_training:
-                print(f"*********       Stage 1: Early Stop Triggered at epoch {epoch+1}.       *********")
+                print(f"*********     Stage 1: Early Stop Triggered at epoch {epoch+1}.     *********")
                 break
 
         if self.config["run_2nd_stage"]:
@@ -1873,8 +1846,6 @@ class VAEChrom():
             self.set_mode('eval', 'encoder')
             param_post = list(self.decoder.net_rho.parameters())
             param_post += list(self.decoder.net_kc.parameters())
-            # if self.config['t_network']:
-            #     param_post += list(self.decoder.net_t.parameters())
             param_ode = [self.decoder.alpha_c,
                          self.decoder.alpha,
                          self.decoder.beta,
@@ -1896,7 +1867,7 @@ class VAEChrom():
                     self.update_std_noise(train_set)
                     stop_training = False
                 if stop_training:
-                    print(f"Stage 2: Early Stop Triggered at round {r}.")
+                    print(f"*********      Stage 2: Early Stop Triggered at round {r}.      *********")
                     break
 
                 t, z = self.update_x0(X[:, :G//3], X[:, G//3:G//3*2], X[:, G//3*2:])
@@ -1990,7 +1961,7 @@ class VAEChrom():
                         print(f"Epoch {epoch+count_epoch+1}: Train ELBO = {elbo_train:.3f}, Test ELBO = {elbo_test:.3f}\t\tTotal Time = {convert_time(time.time()-start)}")
 
                     if stop_training:
-                        print(f"*********       Round {r+1}: Early Stop Triggered at epoch {epoch+count_epoch+1}.       *********")
+                        print(f"*********     Round {r+1}: Early Stop Triggered at epoch {epoch+count_epoch+1}.     *********")
                         break
 
                 count_epoch += (epoch+1)
