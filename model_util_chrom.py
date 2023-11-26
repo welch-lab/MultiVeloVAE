@@ -696,9 +696,37 @@ def get_x0(c,
     return c0, u0, s0, t0
 
 
-def cosine_similarity(u, s, beta, gamma, s_knn):
+def loss_vel(c0, chat, vc, u0, uhat, vu, s0, shat, vs, rna_only=False, rna_only_idx=None, condition=None, w_hvg=None):
+    if rna_only:
+        delta_x = torch.cat([uhat-u0, shat-s0], 1)
+        v = torch.cat([vu, vs], 1)
+        if w_hvg is not None:
+            w_hvg_ = w_hvg.repeat((2, 1))
+            delta_x = w_hvg_ * delta_x
+            v = w_hvg_ * v
+    else:
+        if len(rna_only_idx) > 0 and condition is not None:
+            mask = torch.zeros_like(condition)
+            mask[:, rna_only_idx] = 1
+            mask_flip = (~mask.bool()).int()
+            c0 = c0 * torch.sum(condition * mask_flip, 1, keepdim=True) + torch.ones_like(c0) * torch.sum(condition * mask, 1, keepdim=True)
+            chat = chat * torch.sum(condition * mask_flip, 1, keepdim=True) + torch.ones_like(chat) * torch.sum(condition * mask, 1, keepdim=True)
+        delta_x = torch.cat([chat-c0, uhat-u0, shat-s0], 1)
+        v = torch.cat([vc, vu, vs], 1)
+        if w_hvg is not None:
+            w_hvg_ = w_hvg.repeat((3, 1))
+            delta_x = w_hvg_ * delta_x
+            v = w_hvg_ * v
+    cos_sim = nn.CosineSimilarity(dim=1, eps=1e-6)
+    return cos_sim(delta_x, v)
+
+
+def cosine_similarity(u, s, beta, gamma, s_knn, w_hvg=None):
     V = (beta * u - gamma * s)
     ds = torch.reshape(s, (s.size(0), 1, s.size(1))) - s_knn   # cell x knn x gene
+    if w_hvg is not None:
+        V = w_hvg * V
+        ds = w_hvg * ds
     res = None
     cos_sim = nn.CosineSimilarity(dim=1, eps=1e-6)
     for i in range(ds.size(1)):
@@ -775,6 +803,10 @@ def compute_quantile_scores(adata, n_pcs=30, n_neighbors=30):
     quantile_scores_2bit[:, :, 0] = csr_matrix.dot(conn_norm, quantile_scores_2bit[:, :, 0])
     quantile_scores_2bit[:, :, 1] = csr_matrix.dot(conn_norm, quantile_scores_2bit[:, :, 1])
 
+    if np.any(np.isnan(quantile_scores)):
+        print('nan found during ellipse fit')
+    if np.any(np.isinf(quantile_scores)):
+        print('inf found during ellipse fit')
     if np.any(np.isnan(quantile_scores_2bit)):
         print('nan found during ellipse fit')
     if np.any(np.isinf(quantile_scores_2bit)):
@@ -787,7 +819,7 @@ def compute_quantile_scores(adata, n_pcs=30, n_neighbors=30):
     perc_good = np.sum(quantile_gene) / adata.n_vars * 100
     print(f'{np.sum(quantile_gene)} out of {adata.n_vars} = {perc_good:.3g}% genes have good ellipse fits.')
 
-    adata.obs['quantile_score_sum'] = np.sum(adata[:, quantile_gene].layers['quantile_scores'], axis=1)
+    adata.obs['quantile_score_sum'] = np.sum(adata.layers['quantile_scores'][:, quantile_gene], axis=1)
     adata.var['quantile_genes'] = quantile_gene
 
 

@@ -10,9 +10,9 @@ from velovae.plotting import plot_train_loss, plot_test_loss
 from velovae.plotting_chrom import plot_sig_, plot_sig, plot_vel, plot_phase, plot_time
 from .model_util import hist_equal, convert_time, get_gene_index
 from .model_util import elbo_collapsed_categorical, assign_gene_mode_tprior
-from .model_util_chrom import pred_exp, pred_exp_backward, init_params, get_ts_global, reinit_params
+from .model_util_chrom import pred_exp, init_params, get_ts_global, reinit_params
 from .model_util_chrom import kl_gaussian, reparameterize, softplusinv, knnx0_index, get_x0
-from .model_util_chrom import cosine_similarity, find_dirichlet_param, assign_gene_mode
+from .model_util_chrom import loss_vel, cosine_similarity, find_dirichlet_param, assign_gene_mode
 from .transition_graph import encode_type
 from .training_data_chrom import SCData
 from .velocity_chrom import rna_velocity_vae
@@ -23,13 +23,14 @@ class Encoder(nn.Module):
                  Cin,
                  dim_z,
                  dim_cond=0,
+                 dim_reg=0,
                  N1=256,
                  t_network=False,
                  checkpoint=None):
         super(Encoder, self).__init__()
         self.t_network = t_network
 
-        self.fc1 = nn.Linear(Cin+dim_cond, N1)
+        self.fc1 = nn.Linear(Cin+dim_cond+dim_reg, N1)
         self.bn1 = nn.BatchNorm1d(N1)
         self.dpt1 = nn.Dropout(p=0.2)
         self.net1 = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1)
@@ -61,9 +62,11 @@ class Encoder(nn.Module):
             nn.init.xavier_uniform_(m.weight)
             nn.init.constant_(m.bias, 0.0)
 
-    def forward(self, data_in, condition=None):
+    def forward(self, data_in, condition=None, regressor=None):
         if condition is not None:
             data_in = torch.cat((data_in, condition), 1)
+        if regressor is not None:
+            data_in = torch.cat((data_in, regressor), 1)
         h = self.net1(data_in)
         mu_tx = self.fc_mu_t(h) if self.t_network else self.spt(self.fc_mu_t(h))
         std_tx = self.spt1(self.fc_std_t(h))
@@ -79,6 +82,7 @@ class Decoder(nn.Module):
                  train_idx,
                  dim_z,
                  dim_cond=0,
+                 dim_reg=0,
                  batch_idx=None,
                  ref_batch=None,
                  N1=256,
@@ -101,6 +105,7 @@ class Decoder(nn.Module):
         self.adata_atac = adata_atac
         self.train_idx = train_idx
         self.dim_cond = dim_cond
+        self.dim_reg = dim_reg
         if dim_cond == 1:
             dim_cond = 0
         self.cvae = True if dim_cond > 1 else False
@@ -119,20 +124,20 @@ class Decoder(nn.Module):
         self.init_key = init_key
         self.checkpoint = checkpoint
         self.tmax = tmax
-        self.construct_nn(dim_z, dim_cond, N1, p)
+        self.construct_nn(dim_z, dim_cond, dim_reg, N1, p)
 
-    def construct_nn(self, dim_z, dim_cond, N1, p):
+    def construct_nn(self, dim_z, dim_cond, dim_reg, N1, p):
         G = self.adata.n_vars
         self.set_shape(G, dim_cond)
 
-        self.fc1 = nn.Linear(dim_z+dim_cond, N1)
+        self.fc1 = nn.Linear(dim_z+dim_cond+dim_reg, N1)
         self.bn1 = nn.BatchNorm1d(N1)
         self.dpt1 = nn.Dropout(p=0.2)
         self.fc_out1 = nn.Linear(N1, G)
         self.net_rho = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1,
                                      self.fc_out1, nn.Sigmoid())
 
-        self.fc2 = nn.Linear(dim_z+dim_cond if self.parallel_arch else G, N1)
+        self.fc2 = nn.Linear(dim_z+dim_cond+dim_reg if self.parallel_arch else G, N1)
         self.bn2 = nn.BatchNorm1d(N1)
         self.dpt2 = nn.Dropout(p=0.2)
         self.fc_out2 = nn.Linear(N1, G)
@@ -236,7 +241,7 @@ class Decoder(nn.Module):
 
     def init_ode(self, c, u, s, p):
         G = self.adata.n_vars
-        print("Initialization using the steady-state and dynamical models.")
+        print("Initializing using the steady-state and dynamical models.")
         out = init_params(c, u, s, p, fit_scaling=True, global_std=self.global_std, tmax=self.tmax, rna_only=self.rna_only)
         alpha_c, alpha, beta, gamma, scaling_c, scaling_u, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, t, cpred, upred, spred = out
         scaling_s = np.ones_like(scaling_u)
@@ -341,6 +346,9 @@ class Decoder(nn.Module):
                     ui = u[self.batch[self.train_idx] == i]
                     si = s[self.batch[self.train_idx] == i]
                     filt = (si > 0) * (ui > 0) * (ci > 0)
+                    if np.any(np.sum(filt, axis=0) == 0):
+                        j = np.where(np.sum(filt, axis=0) == 0)[0]
+                        print(f'Warning: batch class {i} gene {j} has no valid data.')
                     ci[~filt] = np.nan
                     ui[~filt] = np.nan
                     si[~filt] = np.nan
@@ -352,14 +360,19 @@ class Decoder(nn.Module):
             offset_c = np.zeros((self.dim_cond, G))
             offset_u = np.zeros((self.dim_cond, G))
             offset_s = np.zeros((self.dim_cond, G))
+        if np.any(np.isnan(scaling_c)):
+            print('Warning: scaling_c invalid (nan).')
+        if np.any(np.isinf(scaling_c)):
+            print('Warning: scaling_c invalid (inf).')
         if np.any(np.isnan(scaling_u)):
-            print('scaling_u invalid nan')
+            print('Warning: scaling_u invalid (nan).')
         if np.any(np.isinf(scaling_u)):
-            print('scaling_u invalid inf')
+            print('Warning: scaling_u invalid (inf).')
         if np.any(np.isnan(scaling_s)):
-            print('scaling_s invalid nan')
+            print('Warning: scaling_s invalid (nan).')
         if np.any(np.isinf(scaling_s)):
-            print('scaling_s invalid inf')
+            print('Warning: scaling_s invalid (inf).')
+        scaling_c[np.isnan(scaling_c)] = 1.0
         scaling_u[np.isnan(scaling_u)] = 1.0
         scaling_s[np.isnan(scaling_s)] = 1.0
 
@@ -484,25 +497,21 @@ class Decoder(nn.Module):
 
         return alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s, offset_c, offset_u, offset_s
 
-    def forward(self, t, z, c0=None, u0=None, s0=None, t0=None, condition=None, neg_slope=0.0, sample=True, four_basis=False, return_velocity=False, use_input_time=False, backward=False):
+    def forward(self, t, z, c0=None, u0=None, s0=None, t0=None, condition=None, regressor=None, neg_slope=0.0, sample=True, four_basis=False, return_velocity=False, use_input_time=False):
         alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s, offset_c, offset_u, offset_s = self.reparameterize(condition, sample, four_basis)
-        if condition is None:
-            self.rho = self.net_rho(z)
-            if self.rna_only:
-                self.kc = torch.ones_like(self.rho)
-            else:
-                self.kc = self.net_kc(z if self.parallel_arch else self.rho)
+
+        z_in = z
+        if condition is not None:
+            z_in = torch.cat((z_in, condition), 1)
+        if regressor is not None:
+            z_in = torch.cat((z_in, regressor), 1)
+        self.rho = self.net_rho(z_in)
+        if self.rna_only:
+            self.kc = torch.ones_like(self.rho)
         else:
-            self.rho = self.net_rho(torch.cat((z, condition), 1))
-            if self.rna_only:
-                self.kc = torch.ones_like(self.rho)
-            else:
-                self.kc = self.net_kc(torch.cat((z, condition), 1) if self.parallel_arch else self.rho)
+            self.kc = self.net_kc(z_in if self.parallel_arch else self.rho)
+
         t_ = self.net_t(t) if self.t_network and (not use_input_time) else t
-        if backward:
-            pred_func = pred_exp_backward
-        else:
-            pred_func = pred_exp
         if (c0 is None) or (u0 is None) or (s0 is None) or (t0 is None):
             if four_basis:
                 zero_mtx = torch.zeros_like(self.rho)
@@ -512,13 +521,6 @@ class Decoder(nn.Module):
                 u0 = torch.stack([self.zero_vec, self.u0.exp() if self.log_params else self.u0, self.zero_vec, self.u0.exp() if self.log_params else self.u0])
                 s0 = torch.stack([self.zero_vec, self.s0.exp() if self.log_params else self.s0, self.zero_vec, self.s0.exp() if self.log_params else self.s0])
                 tau = torch.stack([F.leaky_relu(t_ - self.ton, neg_slope) for i in range(4)], 1)
-            elif backward:
-                kc = self.kc
-                rho = self.rho
-                c0 = torch.ones_like(alpha) * 1e-10
-                u0 = torch.ones_like(alpha) * 1e-10
-                s0 = torch.ones_like(alpha) * 1e-10
-                tau = 1 - F.leaky_relu(t_ - self.ton, neg_slope)
             else:
                 kc = self.kc
                 rho = self.rho
@@ -542,28 +544,29 @@ class Decoder(nn.Module):
                 else:
                     c0 = torch.mm(condition * mask_flip, c0) + torch.mm(condition * mask, torch.ones_like(c0))
 
-            chat, uhat, shat = pred_func(tau,
-                                         c0,
-                                         u0,
-                                         s0,
-                                         kc,
-                                         alpha_c,
-                                         rho,
-                                         alpha,
-                                         beta,
-                                         gamma)
+            chat, uhat, shat = pred_exp(tau,
+                                        c0,
+                                        u0,
+                                        s0,
+                                        kc,
+                                        alpha_c,
+                                        rho,
+                                        alpha,
+                                        beta,
+                                        gamma)
 
         else:
-            chat, uhat, shat = pred_func(F.leaky_relu(t_ - t0, neg_slope),
-                                         (c0-offset_c)/scaling_c,
-                                         (u0-offset_u)/scaling_u,
-                                         (s0-offset_s)/scaling_s,
-                                         self.kc,
-                                         alpha_c,
-                                         self.rho,
-                                         alpha,
-                                         beta,
-                                         gamma)
+            tau = F.leaky_relu(t_ - t0, neg_slope)
+            chat, uhat, shat = pred_exp(tau,
+                                        (c0-offset_c)/scaling_c,
+                                        (u0-offset_u)/scaling_u,
+                                        (s0-offset_s)/scaling_s,
+                                        self.kc,
+                                        alpha_c,
+                                        self.rho,
+                                        alpha,
+                                        beta,
+                                        gamma)
             if len(self.rna_only_idx) > 0 and condition is not None:
                 mask = np.in1d(np.arange(self.dim_cond), self.rna_only_idx)
                 mask = torch.tensor(mask, device=chat.device).int()
@@ -588,6 +591,8 @@ class VAEChrom():
                  dim_z=None,
                  batch_key=None,
                  ref_batch=None,
+                 batch_hvg_key=None,
+                 var_to_regress=None,
                  device='cpu',
                  hidden_size=256,
                  batch_size=256,
@@ -660,6 +665,8 @@ class VAEChrom():
             "four_basis": four_basis,
             "batch_key": batch_key,
             "ref_batch": ref_batch,
+            "batch_hvg_key": batch_hvg_key,
+            "var_to_regress": var_to_regress,
             "reinit_params": reinit_params,
             "init_ton_zero": init_ton_zero,
             "unit_scale": unit_scale,
@@ -692,7 +699,8 @@ class VAEChrom():
             "kl_z": 1.0,
             "kl_w": 0.01,
             "kl_param": 0.1,
-            "reg_forward": 10.0,
+            "reg_param_batch": 1.0,
+            "reg_forward": 1.0,
             "reg_cos": 0.0,
             "test_iter": None,
             "save_epoch": 50,
@@ -716,9 +724,21 @@ class VAEChrom():
 
         self.set_device(device)
         self.split_train_test(adata.n_obs)
-        self.encode_batch(adata)
+        self.encode_batch(adata, batch_key, ref_batch, batch_hvg_key)
+        self.init_regressor(adata, var_to_regress)
         self.set_lr(adata, adata_atac, learning_rate)
         self.get_prior(adata)
+
+        if cluster_key is not None and cluster_key in self.adata.obs.keys():
+            self.cell_labels_raw = self.adata.obs[cluster_key].to_numpy() if cluster_key in self.adata.obs else np.array(['Unknown' for i in range(self.adata.n_obs)])
+            self.cell_types_raw = np.unique(self.cell_labels_raw)
+            self.label_dic, self.label_dic_rev = encode_type(self.cell_types_raw)
+
+            self.n_type = len(self.cell_types_raw)
+            self.cell_labels = np.array([self.label_dic[x] for x in self.cell_labels_raw])
+            self.cell_types = np.array([self.label_dic[self.cell_types_raw[i]] for i in range(self.n_type)])
+        else:
+            self.cell_labels = np.full(self.adata.n_obs, '')
 
         self.rna_only_idx = np.array(self.config['rna_only_idx'])
         if not self.enable_cvae and len(self.rna_only_idx) == 1 and self.rna_only_idx[0] == 0:
@@ -729,6 +749,7 @@ class VAEChrom():
         self.encoder = Encoder(3*self.adata.n_vars,
                                self.config['dim_z'],
                                dim_cond=self.n_batch,
+                               dim_reg=(0 if self.var_to_regress is None else self.var_to_regress.shape[1]),
                                N1=hidden_size,
                                t_network=t_network,
                                checkpoint=checkpoints[0]).float().to(self.device)
@@ -738,6 +759,7 @@ class VAEChrom():
                                self.train_idx,
                                self.config['dim_z'],
                                dim_cond=self.n_batch,
+                               dim_reg=(0 if self.var_to_regress is None else self.var_to_regress.shape[1]),
                                batch_idx=self.batch_,
                                ref_batch=self.ref_batch,
                                N1=hidden_size,
@@ -780,7 +802,6 @@ class VAEChrom():
         self.n_drop = 0
 
         self.clip_fn = nn.Hardtanh(-1e30, 1e30)
-        self.cossim = nn.CosineSimilarity(dim=1, eps=1e-6)
 
         if full_vb:
             self.p_log_alpha_c = torch.tensor([[2.5], [0.5]], dtype=torch.float, device=self.device)
@@ -790,7 +811,7 @@ class VAEChrom():
             self.p_params = [self.p_log_alpha_c, self.p_log_alpha, self.p_log_beta, self.p_log_gamma]
 
         if plot_init:
-            self.plot_initial(gene_plot, cluster_key, figure_path, embed)
+            self.plot_initial(gene_plot, figure_path, embed)
 
     def set_device(self, device):
         if 'cuda' in device:
@@ -828,38 +849,41 @@ class VAEChrom():
         self.train_idx = rand_perm[:n_train]
         self.test_idx = rand_perm[n_train:]
 
-    def encode_batch(self, adata):
+    def encode_batch(self, adata, batch_key, ref_batch, batch_hvg_key=None):
         self.n_batch = 0
         self.batch = None
         self.batch_ = None
         batch_count = None
-        self.ref_batch = self.config['ref_batch']
-        if self.config['batch_key'] is not None and self.config['batch_key'] in adata.obs:
+        self.ref_batch = ref_batch
+        if batch_key is not None and batch_key in adata.obs.keys():
             print('CVAE enabled. Performing batch effect correction.')
-            batch_raw = adata.obs[self.config['batch_key']].to_numpy()
-            batch_names_raw, batch_count = np.unique(batch_raw, return_counts=True)
-            self.batch_dic, self.batch_dic_rev = encode_type(batch_names_raw)
-            self.n_batch = len(batch_names_raw)
+            batch_raw = adata.obs[batch_key].to_numpy()
+            if adata.obs[batch_key].dtype.name == 'category':
+                self.batch_names_raw = adata.obs[batch_key].cat.categories.to_numpy()
+                batch_count = adata.obs[batch_key].value_counts()[self.batch_names_raw].to_numpy()
+            else:
+                self.batch_names_raw, batch_count = np.unique(batch_raw, return_counts=True)
+            self.batch_dic, self.batch_dic_rev = encode_type(self.batch_names_raw)
+            self.n_batch = len(self.batch_names_raw)
             self.batch_ = np.array([self.batch_dic[x] for x in batch_raw])
             self.batch = torch.tensor(self.batch_, dtype=int, device=self.device)
-            self.batch_names = np.array([self.batch_dic[batch_names_raw[i]] for i in range(self.n_batch)])
         if isinstance(self.ref_batch, int):
             if self.ref_batch >= self.n_batch:
                 self.ref_batch = self.n_batch - 1
             elif self.ref_batch < -self.n_batch:
                 self.ref_batch = 0
-            print(f'Reference batch set to {self.ref_batch} ({batch_names_raw[self.ref_batch]}).')
-            if np.issubdtype(batch_names_raw.dtype, np.number) and 0 not in batch_names_raw:
+            print(f'Reference batch set to {self.ref_batch} ({self.batch_names_raw[self.ref_batch]}).')
+            if np.issubdtype(self.batch_names_raw.dtype, np.number) and 0 not in self.batch_names_raw:
                 print('Warning: integer batch names do not start from 0. Reference batch index may not match the actual batch name!')
         elif isinstance(self.ref_batch, str):
-            if self.config['ref_batch'] in batch_names_raw:
+            if self.config['ref_batch'] in self.batch_names_raw:
                 self.ref_batch = self.batch_dic[self.config['ref_batch']]
-                print(f'Reference batch set to {self.ref_batch} ({batch_names_raw[self.ref_batch]}).')
+                print(f'Reference batch set to {self.ref_batch} ({self.batch_names_raw[self.ref_batch]}).')
             else:
                 raise ValueError('Reference batch not found in the provided batch field!')
         elif batch_count is not None:
-            self.ref_batch = self.batch_names[np.argmax(batch_count)]
-            print(f'Reference batch set to {self.ref_batch} ({batch_names_raw[self.ref_batch]}).')
+            self.ref_batch = 0
+            print(f'Reference batch set to {self.ref_batch} ({self.batch_names_raw[self.ref_batch]}).')
         self.enable_cvae = self.n_batch > 0
         if self.config['dim_z'] is not None:
             if self.enable_cvae and 2*self.n_batch > self.config['dim_z']:
@@ -875,6 +899,44 @@ class VAEChrom():
                 dim_z += 1
             self.config['dim_z'] = dim_z
             print(f'Latent dimension set to {dim_z}.')
+        self.batch_hvg_genes = np.ones((self.n_batch, self.adata.n_vars), dtype=bool)
+        if batch_hvg_key is not None:
+            for batch in self.batch_names_raw:
+                if f"{batch_hvg_key}-{batch}" in adata.var.keys():
+                    self.batch_hvg_genes[self.batch_dic[batch]] = adata.var[f"{batch_hvg_key}-{batch}"].to_numpy()
+                else:
+                    print(f'Warning: highly variable genes for batch {batch} not found in var:batch_{batch_hvg_key}. All genes will be used for batch {batch}.')
+                    self.batch_hvg_genes[self.batch_dic[batch]] = True
+        self.batch_hvg_genes = torch.tensor(self.batch_hvg_genes, dtype=torch.float, device=self.device)
+        self.batch_count_balance = None
+        if batch_count is not None:
+            self.batch_count_balance = torch.tensor(batch_count / batch_count[self.ref_batch], dtype=torch.float, device=self.device)
+
+    def init_regressor(self, adata, var_to_regress):
+        self.var_to_regress = None
+        if isinstance(var_to_regress, str):
+            if var_to_regress in adata.obs.keys():
+                self.var_to_regress = adata.obs[var_to_regress].to_numpy()[:, None]
+                print(f'Found {var_to_regress} in obs. Regressing it out.')
+        elif isinstance(var_to_regress, (list, tuple, np.ndarray)):
+            var_found = []
+            var_not_found = []
+            for x in var_to_regress:
+                if isinstance(x, str) and x in adata.obs.keys():
+                    var = adata.obs[x].to_numpy()[:, None]
+                    var = (var - var.mean()) / var.std()
+                    if self.var_to_regress is None:
+                        self.var_to_regress = var
+                    else:
+                        self.var_to_regress = np.concatenate((self.var_to_regress, var), axis=1)
+                    var_found.append(x)
+                else:
+                    var_not_found.append(x)
+            print(f'Found {var_found}. Regressing them out.')
+            if len(var_not_found) > 0:
+                print(f'Warning: Variables {var_not_found} not found and will be ignored.')
+        if self.var_to_regress is not None:
+            self.var_to_regress = torch.tensor(self.var_to_regress, dtype=torch.float, device=self.device)
 
     def set_lr(self, adata, adata_atac, learning_rate):
         if learning_rate is None:
@@ -932,17 +994,11 @@ class VAEChrom():
                 self.config[key] = config[key]
                 print(f"Warning: unknown hyperparameter: {key}")
 
-    def plot_initial(self, gene_plot, cluster_key="clusters", figure_path="figures", embed=None):
-        cell_labels_raw = self.adata.obs[cluster_key].to_numpy() if cluster_key in self.adata.obs else np.array(['Unknown' for i in range(self.adata.n_obs)])
-        cell_types_raw = np.unique(cell_labels_raw)
-        label_dic, _ = encode_type(cell_types_raw)
-
-        cell_labels = np.array([label_dic[x] for x in cell_labels_raw])[self.train_idx]
-
+    def plot_initial(self, gene_plot, figure_path="figures", embed=None):
         gind, gene_plot = get_gene_index(self.adata.var_names, gene_plot)
         os.makedirs(figure_path, exist_ok=True)
 
-        onehot = F.one_hot(self.batch.detach()[self.train_idx], self.n_batch).float() if self.enable_cvae else None
+        onehot = F.one_hot(self.batch[self.train_idx], self.n_batch).float() if self.enable_cvae else None
         scaling_c = self.decoder.get_param_1d('scaling_c', onehot, False, False, mask_idx=self.rna_only_idx, mask_to=1, detach=True).cpu().numpy()
         scaling_u = self.decoder.get_param_1d('scaling_u', onehot, False, False, detach=True).cpu().numpy()
         scaling_s = self.decoder.get_param_1d('scaling_s', onehot, False, False, mask_idx=self.ref_batch, detach=True).cpu().numpy()
@@ -978,7 +1034,7 @@ class VAEChrom():
                      chat[:, i],
                      uhat[:, i],
                      shat[:, i],
-                     cell_labels_raw[self.train_idx],
+                     self.cell_labels_raw[self.train_idx],
                      gene_plot[i],
                      save=f"{figure_path}/sig-{gene_plot[i].replace('.', '-')}-init.png",
                      sparsify=self.config['sparsify'])
@@ -990,7 +1046,7 @@ class VAEChrom():
                      (chat[:, i] - offset_c_) / scaling_c_,
                      (uhat[:, i] - offset_u_) / scaling_u_,
                      (shat[:, i] - offset_s_) / scaling_s_,
-                     cell_labels_raw[self.train_idx],
+                     self.cell_labels_raw[self.train_idx],
                      gene_plot[i],
                      save=f"{figure_path}/sigscaled-{gene_plot[i].replace('.', '-')}-init.png",
                      sparsify=self.config['sparsify'])
@@ -1005,8 +1061,7 @@ class VAEChrom():
                        'cu',
                        None,
                        None,
-                       cell_labels,
-                       cell_types_raw,
+                       self.cell_labels_raw[self.train_idx],
                        save=f"{figure_path}/phase-{gene_plot[i].replace('.', '-')}-init-cu.png")
 
             plot_phase(c[:, i],
@@ -1019,8 +1074,7 @@ class VAEChrom():
                        'us',
                        None,
                        None,
-                       cell_labels,
-                       cell_types_raw,
+                       self.cell_labels_raw[self.train_idx],
                        save=f"{figure_path}/phase-{gene_plot[i].replace('.', '-')}-init-us.png")
 
             plot_phase((c[:, i] - offset_c_) / scaling_c_,
@@ -1033,8 +1087,7 @@ class VAEChrom():
                        'cu',
                        None,
                        None,
-                       cell_labels,
-                       cell_types_raw,
+                       self.cell_labels_raw[self.train_idx],
                        save=f"{figure_path}/phasescaled-{gene_plot[i].replace('.', '-')}-init-cu.png")
 
             plot_phase((c[:, i] - offset_c_) / scaling_c_,
@@ -1047,11 +1100,10 @@ class VAEChrom():
                        'us',
                        None,
                        None,
-                       cell_labels,
-                       cell_types_raw,
+                       self.cell_labels_raw[self.train_idx],
                        save=f"{figure_path}/phasescaled-{gene_plot[i].replace('.', '-')}-init-us.png")
 
-    def forward(self, data_in, t=None, z=None, c0=None, u0=None, s0=None, t0=None, t1=None, condition=None, sample=True):
+    def forward(self, data_in, t=None, z=None, c0=None, u0=None, s0=None, t0=None, t1=None, condition=None, regressor=None, sample=True):
         if self.config['unit_scale']:
             sigma_c = self.decoder.sigma_c
             sigma_u = self.decoder.sigma_u
@@ -1069,7 +1121,7 @@ class VAEChrom():
             data_in_scale = torch.cat(((data_in[:, :data_in.shape[1]//3]-offset_c)/scaling_c,
                                        (data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]-offset_u)/scaling_u,
                                        (data_in[:, data_in.shape[1]//3*2:]-offset_s)/scaling_s), 1)
-        mu_t, std_t, mu_z, std_z = self.encoder.forward(data_in_scale, condition)
+        mu_t, std_t, mu_z, std_z = self.encoder.forward(data_in_scale, condition, regressor)
         if t is None or z is None:
             if sample and not self.use_knn:
                 t = reparameterize(mu_t, std_t)
@@ -1086,6 +1138,7 @@ class VAEChrom():
                                                                     s0,
                                                                     t0,
                                                                     condition,
+                                                                    regressor,
                                                                     neg_slope=self.config["neg_slope"],
                                                                     sample=sample,
                                                                     return_velocity=True,
@@ -1097,6 +1150,7 @@ class VAEChrom():
                                                                                      shat,
                                                                                      t_,
                                                                                      condition,
+                                                                                     regressor,
                                                                                      neg_slope=self.config["neg_slope"],
                                                                                      sample=sample,
                                                                                      return_velocity=True,
@@ -1109,25 +1163,13 @@ class VAEChrom():
                                                         s0,
                                                         t0,
                                                         condition,
+                                                        regressor,
                                                         neg_slope=self.config["neg_slope"],
                                                         four_basis=self.config["four_basis"] if not self.use_knn else False,
                                                         sample=sample,
                                                         use_input_time=self.use_knn)
             chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = None, None, None, None, None, None, None, None, None
         return mu_t, std_t, mu_z, std_z, chat, uhat, shat, t_, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw
-
-    def loss_vel(self, c0, chat, vc, u0, uhat, vu, s0, shat, vs, condition=None):
-        if self.config['rna_only']:
-            delta_x = torch.cat([uhat-u0, shat-s0], 1)
-            v = torch.cat([vu, vs], 1)
-        else:
-            if len(self.rna_only_idx) > 0 and condition is not None:
-                mask = np.in1d(np.arange(self.n_batch), self.rna_only_idx)
-                c0 = c0 * condition[:, ~mask] + torch.ones_like(c0) * condition[:, mask]
-                chat = chat * condition[:, ~mask] + torch.ones_like(chat) * condition[:, mask]
-            delta_x = torch.cat([chat-c0, uhat-u0, shat-s0], 1)
-            v = torch.cat([vc, vu, vs], 1)
-        return self.cossim(delta_x, v).mean()
 
     def vae_risk(self,
                  q_tx,
@@ -1189,11 +1231,27 @@ class VAEChrom():
             logp += 0.5*((u1 - uhat_fw)/sigma_u).pow(2)
             logp += 0.5*((s1 - shat_fw)/sigma_s).pow(2)
 
-        err_rec = torch.mean(torch.sum(logp, 1))
+        w_hvg = None
+        if condition is not None:
+            w_hvg = torch.mm(condition, self.batch_hvg_genes)
+            logp = w_hvg * logp
+
+        err_rec_n = logp.mean(1) * self.adata.n_vars
+        if condition is not None:
+            err_rec_n = err_rec_n / (condition * self.batch_count_balance).sum(1)
+        err_rec = err_rec_n.mean()
 
         loss = err_rec + self.config["kl_t"]*kldt + self.config["kl_z"]*kldz
 
         self.global_counter += 1
+
+        if condition is not None:
+            params_eval = ['alpha', 'beta', 'gamma'] if self.config['rna_only'] else ['alpha_c', 'alpha', 'beta', 'gamma']
+            for x in params_eval:
+                for i in range(self.n_batch):
+                    if i != self.ref_batch:
+                        loss += self.config['reg_param_batch'] * (self.decoder.get_param(x, idx=((i, 0) if self.config['is_full_vb'] else i)) -
+                                                                  self.decoder.get_param(x, idx=((self.ref_batch, 0) if self.config['is_full_vb'] else self.ref_batch))).pow(2).mean()
 
         if not self.use_knn and self.config["four_basis"]:
             kldw = elbo_collapsed_categorical(self.decoder.logit_pw, self.alpha_w, 4, self.decoder.scaling_u.shape[0])
@@ -1227,23 +1285,26 @@ class VAEChrom():
             offset_c = self.decoder.get_param_1d('offset_c', condition, False, False, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False)
             offset_u = self.decoder.get_param_1d('offset_u', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
             offset_s = self.decoder.get_param_1d('offset_s', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
-            forward_loss = (self.loss_vel((c0-offset_c)/scaling_c, (chat-offset_c)/scaling_c, vc,
-                                          (u0-offset_u)/scaling_u, (uhat-offset_u)/scaling_u, vu,
-                                          (s0-offset_s)/scaling_s, (shat-offset_s)/scaling_s, vs,
-                                          condition)
-                            + self.loss_vel((chat-offset_c)/scaling_c, (chat_fw-offset_c)/scaling_c, vc_fw,
-                                            (uhat-offset_u)/scaling_u, (uhat_fw-offset_u)/scaling_u, vu_fw,
-                                            (shat-offset_s)/scaling_s, (shat_fw-offset_s)/scaling_s, vs_fw,
-                                            condition))
+            forward_loss = (loss_vel((c0-offset_c)/scaling_c, (chat-offset_c)/scaling_c, vc,
+                                     (u0-offset_u)/scaling_u, (uhat-offset_u)/scaling_u, vu,
+                                     (s0-offset_s)/scaling_s, (shat-offset_s)/scaling_s, vs,
+                                     self.config['rna_only'], self.rna_only_idx, condition, w_hvg=w_hvg)
+                            + loss_vel((chat-offset_c)/scaling_c, (chat_fw-offset_c)/scaling_c, vc_fw,
+                                       (uhat-offset_u)/scaling_u, (uhat_fw-offset_u)/scaling_u, vu_fw,
+                                       (shat-offset_s)/scaling_s, (shat_fw-offset_s)/scaling_s, vs_fw,
+                                       self.config['rna_only'], self.rna_only_idx, condition, w_hvg=w_hvg))
+            if condition is not None:
+                forward_loss = forward_loss / (condition * self.batch_count_balance).sum(1)
+            forward_loss = forward_loss.mean()
             loss = loss - self.config["reg_forward"]*forward_loss
 
-        if self.reg_velocity:
+        if self.reg_velocity and s_knn is not None:
             scaling_u = self.decoder.get_param_1d('scaling_u', condition, False, False)
             scaling_s = self.decoder.get_param_1d('scaling_s', condition, False, False, mask_idx=self.ref_batch)
             offset_u = self.decoder.get_param_1d('offset_u', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
             offset_s = self.decoder.get_param_1d('offset_s', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
             _, _, beta, gamma, _, _, _ = self.decoder.reparameterize(condition, sample)
-            cos_sim = cosine_similarity((uhat-offset_u)/scaling_u, (shat-offset_s)/scaling_s, beta, gamma, s_knn)
+            cos_sim = cosine_similarity((uhat-offset_u)/scaling_u, (shat-offset_s)/scaling_s, beta, gamma, s_knn, w_hvg=w_hvg)
             loss = loss - self.config["reg_cos"]*cos_sim
 
         return loss, err_rec, self.config["kl_t"]*kldt, self.config["kl_z"]*kldz
@@ -1316,7 +1377,8 @@ class VAEChrom():
                 p_t = self.p_t[:, batch_idx, :]
                 p_z = self.p_z[:, batch_idx, :]
                 onehot = F.one_hot(batch[batch_idx], self.n_batch).float() if self.enable_cvae else None
-                out = self.forward(data_in, t, z, c0, u0, s0, t0, t1, onehot, sample=False)
+                regressor = self.var_to_regress[batch_idx] if self.var_to_regress is not None else None
+                out = self.forward(data_in, t, z, c0, u0, s0, t0, t1, onehot, regressor, sample=False)
                 mu_tx, std_tx, mu_zx, std_zx, chat, uhat, shat, t_, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = out
 
                 loss = self.vae_risk((mu_tx, std_tx),
@@ -1442,7 +1504,7 @@ class VAEChrom():
 
         if plot:
             cell_idx = self.test_idx if test_mode else self.train_idx
-            onehot = F.one_hot(self.batch.detach()[cell_idx], self.n_batch).float() if self.enable_cvae else None
+            onehot = F.one_hot(self.batch[cell_idx], self.n_batch).float() if self.enable_cvae else None
             scaling_c = self.decoder.get_param_1d('scaling_c', onehot, False, False, mask_idx=self.rna_only_idx, mask_to=1, detach=True).cpu().numpy()
             scaling_u = self.decoder.get_param_1d('scaling_u', onehot, False, False, detach=True).cpu().numpy()
             scaling_s = self.decoder.get_param_1d('scaling_s', onehot, False, False, mask_idx=self.ref_batch, detach=True).cpu().numpy()
@@ -1476,7 +1538,7 @@ class VAEChrom():
                          chat[:, i],
                          uhat[:, i],
                          shat[:, i],
-                         np.array([self.label_dic_rev[x] for x in dataset.labels]),
+                         self.cell_labels_raw[cell_idx.detach().cpu().numpy()],
                          gene_plot[i],
                          save=f"{path}/sig-{gene_plot[i].replace('.', '-')}-{testid_str}.png",
                          sparsify=self.config['sparsify'])
@@ -1488,7 +1550,7 @@ class VAEChrom():
                          (chat[:, i] - offset_c_) / scaling_c_,
                          (uhat[:, i] - offset_u_) / scaling_u_,
                          (shat[:, i] - offset_s_) / scaling_s_,
-                         np.array([self.label_dic_rev[x] for x in dataset.labels]),
+                         self.cell_labels_raw[cell_idx.detach().cpu().numpy()],
                          gene_plot[i],
                          save=f"{path}/sigscaled-{gene_plot[i].replace('.', '-')}-{testid_str}.png",
                          sparsify=self.config['sparsify'])
@@ -1513,7 +1575,7 @@ class VAEChrom():
                              out["chat_fw"][:, i],
                              out["uhat_fw"][:, i],
                              out["shat_fw"][:, i],
-                             np.array([self.label_dic_rev[x] for x in dataset.labels]),
+                             self.cell_labels_raw[cell_idx.detach().cpu().numpy()],
                              gene_plot[i],
                              save=f"{path}/sig-{gene_plot[i].replace('.', '-')}-{testid_str}-bw.png",
                              sparsify=self.config['sparsify'])
@@ -1525,7 +1587,7 @@ class VAEChrom():
                              (out["chat_fw"][:, i] - offset_c_) / scaling_c_,
                              (out["uhat_fw"][:, i] - offset_u_) / scaling_u_,
                              (out["shat_fw"][:, i] - offset_s_) / scaling_s_,
-                             np.array([self.label_dic_rev[x] for x in dataset.labels]),
+                             self.cell_labels_raw[cell_idx.detach().cpu().numpy()],
                              gene_plot[i],
                              save=f"{path}/sigscaled-{gene_plot[i].replace('.', '-')}-{testid_str}-bw.png",
                              sparsify=self.config['sparsify'])
@@ -1562,7 +1624,7 @@ class VAEChrom():
             if optimizer2 is not None:
                 optimizer2.zero_grad()
 
-            xbatch, idx = batch[0], batch[2]
+            xbatch, idx = batch[0], batch[1]
             batch_idx = self.train_idx[idx]
 
             c0 = self.c0[batch_idx] if self.use_knn else None
@@ -1574,8 +1636,9 @@ class VAEChrom():
             z = self.z[batch_idx] if self.use_knn else None
             p_t = self.p_t[:, batch_idx, :]
             p_z = self.p_z[:, batch_idx, :]
-            onehot = F.one_hot(batch[3], self.n_batch).float() if self.enable_cvae else None
-            out = self.forward(xbatch, t, z, c0, u0, s0, t0, t1, onehot)
+            onehot = F.one_hot(self.batch[batch_idx], self.n_batch).float() if self.enable_cvae else None
+            regressor = self.var_to_regress[batch_idx] if self.var_to_regress is not None else None
+            out = self.forward(xbatch, t, z, c0, u0, s0, t0, t1, onehot, regressor)
             mu_tx, std_tx, mu_zx, std_zx, chat, uhat, shat, t_, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = out
 
             loss = self.vae_risk((mu_tx, std_tx),
@@ -1716,7 +1779,6 @@ class VAEChrom():
               config={},
               plot=False,
               gene_plot=[],
-              cluster_key="clusters",
               figure_path="figures",
               embed="umap"):
         self.update_config(config)
@@ -1741,29 +1803,12 @@ class VAEChrom():
 
         G = X.shape[1]
 
-        if cluster_key is not None:
-            cell_labels_raw = self.adata.obs[cluster_key].to_numpy() if cluster_key in self.adata.obs else np.array(['Unknown' for i in range(self.adata.n_obs)])
-            self.cell_types_raw = np.unique(cell_labels_raw)
-            self.label_dic, self.label_dic_rev = encode_type(self.cell_types_raw)
-
-            self.n_type = len(self.cell_types_raw)
-            self.cell_labels = np.array([self.label_dic[x] for x in cell_labels_raw])
-            self.cell_types = np.array([self.label_dic[self.cell_types_raw[i]] for i in range(self.n_type)])
-        else:
-            self.cell_labels = np.full(self.adata.n_obs, '')
-
         print("*********      Creating Training and Validation Datasets      *********")
-        train_set = SCData(X[self.train_idx],
-                           self.cell_labels[self.train_idx],
-                           batch=self.batch[self.train_idx] if self.enable_cvae else None,
-                           device=self.device)
+        train_set = SCData(X[self.train_idx], device=self.device)
 
         test_set = None
         if len(self.test_idx) > 0:
-            test_set = SCData(X[self.test_idx],
-                              self.cell_labels[self.test_idx],
-                              batch=self.batch[self.test_idx] if self.enable_cvae else None,
-                              device=self.device)
+            test_set = SCData(X[self.test_idx], device=self.device)
 
         data_loader = torch.utils.data.DataLoader(train_set, batch_size=self.config["batch_size"], shuffle=True)
         if self.config["test_iter"] is None:
@@ -1893,7 +1938,7 @@ class VAEChrom():
                                   c_plot,
                                   u_plot,
                                   s_plot,
-                                  cell_labels=cell_labels_raw[train_idx],
+                                  cell_labels=self.cell_labels_raw[train_idx],
                                   tpred=t0_plot,
                                   cpred=c0_plot,
                                   upred=u0_plot,
@@ -1998,7 +2043,7 @@ class VAEChrom():
                               c0_plot,
                               u0_plot,
                               s0_plot,
-                              cell_labels=cell_labels_raw[self.train_idx.detach().cpu().numpy()],
+                              cell_labels=self.cell_labels_raw[self.train_idx.detach().cpu().numpy()],
                               title=gene_plot[i],
                               save=f"{figure_path}/sigx0-{gene_plot[i].replace('.', '-')}-updated.png")
 
@@ -2187,20 +2232,18 @@ class VAEChrom():
             for n in range(Nb):
                 i = n*B
                 j = min([(n+1)*B, uhat.shape[0]])
+                z_in = torch.tensor(z[i:j], dtype=torch.float, device=self.device)
                 if self.enable_cvae:
-                    y_onehot = F.one_hot(self.batch.detach()[i:j], self.n_batch).float()
-                    z_onehot = torch.cat((torch.tensor(z[i:j], dtype=torch.float, device=self.device), y_onehot), 1)
-                    rho_batch = self.decoder.net_rho(z_onehot)
-                    if self.config['rna_only']:
-                        kc_batch = torch.full_like(rho_batch, 1.0)
-                    else:
-                        kc_batch = self.decoder.net_kc(z_onehot if self.config["indicator_arch"] == 'parallel' else rho_batch)
+                    y_in = F.one_hot(self.batch[i:j], self.n_batch).float()
+                    z_in = torch.cat((z_in, y_in), 1)
+                if self.var_to_regress is not None:
+                    r_in = self.var_to_regress[i:j]
+                    z_in = torch.cat((z_in, r_in), 1)
+                rho_batch = self.decoder.net_rho(z_in)
+                if self.config['rna_only']:
+                    kc_batch = torch.full_like(rho_batch, 1.0)
                 else:
-                    rho_batch = self.decoder.net_rho(torch.tensor(z[i:j], dtype=torch.float, device=self.device))
-                    if self.config['rna_only']:
-                        kc_batch = torch.full_like(rho_batch, 1.0)
-                    else:
-                        kc_batch = self.decoder.net_kc(torch.tensor(z[i:j], dtype=torch.float, device=self.device) if self.config["indicator_arch"] == 'parallel' else rho_batch)
+                    kc_batch = self.decoder.net_kc(z_in if self.config["indicator_arch"] == 'parallel' else rho_batch)
                 rho[i:j] = rho_batch.detach().cpu().numpy()
                 kc[i:j] = kc_batch.detach().cpu().numpy()
 

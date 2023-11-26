@@ -1,3 +1,4 @@
+from scipy import sparse
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
@@ -377,30 +378,31 @@ def plot_phase(c, u, s,
                by='us',
                t=None,
                track_idx=None,
-               labels=None,
-               types=None,
+               cell_labels=None,
                save=None,
                plot_pred=True,
                show=False):
     fig, ax = plt.subplots(figsize=(6, 6), facecolor='white')
-    if labels is None or types is None:
+    if cell_labels is None:
         if by == 'us':
             ax.scatter(s, u, c="b", alpha=0.5)
         else:
             ax.scatter(u, c, c="b", alpha=0.5)
     else:
-        colors = get_colors(len(types), None)
-        for i, type_ in enumerate(types):
+        cell_types = np.unique(cell_labels)
+        colors = get_colors(len(cell_types), None)
+        for i, type_ in enumerate(cell_types):
+            mask_type = cell_labels == type_
             if by == 'us':
                 if t is not None:
-                    ax.scatter(s[labels == i], u[labels == i], color=colors[i % len(colors)], alpha=0.2, label=type_, s=10)
+                    ax.scatter(s[mask_type], u[mask_type], color=colors[i % len(colors)], alpha=0.2, label=type_, s=10)
                 else:
-                    ax.scatter(s[labels == i], u[labels == i], color=colors[i % len(colors)], alpha=0.4, label=type_)
+                    ax.scatter(s[mask_type], u[mask_type], color=colors[i % len(colors)], alpha=0.4, label=type_)
             else:
                 if t is not None:
-                    ax.scatter(u[labels == i], c[labels == i], color=colors[i % len(colors)], alpha=0.2, label=type_, s=10)
+                    ax.scatter(u[mask_type], c[mask_type], color=colors[i % len(colors)], alpha=0.2, label=type_, s=10)
                 else:
-                    ax.scatter(u[labels == i], c[labels == i], color=colors[i % len(colors)], alpha=0.4, label=type_)
+                    ax.scatter(u[mask_type], c[mask_type], color=colors[i % len(colors)], alpha=0.4, label=type_)
     if by == 'us':
         if t is None:
             ax.scatter(spred, upred, c='black', label="ode", s=20)
@@ -639,3 +641,341 @@ def ellipse_fit(adata,
     else:
         fig.suptitle('Ellipse Fit', fontsize=15)
     fig.tight_layout(rect=[0, 0.1, 1, 0.98])
+
+
+def dynamic_plot(adata,
+                 adata_atac,
+                 genes,
+                 key='vae',
+                 by='expression',
+                 color_by=None,
+                 axis_on=True,
+                 frame_on=True,
+                 show_pred=True,
+                 show_pred_only=False,
+                 downsample=1,
+                 figsize=None,
+                 pointsize=2,
+                 cmap='coolwarm'
+                 ):
+    from pandas.api.types import is_numeric_dtype, is_categorical_dtype
+    if by not in ['expression', 'velocity']:
+        raise ValueError('"by" must be either "expression" or "velocity".')
+    if by == 'velocity':
+        show_pred = False
+    if color_by in adata.obs and is_numeric_dtype(adata.obs[color_by]):
+        types = None
+        colors = adata.obs[color_by].values
+    elif color_by in adata.obs and is_categorical_dtype(adata.obs[color_by]) and color_by+'_colors' in adata.uns.keys():
+        types = adata.obs[color_by].cat.categories
+        colors = adata.uns[f'{color_by}_colors']
+    else:
+        raise ValueError('Currently, color key must be a single string of either numerical or categorical available in adata obs, and the colors of categories can be found in adata uns.')
+
+    downsample = np.clip(int(downsample), 1, 10)
+    genes = np.array(genes)
+    missing_genes = genes[~np.isin(genes, adata.var_names)]
+    if len(missing_genes) > 0:
+        print(f'{missing_genes} not found')
+    genes = genes[np.isin(genes, adata.var_names)]
+    gn = len(genes)
+    if gn == 0:
+        return
+    no_c = False
+    if adata_atac is None or 'Mc' not in adata_atac.layers.keys():
+        no_c = True
+    if show_pred_only:
+        show_pred = False
+
+    fig, axs = plt.subplots(gn, 3, squeeze=False, figsize=(10, 2.3*gn) if figsize is None else figsize)
+    fig.patch.set_facecolor('white')
+    for row, gene in enumerate(genes):
+        if by == 'velocity':
+            u = adata[:, gene].layers[f'{key}_velocity_u'].copy()
+            s = adata[:, gene].layers[f'{key}_velocity'].copy()
+        elif show_pred_only:
+            u = adata[:, gene].layers[f'{key}_uhat'].copy()
+            s = adata[:, gene].layers[f'{key}_shat'].copy()
+        else:
+            u = adata[:, gene].layers['Mu'].copy()
+            s = adata[:, gene].layers['Ms'].copy()
+        if not no_c:
+            if by == 'velocity':
+                c = adata[:, gene].layers[f'{key}_velocity_c'].copy()
+            elif show_pred_only:
+                c = adata[:, gene].layers[f'{key}_chat'].copy()
+            else:
+                c = adata_atac[:, gene].layers['Mc'].copy()
+        c = c.A if sparse.issparse(c) else c
+        u = u.A if sparse.issparse(u) else u
+        s = s.A if sparse.issparse(s) else s
+        c, u, s = np.ravel(c), np.ravel(u), np.ravel(s)
+        time = np.array(adata.obs[f'{key}_time']).copy()
+        if types is not None:
+            for i in range(len(types)):
+                filt = adata.obs[color_by] == types[i]
+                filt = np.ravel(filt)
+                if np.sum(filt) > 0:
+                    if not no_c:
+                        axs[row, 0].scatter(time[filt][::downsample], c[filt][::downsample], s=pointsize, c=colors[i], alpha=0.6)
+                    axs[row, 1].scatter(time[filt][::downsample], u[filt][::downsample], s=pointsize, c=colors[i], alpha=0.6)
+                    axs[row, 2].scatter(time[filt][::downsample], s[filt][::downsample], s=pointsize, c=colors[i], alpha=0.6)
+        else:
+            if not no_c:
+                axs[row, 0].scatter(time[::downsample], c[::downsample], s=pointsize, c=colors[::downsample], alpha=0.6, cmap=cmap)
+            axs[row, 1].scatter(time[::downsample], u[::downsample], s=pointsize, c=colors[::downsample], alpha=0.6, cmap=cmap)
+            axs[row, 2].scatter(time[::downsample], s[::downsample], s=pointsize, c=colors[::downsample], alpha=0.6, cmap=cmap)
+
+        if show_pred:
+            if not no_c:
+                axs[row, 0].scatter(time[::downsample], adata[:, gene].layers[f'{key}_chat'].ravel()[::downsample], s=pointsize/2, c='black', alpha=0.2, zorder=1000)
+            axs[row, 1].scatter(time[::downsample], adata[:, gene].layers[f'{key}_uhat'].ravel()[::downsample], s=pointsize/2, c='black', alpha=0.2, zorder=1000)
+            axs[row, 2].scatter(time[::downsample], adata[:, gene].layers[f'{key}_shat'].ravel()[::downsample], s=pointsize/2, c='black', alpha=0.2, zorder=1000)
+
+        axs[row, 0].set_title(f'{gene} chromatin' if by == 'expression' else f'{gene} chromatin velocity')
+        axs[row, 0].set_xlabel('t')
+        axs[row, 0].set_ylabel('c' if by == 'expression' else 'dc/dt')
+        axs[row, 1].set_title(f'{gene} unspliced' + ('' if by == 'expression' else ' velocity'))
+        axs[row, 1].set_xlabel('t')
+        axs[row, 1].set_ylabel('u' if by == 'expression' else 'du/dt')
+        axs[row, 2].set_title(f'{gene} spliced' + ('' if by == 'expression' else ' velocity'))
+        axs[row, 2].set_xlabel('t')
+        axs[row, 2].set_ylabel('s' if by == 'expression' else 'ds/dt')
+
+        for j in range(3):
+            ax = axs[row, j]
+            if not axis_on:
+                ax.xaxis.set_ticks_position('none')
+                ax.yaxis.set_ticks_position('none')
+                ax.get_xaxis().set_visible(False)
+                ax.get_yaxis().set_visible(False)
+            if not frame_on:
+                ax.xaxis.set_ticks_position('none')
+                ax.yaxis.set_ticks_position('none')
+                ax.set_frame_on(False)
+    fig.tight_layout()
+
+
+def scatter_plot(adata,
+                 adata_atac,
+                 genes,
+                 key='vae',
+                 by='us',
+                 color_by=None,
+                 n_cols=5,
+                 axis_on=True,
+                 frame_on=True,
+                 show_pred=True,
+                 show_pred_only=False,
+                 title_more_info=False,
+                 velocity_arrows=False,
+                 downsample=1,
+                 figsize=None,
+                 pointsize=2,
+                 cmap='coolwarm',
+                 view_3d_elev=None,
+                 view_3d_azim=None,
+                 full_name=False
+                 ):
+    from pandas.api.types import is_numeric_dtype, is_categorical_dtype
+    if by not in ['us', 'cu', 'cus']:
+        raise ValueError("'by' argument must be one of ['us', 'cu', 'cus']")
+    if by == 'us' and color_by == 'c':
+        types = None
+    elif color_by in adata.obs and is_numeric_dtype(adata.obs[color_by]):
+        types = None
+        colors = adata.obs[color_by].values
+    elif color_by in adata.obs and is_categorical_dtype(adata.obs[color_by]) and color_by+'_colors' in adata.uns.keys():
+        types = adata.obs[color_by].cat.categories
+        colors = adata.uns[f'{color_by}_colors']
+    else:
+        raise ValueError('Currently, color key must be a single string of either numerical or categorical available in adata obs, and the colors of categories can be found in adata uns.')
+
+    downsample = np.clip(int(downsample), 1, 10)
+    genes = np.array(genes)
+    missing_genes = genes[~np.isin(genes, adata.var_names)]
+    if len(missing_genes) > 0:
+        print(f'{missing_genes} not found')
+    genes = genes[np.isin(genes, adata.var_names)]
+    gn = len(genes)
+    if gn == 0:
+        return
+    if gn < n_cols:
+        n_cols = gn
+    no_c = False
+    if adata_atac is None or 'Mc' not in adata_atac.layers.keys():
+        no_c = True
+        by = 'us'
+    if show_pred_only:
+        show_pred = False
+    if by == 'cus':
+        fig, axs = plt.subplots(-(-gn // n_cols), n_cols, squeeze=False, figsize=(3.2*n_cols, 2.7*(-(-gn // n_cols))) if figsize is None else figsize, subplot_kw={'projection': '3d'})
+    else:
+        fig, axs = plt.subplots(-(-gn // n_cols), n_cols, squeeze=False, figsize=(2.7*n_cols, 2.4*(-(-gn // n_cols))) if figsize is None else figsize)
+    fig.patch.set_facecolor('white')
+    count = 0
+    for gene in genes:
+        if show_pred_only:
+            u = adata[:, gene].layers[f'{key}_uhat'].copy()
+            s = adata[:, gene].layers[f'{key}_shat'].copy()
+        else:
+            u = adata[:, gene].layers['Mu'].copy() if 'Mu' in adata.layers else adata[:, gene].layers['unspliced'].copy()
+            s = adata[:, gene].layers['Ms'].copy() if 'Ms' in adata.layers else adata[:, gene].layers['spliced'].copy()
+        u = u.A if sparse.issparse(u) else u
+        s = s.A if sparse.issparse(s) else s
+        u, s = np.ravel(u), np.ravel(s)
+        if not no_c:
+            if show_pred_only:
+                c = adata[:, gene].layers[f'{key}_chat'].copy()
+            c = adata_atac[:, gene].layers['Mc'].copy()
+            c = c.A if sparse.issparse(c) else c
+            c = np.ravel(c)
+
+        if velocity_arrows:
+            vu = adata[:, gene].layers[f'{key}_velocity_u'].copy()
+            max_u = np.max([np.max(u), 1e-6])
+            u /= max_u
+            vu = np.ravel(vu)
+            vu /= np.max([np.max(np.abs(vu)), 1e-6])
+            vs = adata[:, gene].layers[f'{key}_velocity'].copy()
+            max_s = np.max([np.max(s), 1e-6])
+            s /= max_s
+            vs = np.ravel(vs)
+            vs /= np.max([np.max(np.abs(vs)), 1e-6])
+            if not no_c:
+                vc = adata[:, gene].layers[f'{key}_velocity_c'].copy()
+                max_c = np.max([np.max(c), 1e-6])
+                c /= max_c
+                vc = np.ravel(vc)
+                vc /= np.max([np.max(np.abs(vc)), 1e-6])
+
+        row = count // n_cols
+        col = count % n_cols
+        ax = axs[row, col]
+        if types is not None:
+            for i in range(len(types)):
+                filt = adata.obs[color_by] == types[i]
+                filt = np.ravel(filt)
+                if by == 'us':
+                    if velocity_arrows:
+                        ax.quiver(s[filt][::downsample], u[filt][::downsample], vs[filt][::downsample], vu[filt][::downsample],
+                                  color=colors[i], alpha=0.5, scale_units='xy', scale=10, width=0.005, headwidth=4, headaxislength=5.5)
+                    else:
+                        ax.scatter(s[filt][::downsample], u[filt][::downsample], s=pointsize, c=colors[i], alpha=0.7)
+                elif by == 'cu':
+                    if velocity_arrows:
+                        ax.quiver(u[filt][::downsample], c[filt][::downsample], vu[filt][::downsample], vc[filt][::downsample],
+                                  color=colors[i], alpha=0.5, scale_units='xy', scale=10, width=0.005, headwidth=4, headaxislength=5.5)
+                    else:
+                        ax.scatter(u[filt][::downsample], c[filt][::downsample], s=pointsize, c=colors[i], alpha=0.7)
+                else:
+                    if velocity_arrows:
+                        ax.quiver(s[filt][::downsample], u[filt][::downsample], c[filt][::downsample],
+                                  vs[filt][::downsample], vu[filt][::downsample], vc[filt][::downsample],
+                                  color=colors[i], alpha=0.4, length=0.1, arrow_length_ratio=0.5, normalize=True)
+                    else:
+                        ax.scatter(s[filt][::downsample], u[filt][::downsample], c[filt][::downsample], s=pointsize, c=colors[i], alpha=0.7)
+        elif color_by == 'c':
+            outlier = 99.8
+            non_zero = (u > 0) & (s > 0) & (c > 0)
+            non_outlier = u < np.percentile(u, outlier)
+            non_outlier &= s < np.percentile(s, outlier)
+            non_outlier &= c < np.percentile(c, outlier)
+            c -= np.min(c)
+            c /= np.max(c)
+            if velocity_arrows:
+                ax.quiver(s[non_zero & non_outlier][::downsample], u[non_zero & non_outlier][::downsample],
+                          vs[non_zero & non_outlier][::downsample], vu[non_zero & non_outlier][::downsample],
+                          np.log1p(c[non_zero & non_outlier][::downsample]), alpha=0.5,
+                          scale_units='xy', scale=10, width=0.005, headwidth=4, headaxislength=5.5, cmap=cmap)
+            else:
+                ax.scatter(s[non_zero & non_outlier][::downsample], u[non_zero & non_outlier][::downsample], s=pointsize,
+                           c=np.log1p(c[non_zero & non_outlier][::downsample]), alpha=0.8, cmap=cmap)
+        else:
+            if by == 'us':
+                if velocity_arrows:
+                    ax.quiver(s[::downsample], u[::downsample], vs[::downsample], vu[::downsample],
+                              colors[::downsample], alpha=0.5, scale_units='xy', scale=10, width=0.005, headwidth=4, headaxislength=5.5, cmap=cmap)
+                else:
+                    ax.scatter(s[::downsample], u[::downsample], s=pointsize, c=colors[::downsample], alpha=0.7, cmap=cmap)
+            elif by == 'cu':
+                if velocity_arrows:
+                    ax.quiver(u[::downsample], c[::downsample], vu[::downsample], vc[::downsample],
+                              colors[::downsample], alpha=0.5, scale_units='xy', scale=10, width=0.005, headwidth=4, headaxislength=5.5, cmap=cmap)
+                else:
+                    ax.scatter(u[::downsample], c[::downsample], s=pointsize, c=colors[::downsample], alpha=0.7, cmap=cmap)
+            else:
+                if velocity_arrows:
+                    ax.quiver(s[::downsample], u[::downsample], c[::downsample],
+                              vs[::downsample], vu[::downsample], vc[::downsample],
+                              colors[::downsample], alpha=0.4, length=0.1, arrow_length_ratio=0.5, normalize=True, cmap=cmap)
+                else:
+                    ax.scatter(s[::downsample], u[::downsample], c[::downsample], s=pointsize, c=colors[::downsample], alpha=0.7, cmap=cmap)
+
+        if show_pred:
+            if not no_c:
+                a_c = adata[:, gene].layers[f'{key}_chat'].ravel()
+            a_u = adata[:, gene].layers[f'{key}_uhat'].ravel()
+            a_s = adata[:, gene].layers[f'{key}_shat'].ravel()
+            if velocity_arrows:
+                if not no_c:
+                    a_c /= max_c
+                a_u /= max_u
+                a_s /= max_s
+            if by == 'us':
+                ax.scatter(a_s[::downsample], a_u[::downsample], s=pointsize/2, c='black', alpha=0.2, zorder=1000)
+            elif by == 'cu':
+                ax.scatter(a_u[::downsample], a_c[::downsample], s=pointsize/2, c='black', alpha=0.2, zorder=1000)
+            else:
+                ax.scatter(a_s[::downsample], a_u[::downsample], a_c[::downsample], s=pointsize/2, c='black', alpha=0.2, zorder=1000)
+
+        if by == 'cus' and (view_3d_elev is not None or view_3d_azim is not None):
+            # US: elev=90, azim=270. CU: elev=0, azim=0.
+            ax.view_init(elev=view_3d_elev, azim=view_3d_azim)
+        title = gene
+        if title_more_info:
+            if f'{key}_likelihood' in adata.var and not np.all(adata.var[f'{key}_likelihood'].values == -1):
+                title += f" {adata[:,gene].var[f'{key}_likelihood'].values[0]:.3g}"
+        ax.set_title(f'{title}', fontsize=11)
+        if by == 'us':
+            ax.set_xlabel('spliced' if full_name else 's')
+            ax.set_ylabel('unspliced' if full_name else 'u')
+        elif by == 'cu':
+            ax.set_xlabel('unspliced' if full_name else 'u')
+            ax.set_ylabel('chromatin' if full_name else 'c')
+        elif by == 'cus':
+            ax.set_xlabel('spliced' if full_name else 's')
+            ax.set_ylabel('unspliced' if full_name else 'u')
+            ax.set_zlabel('chromatin' if full_name else 'c')
+        if by in ['us', 'cu']:
+            if not axis_on:
+                ax.xaxis.set_ticks_position('none')
+                ax.yaxis.set_ticks_position('none')
+                ax.get_xaxis().set_visible(False)
+                ax.get_yaxis().set_visible(False)
+            if not frame_on:
+                ax.xaxis.set_ticks_position('none')
+                ax.yaxis.set_ticks_position('none')
+                ax.set_frame_on(False)
+        elif by == 'cus':
+            if not axis_on:
+                ax.set_xlabel('')
+                ax.set_ylabel('')
+                ax.set_zlabel('')
+                ax.xaxis.set_ticklabels([])
+                ax.yaxis.set_ticklabels([])
+                ax.zaxis.set_ticklabels([])
+            if not frame_on:
+                ax.xaxis._axinfo['grid']['color'] = (1, 1, 1, 0)
+                ax.yaxis._axinfo['grid']['color'] = (1, 1, 1, 0)
+                ax.zaxis._axinfo['grid']['color'] = (1, 1, 1, 0)
+                ax.xaxis._axinfo['tick']['inward_factor'] = 0
+                ax.xaxis._axinfo['tick']['outward_factor'] = 0
+                ax.yaxis._axinfo['tick']['inward_factor'] = 0
+                ax.yaxis._axinfo['tick']['outward_factor'] = 0
+                ax.zaxis._axinfo['tick']['inward_factor'] = 0
+                ax.zaxis._axinfo['tick']['outward_factor'] = 0
+        count += 1
+    for i in range(col+1, n_cols):
+        fig.delaxes(axs[row, i])
+    fig.tight_layout()
