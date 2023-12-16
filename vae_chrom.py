@@ -1,5 +1,6 @@
 import os
 import time
+import copy
 import anndata as ad
 from scipy.sparse import issparse
 import numpy as np
@@ -813,6 +814,9 @@ class VAEChrom():
         self.rec_test, self.klt_test, self.klz_test = [], [], []
         self.counter = 0
         self.n_drop = 0
+        self.best_model_state = None
+        self.best_counter = 0
+        self.counter_start = 0
 
         self.clip_fn = nn.Hardtanh(-1e30, 1e30)
 
@@ -1607,13 +1611,22 @@ class VAEChrom():
                              sparsify=self.config['sparsify'])
         return elbo, rec, klt, klz
 
+    def save_state_dict(self, counter=0, loss_test=0, reset=False):
+        if reset:
+            self.best_model_state = None
+            self.best_counter = 0
+        elif len(self.loss_test)*self.config["test_iter"] > self.counter_start and loss_test < np.min(self.loss_test[self.counter_start//self.config["test_iter"]:]):
+            print(self.counter, len(self.loss_test), loss_test, self.config["test_iter"])
+            self.best_counter = counter
+            self.best_model_state = (copy.deepcopy(self.encoder.state_dict()), copy.deepcopy(self.decoder.state_dict()))
+
     def train_epoch(self, train_loader, test_set, optimizer, optimizer2=None, k=1, net='both'):
         B = len(train_loader)
         self.set_mode('train', net)
         stop_training = False
 
         for i, batch in enumerate(train_loader):
-            if self.counter == 1 or self.counter % self.config["test_iter"] == 0:
+            if self.counter % self.config["test_iter"] == 1:
                 elbo_test, rec_test, klt_test, klz_test = self.test(test_set,
                                                                     None,
                                                                     self.counter,
@@ -1624,6 +1637,7 @@ class VAEChrom():
                         self.n_drop = self.n_drop + 1
                     else:
                         self.n_drop = 0
+                    self.save_state_dict(self.counter, -elbo_test)
                 self.loss_test.append(-elbo_test)
                 self.rec_test.append(-rec_test)
                 self.klt_test.append(-klt_test)
@@ -1897,6 +1911,10 @@ class VAEChrom():
 
             if stop_training:
                 print(f"*********     Stage 1: Early Stop Triggered at epoch {epoch+1}.     *********")
+                if self.best_model_state is not None:
+                    print(f"*********     Retrieving best model from iteration {self.best_counter}.     *********")
+                    self.encoder.load_state_dict(self.best_model_state[0])
+                    self.decoder.load_state_dict(self.best_model_state[1])
                 break
 
         if self.config["run_2nd_stage"]:
@@ -1905,6 +1923,7 @@ class VAEChrom():
             count_epoch = n_stage1
             n_test1 = len(self.loss_test)
             self.set_mode('eval', 'encoder')
+            self.save_state_dict(reset=True)
             param_post = list(self.decoder.net_rho.parameters())
             param_post += list(self.decoder.net_kc.parameters())
             param_ode = [self.decoder.alpha_c,
@@ -1982,6 +2001,7 @@ class VAEChrom():
                     self.decoder.init_weights(reinit_t=False)
 
                 self.n_drop = 0
+                self.counter_start = self.counter
                 print(f"*********             Velocity Refinement Round {r+1}             *********")
 
                 for epoch in range(self.config["n_epochs_post"]):
@@ -2025,6 +2045,11 @@ class VAEChrom():
 
                     if stop_training:
                         print(f"*********     Round {r+1}: Early Stop Triggered at epoch {epoch+count_epoch+1}.     *********")
+                        if self.best_model_state is not None:
+                            print(f"*********     Retrieving best model from iteration {self.best_counter}.     *********")
+                            self.encoder.load_state_dict(self.best_model_state[0])
+                            self.decoder.load_state_dict(self.best_model_state[1])
+                            self.save_state_dict(reset=True)
                         break
 
                 count_epoch += (epoch+1)
@@ -2096,10 +2121,10 @@ class VAEChrom():
             plot_train_loss_log(self.klt_train, range(1, len(self.klt_train)+1), save=f'{figure_path}/train_loss_klt_velovae.png')
             plot_train_loss_log(self.klz_train, range(1, len(self.klz_train)+1), save=f'{figure_path}/train_loss_klz_velovae.png')
             if self.config["test_iter"] > 0:
-                plot_test_loss_log(self.loss_test, [i*self.config["test_iter"] for i in range(1, len(self.loss_test)+1)], save=f'{figure_path}/test_loss_velovae.png')
-                plot_test_loss_log(self.rec_test, [i*self.config["test_iter"] for i in range(1, len(self.rec_test)+1)], save=f'{figure_path}/test_loss_rec_velovae.png')
-                plot_test_loss_log(self.klt_test, [i*self.config["test_iter"] for i in range(1, len(self.klt_test)+1)], save=f'{figure_path}/test_loss_klt_velovae.png')
-                plot_test_loss_log(self.klz_test, [i*self.config["test_iter"] for i in range(1, len(self.klz_test)+1)], save=f'{figure_path}/test_loss_klz_velovae.png')
+                plot_test_loss_log(self.loss_test, [i*self.config["test_iter"]+1 for i in range(len(self.loss_test))], save=f'{figure_path}/test_loss_velovae.png')
+                plot_test_loss_log(self.rec_test, [i*self.config["test_iter"]+1 for i in range(len(self.rec_test))], save=f'{figure_path}/test_loss_rec_velovae.png')
+                plot_test_loss_log(self.klt_test, [i*self.config["test_iter"]+1 for i in range(len(self.klt_test))], save=f'{figure_path}/test_loss_klt_velovae.png')
+                plot_test_loss_log(self.klz_test, [i*self.config["test_iter"]+1 for i in range(len(self.klz_test))], save=f'{figure_path}/test_loss_klz_velovae.png')
         print(f"Final: Train ELBO = {elbo_train:.3f},\tTest ELBO = {elbo_test:.3f}")
         print(f"*********      Finished. Total Time = {convert_time(time.time()-start)}     *********")
 
