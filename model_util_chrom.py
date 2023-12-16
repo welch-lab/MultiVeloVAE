@@ -12,6 +12,12 @@ from scipy.stats import dirichlet, bernoulli, kstest
 import scanpy as sc
 from tqdm.notebook import tqdm_notebook
 from .model_util import assign_gene_mode_binary
+from scipy.stats import median_abs_deviation
+from scipy.sparse import issparse
+import seaborn as sns
+import matplotlib.pyplot as plt
+import pandas as pd
+from anndata import AnnData
 
 
 def inv(x):
@@ -81,50 +87,54 @@ def pred_single(t, alpha_c, alpha, beta, gamma, ts, cinit=0, uinit=0, sinit=0):
     return ct.squeeze(), ut.squeeze(), st.squeeze()
 
 
-def pred_exp(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
+def pred_exp(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma, delta):
     expac, expb, expg = torch.exp(-alpha_c*tau), torch.exp(-beta*tau), torch.exp(-gamma*tau)
+    expbd = torch.exp(-(beta+delta)*tau)
     eps = 1e-6
 
     cpred = c0*expac + kc*(1-expac)
-    upred = u0*expb + rho*alpha*kc/beta*(1-expb) + (kc-c0)*rho*alpha/(beta-alpha_c+eps)*(expb-expac)
+    upred = u0*expbd + rho*alpha*kc/(beta+delta)*(1-expbd) + (kc-c0)*rho*alpha/((beta+delta)-alpha_c+eps)*(expbd-expac)
     spred = s0*expg + rho*alpha*kc/gamma*(1-expg)
     spred += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     spred += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
     return cpred, upred, spred
 
 
-def pred_exp_backward(tau, c, u, s, kc, alpha_c, rho, alpha, beta, gamma):
-    expac, expb, expg = torch.exp(alpha_c*tau), torch.exp(beta*tau), torch.exp(gamma*tau)
+def pred_exp_backward(tau, c, u, s, kc, alpha_c, rho, alpha, beta, gamma, delta):
+    expac, expg = torch.exp(alpha_c*tau), torch.exp(gamma*tau)
+    expbd = torch.exp((beta+delta)*tau)
     eps = 1e-6
     expbac, expgb, expgac = torch.exp((beta-alpha_c+eps)*tau), torch.exp((gamma-beta+eps)*tau), torch.exp((gamma-alpha_c+eps)*tau)
 
     c0 = F.hardtanh(c*expac + kc*(1-expac), 0, 1)
-    u0 = F.hardtanh(u*expb + rho*alpha*kc/beta*(1-expb) + (kc-c0)*rho*alpha/(beta-alpha_c+eps)*(expbac-1), 0, u.max()*1.2)
+    u0 = F.hardtanh(u*expbd + rho*alpha*kc/(beta+delta)*(1-expbd) + (kc-c0)*rho*alpha/((beta+delta)-alpha_c+eps)*(expbac-1), 0, u.max()*1.2)
     s0 = s*expg + rho*alpha*kc/gamma*(1-expg)
     s0 += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expgb-1)
     s0 += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expgac-1)
     return u0, u0, F.hardtanh(s0, 0, s.max()*1.2)
 
 
-def pred_exp_numpy(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
+def pred_exp_numpy(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma, delta):
     expac, expb, expg = np.exp(-alpha_c*tau), np.exp(-beta*tau), np.exp(-gamma*tau)
+    expbd = np.exp(-(beta+delta)*tau)
     eps = 1e-6
 
     cpred = c0*expac + kc*(1-expac)
-    upred = u0*expb + rho*alpha*kc/beta*(1-expb) + (kc-c0)*rho*alpha/(beta-alpha_c+eps)*(expb-expac)
+    upred = u0*expbd + rho*alpha*kc/(beta+delta)*(1-expbd) + (kc-c0)*rho*alpha/((beta+delta)-alpha_c+eps)*(expbd-expac)
     spred = s0*expg + rho*alpha*kc/gamma*(1-expg)
     spred += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     spred += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
     return np.clip(cpred, a_min=0, a_max=1), np.clip(upred, a_min=0, a_max=None), np.clip(spred, a_min=0, a_max=None)
 
 
-def pred_exp_backward_numpy(tau, c, u, s, kc, alpha_c, rho, alpha, beta, gamma):
-    expac, expb, expg = np.exp(alpha_c*tau), np.exp(beta*tau), np.exp(gamma*tau)
+def pred_exp_backward_numpy(tau, c, u, s, kc, alpha_c, rho, alpha, beta, gamma, delta):
+    expac, expg = np.exp(alpha_c*tau), np.exp(gamma*tau)
+    expbd = np.exp((beta+delta)*tau)
     eps = 1e-6
     expbac, expgb, expgac = np.exp((beta-alpha_c+eps)*tau), np.exp((gamma-beta+eps)*tau), np.exp((gamma-alpha_c+eps)*tau)
 
     c0 = np.clip(c*expac + kc*(1-expac), a_min=0, a_max=1)
-    u0 = np.clip(u*expb + rho*alpha*kc/beta*(1-expb) + (kc-c0)*rho*alpha/(beta-alpha_c+eps)*(expbac-1), a_min=0, a_max=np.max(u)*1.2)
+    u0 = np.clip(u*expbd + rho*alpha*kc/(beta+delta)*(1-expbd) + (kc-c0)*rho*alpha/((beta+delta)-alpha_c+eps)*(expbac-1), a_min=0, a_max=np.max(u)*1.2)
     s0 = s*expg + rho*alpha*kc/gamma*(1-expg)
     s0 += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expgb-1)
     s0 += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expgac-1)
@@ -320,11 +330,12 @@ def init_gene(c, u, s, percent, fit_scaling=True, tmax=1):
 
 def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rna_only=False):
     ngene = u.shape[1]
-    params = np.ones((ngene, 6))  # alpha_c, alpha, beta, gamma, scaling_c, scaling
+    params = np.ones((ngene, 7))  # alpha_c, alpha, beta, gamma, delta, scaling_c, scaling
     params[:, 0] = 0.1
     params[:, 1] = np.clip(np.max(u, 0), 0.001, None)
     params[:, 3] = np.clip(np.max(u, 0), 0.001, None)/np.clip(np.max(s, 0), 0.001, None)
-    params[:, 4] = np.clip(np.max(c, 0), 0.001, None)
+    params[:, 4] = 0.0
+    params[:, 5] = np.clip(np.max(c, 0), 0.001, None)
     t = np.zeros((ngene, len(s)))
     ts = np.zeros((ngene))
     c0, u0, s0 = np.zeros((ngene)), np.zeros((ngene)), np.zeros((ngene))
@@ -335,16 +346,17 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
         cfilt = ci[(si > 0) & (ui > 0) & (ci > 0)]
         ufilt = ui[(si > 0) & (ui > 0) & (ci > 0)]
         sfilt = si[(si > 0) & (ui > 0) & (ci > 0)]
+        u_sparse_ratio = np.sum(ui == 0) / len(ui)
         if (len(sfilt) >= 5):
             if rna_only:
                 out = init_gene_rna(ufilt, sfilt, percent, fit_scaling, tmax)
                 alpha, beta, gamma, t_, u0_, s0_, ts_, scaling = out
                 c0_ = 1
-                params[i, :] = np.array([0, alpha, beta, gamma, 1, scaling])
+                params[i, :] = np.array([0, alpha, beta, gamma, beta*u_sparse_ratio, 1, scaling])
             else:
                 out = init_gene(cfilt, ufilt, sfilt, percent, fit_scaling, tmax)
                 alpha_c, alpha, beta, gamma, t_, c0_, u0_, s0_, ts_, scaling_c, scaling = out
-                params[i, :] = np.array([alpha_c, alpha, beta, gamma, scaling_c, scaling])
+                params[i, :] = np.array([alpha_c, alpha, beta, gamma, beta*u_sparse_ratio, scaling_c, scaling])
             t[i, (si > 0) & (ui > 0) & (ci > 0)] = t_
             c0[i] = c0_
             u0[i] = u0_
@@ -357,7 +369,7 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
         if rna_only:
             c0[i] = 1
             params[i, 0] = 0
-            params[i, 4] = 1
+            params[i, 5] = 1
 
         cpred_i, upred_i, spred_i = pred_single(t[i],
                                                 params[i, 0],
@@ -366,9 +378,8 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
                                                 params[i, 3],
                                                 ts[i],
                                                 cinit=1 if rna_only else 0)
-
-        cpred[:, i] = cpred_i * params[i, 4]
-        upred[:, i] = upred_i * params[i, 5]
+        cpred[:, i] = cpred_i * params[i, 5]
+        upred[:, i] = upred_i * params[i, 6]
         spred[:, i] = spred_i
 
     if global_std:
@@ -383,10 +394,10 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
         sigma_u = np.nanstd(dist_u, 0)
         sigma_s = np.nanstd(dist_s, 0)
 
-    alpha_c, alpha, beta, gamma = params[:, 0], params[:, 1], params[:, 2], params[:, 3]
-    scaling_c, scaling = params[:, 4], params[:, 5]
+    alpha_c, alpha, beta, gamma, delta = params[:, 0], params[:, 1], params[:, 2], params[:, 3], params[:, 4]
+    scaling_c, scaling = params[:, 5], params[:, 6]
 
-    return alpha_c, alpha, beta, gamma, scaling_c, scaling, ts, c0, u0, s0, sigma_c, sigma_u, sigma_s, t.T, cpred, upred, spred
+    return alpha_c, alpha, beta, gamma, delta, scaling_c, scaling, ts, c0, u0, s0, sigma_c, sigma_u, sigma_s, t.T, cpred, upred, spred
 
 
 def get_ts_global(tgl, c, u, s, perc):
@@ -457,67 +468,73 @@ def reinit_params(c, u, s, t, ts):
     return alpha_c, alpha, beta, gamma, ton
 
 
-def pred_steady_numpy(ts, alpha_c, alpha, beta, gamma):
-    alpha_c_ = np.clip(alpha_c, a_min=0, a_max=None)
-    alpha_ = np.clip(alpha, a_min=0, a_max=None)
-    beta_ = np.clip(beta, a_min=0, a_max=None)
-    gamma_ = np.clip(gamma, a_min=0, a_max=None)
-    eps = 1e-6
-    ts_ = ts.squeeze()
-    expac, expb, expg = np.exp(-alpha_c_*ts_), np.exp(-beta_*ts_), np.exp(-gamma_*ts_)
-    c0 = 1.0-expac
-    u0 = alpha_/(beta_+eps)*(1.0-expb)+alpha_/(beta_-alpha_c_+eps)*(expb-expac)
-    s0 = alpha_/(gamma_+eps)*(1.0-expg)+(alpha_/beta_-alpha_/(beta_-alpha_c_+eps))*beta_/(gamma_-beta_+eps)*(expg-expb)
-    s0 += alpha_*beta_/(gamma_-alpha_c_+eps)/(beta_-alpha_c_+eps)*(expg-expac)
-    return c0, u0, s0
-
-
-def pred_steady(tau_s, alpha_c, alpha, beta, gamma):
+def pred_steady(tau_s, alpha_c, alpha, beta, gamma, delta):
     eps = 1e-6
     expac, expb, expg = torch.exp(-alpha_c*tau_s), torch.exp(-beta*tau_s), torch.exp(-gamma*tau_s)
+    expbd = torch.exp(-(beta+delta)*tau_s)
     c0 = torch.tensor([1.0], device=alpha.device)-expac
-    u0 = alpha/(beta+eps)*(torch.tensor([1.0], device=alpha.device)-expb) + alpha/(beta-alpha_c+eps)*(expb-expac)
+    u0 = alpha/((beta+delta)+eps)*(torch.tensor([1.0], device=alpha.device)-expbd) + alpha/((beta+delta)-alpha_c+eps)*(expbd-expac)
     s0 = alpha/(gamma+eps)*(torch.tensor([1.0], device=alpha.device)-expg)
     s0 += (alpha/beta-alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     s0 += alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
     return c0, u0, s0
 
 
-def ode(t, alpha_c, alpha, beta, gamma, to, ts, neg_slope=0.0):
+def ode(t, alpha_c, alpha, beta, gamma, delta, to, ts, neg_slope=0.0):
     eps = 1e-6
     o = (t <= ts).int()
 
     tau_on = F.leaky_relu(t-to, negative_slope=neg_slope)
     expac, expb, expg = torch.exp(-alpha_c*tau_on), torch.exp(-beta*tau_on), torch.exp(-gamma*tau_on)
+    expbd = torch.exp(-(beta+delta)*tau_on)
     chat_on = torch.tensor([1.0], device=alpha.device)-expac
-    uhat_on = alpha/(beta+eps)*(torch.tensor([1.0], device=alpha.device)-expb) + alpha/(beta-alpha_c+eps)*(expb-expac)
+    uhat_on = alpha/((beta+delta)+eps)*(torch.tensor([1.0], device=alpha.device)-expbd) + alpha/((beta+delta)-alpha_c+eps)*(expbd-expac)
     shat_on = alpha/(gamma+eps)*(torch.tensor([1.0], device=alpha.device)-expg)
     shat_on += (alpha/beta-alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     shat_on += alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
 
-    c0_, u0_, s0_ = pred_steady(F.relu(ts-to), alpha_c, alpha, beta, gamma)
+    c0_, u0_, s0_ = pred_steady(F.relu(ts-to), alpha_c, alpha, beta, gamma, delta)
 
     tau_off = F.leaky_relu(t-ts, negative_slope=neg_slope)
     expac, expb, expg = torch.exp(-alpha_c*tau_off), torch.exp(-beta*tau_off), torch.exp(-gamma*tau_off)
+    expbd = torch.exp(-(beta+delta)*tau_off)
     chat_off = c0_*expac
-    uhat_off = u0_*expb
+    uhat_off = u0_*expbd
     shat_off = s0_*expg-u0_*beta/(gamma-beta+eps)*(expg-expb)
     return (chat_on*o + chat_off*(1-o)), (uhat_on*o + uhat_off*(1-o)), (shat_on*o + shat_off*(1-o))
 
 
-def ode_numpy(t, alpha_c, alpha, beta, gamma, to, ts, scaling_c=None, scaling_u=None, scaling_s=None, offset_c=None, offset_u=None, offset_s=None, k=10.0):
+def pred_steady_numpy(ts, alpha_c, alpha, beta, gamma, delta):
+    alpha_c_ = np.clip(alpha_c, a_min=0, a_max=None)
+    alpha_ = np.clip(alpha, a_min=0, a_max=None)
+    beta_ = np.clip(beta, a_min=0, a_max=None)
+    gamma_ = np.clip(gamma, a_min=0, a_max=None)
+    delta_ = np.clip(delta, a_min=0, a_max=None)
+    eps = 1e-6
+    ts_ = ts.squeeze()
+    expac, expb, expg = np.exp(-alpha_c_*ts_), np.exp(-beta_*ts_), np.exp(-gamma_*ts_)
+    expbd = np.exp(-(beta_+delta_)*ts_)
+    c0 = 1.0-expac
+    u0 = alpha_/((beta_+delta_)+eps)*(1.0-expbd)+alpha_/((beta_+delta_)-alpha_c_+eps)*(expbd-expac)
+    s0 = alpha_/(gamma_+eps)*(1.0-expg)+(alpha_/beta_-alpha_/(beta_-alpha_c_+eps))*beta_/(gamma_-beta_+eps)*(expg-expb)
+    s0 += alpha_*beta_/(gamma_-alpha_c_+eps)/(beta_-alpha_c_+eps)*(expg-expac)
+    return c0, u0, s0
+
+
+def ode_numpy(t, alpha_c, alpha, beta, gamma, delta, to, ts, scaling_c=None, scaling_u=None, scaling_s=None, offset_c=None, offset_u=None, offset_s=None, k=10.0):
     eps = 1e-6
     o = (t <= ts).astype(int)
 
     tau_on = F.softplus(torch.tensor(t-to), beta=k).numpy()
     assert np.all(~np.isnan(tau_on))
     expac, expb, expg = np.exp(-alpha_c*tau_on), np.exp(-beta*tau_on), np.exp(-gamma*tau_on)
+    expbd = np.exp(-(beta+delta)*tau_on)
     chat_on = 1.0-expac
-    uhat_on = alpha/(beta+eps)*(1.0-expb) + alpha/(beta-alpha_c+eps)*(expb-expac)
+    uhat_on = alpha/((beta+delta)+eps)*(1.0-expbd) + alpha/((beta+delta)-alpha_c+eps)*(expbd-expac)
     shat_on = alpha/(gamma+eps)*(1.0-expg) + (alpha/beta-alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     shat_on += alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
 
-    c0_, u0_, s0_ = pred_steady_numpy(np.clip(ts-to, 0, None), alpha_c, alpha, beta, gamma)
+    c0_, u0_, s0_ = pred_steady_numpy(np.clip(ts-to, 0, None), alpha_c, alpha, beta, gamma, delta)
     if ts.ndim == 2 and to.ndim == 2:
         c0_ = c0_.reshape(-1, 1)
         u0_ = u0_.reshape(-1, 1)
@@ -525,8 +542,9 @@ def ode_numpy(t, alpha_c, alpha, beta, gamma, to, ts, scaling_c=None, scaling_u=
     tau_off = F.softplus(torch.tensor(t-ts), beta=k).numpy()
     assert np.all(~np.isnan(tau_off))
     expac, expb, expg = np.exp(-alpha_c*tau_off), np.exp(-beta*tau_off), np.exp(-gamma*tau_off)
+    expbd = np.exp(-(beta+delta)*tau_off)
     chat_off = c0_*expac
-    uhat_off = u0_*expb
+    uhat_off = u0_*expbd
     shat_off = s0_*expg-u0_*beta/(gamma-beta+eps)*(expg-expb)
 
     chat, uhat, shat = (chat_on*o + chat_off*(1-o)), (uhat_on*o + uhat_off*(1-o)), (shat_on*o + shat_off*(1-o))
@@ -943,3 +961,698 @@ def assign_gene_mode(adata,
         alpha_rep = find_dirichlet_param(0.2, std_prior)
         np.random.seed(42)
         return dirichlet.rvs(alpha_rep, size=adata.n_vars)[:, 0]
+
+
+def aggregate_peaks_10x(adata_atac, peak_annot_file, linkage_file, peak_dist=10000, min_corr=0.5, gene_body=False, return_dict=False, verbose=False):
+    """Peak to gene aggregation.
+
+    This function aggregates promoter and enhancer peaks to genes based on the 10X linkage file.
+
+    Parameters
+    ----------
+    adata_atac: :class:`~anndata.AnnData`
+        ATAC anndata object which stores raw peak counts.
+    peak_annot_file: `str`
+        Peak annotation file from 10X CellRanger ARC.
+    linkage_file: `str`
+        Peak-gene linkage file from 10X CellRanger ARC. This file stores highly correlated peak-peak
+        and peak-gene pair information.
+    peak_dist: `int` (default: 10000)
+        Maximum distance for peaks to be included for a gene.
+    min_corr: `float` (default: 0.5)
+        Minimum correlation for a peak to be considered as enhancer.
+    gene_body: `bool` (default: `False`)
+        Whether to add gene body peaks to the associated promoters.
+    return_dict: `bool` (default: `False`)
+        Whether to return promoter and enhancer dictionaries.
+    verbose: `bool` (default: `False`)
+        Whether to print number of genes with promoter peaks.
+
+    Returns
+    -------
+    A new ATAC anndata object which stores gene aggreagted peak counts.
+    Additionally, if `return_dict==True`:
+        A dictionary which stores genes and promoter peaks.
+        And a dictionary which stores genes and enhancer peaks.
+    """
+    promoter_dict = {}
+    distal_dict = {}
+    gene_body_dict = {}
+    corr_dict = {}
+
+    # read annotations
+    with open(peak_annot_file) as f:
+        header = next(f)
+        tmp = header.split('\t')
+        if len(tmp) == 4:
+            cellranger_version = 1
+        elif len(tmp) == 6:
+            cellranger_version = 2
+        else:
+            raise ValueError('Peak annotation file should contain 4 columns (CellRanger ARC 1.0.0) or 5 columns (CellRanger ARC 2.0.0)')
+        if verbose:
+            print(f'CellRanger ARC identified as {cellranger_version}.0.0')
+        if cellranger_version == 1:
+            for line in f:
+                tmp = line.rstrip().split('\t')
+                tmp1 = tmp[0].split('_')
+                peak = f'{tmp1[0]}:{tmp1[1]}-{tmp1[2]}'
+                if tmp[1] != '':
+                    genes = tmp[1].split(';')
+                    dists = tmp[2].split(';')
+                    types = tmp[3].split(';')
+                    for i, gene in enumerate(genes):
+                        dist = dists[i]
+                        annot = types[i]
+                        if annot == 'promoter':
+                            if gene not in promoter_dict:
+                                promoter_dict[gene] = [peak]
+                            else:
+                                promoter_dict[gene].append(peak)
+                        elif annot == 'distal':
+                            if dist == '0':
+                                if gene not in gene_body_dict:
+                                    gene_body_dict[gene] = [peak]
+                                else:
+                                    gene_body_dict[gene].append(peak)
+                            else:
+                                if gene not in distal_dict:
+                                    distal_dict[gene] = [peak]
+                                else:
+                                    distal_dict[gene].append(peak)
+        else:
+            for line in f:
+                tmp = line.rstrip().split('\t')
+                peak = f'{tmp[0]}:{tmp[1]}-{tmp[2]}'
+                gene = tmp[3]
+                dist = tmp[4]
+                annot = tmp[5]
+                if annot == 'promoter':
+                    if gene not in promoter_dict:
+                        promoter_dict[gene] = [peak]
+                    else:
+                        promoter_dict[gene].append(peak)
+                elif annot == 'distal':
+                    if dist == '0':
+                        if gene not in gene_body_dict:
+                            gene_body_dict[gene] = [peak]
+                        else:
+                            gene_body_dict[gene].append(peak)
+                    else:
+                        if gene not in distal_dict:
+                            distal_dict[gene] = [peak]
+                        else:
+                            distal_dict[gene].append(peak)
+
+    # read linkages
+    with open(linkage_file) as f:
+        for line in f:
+            tmp = line.rstrip().split('\t')
+            if tmp[12] == "peak-peak":
+                peak1 = f'{tmp[0]}:{tmp[1]}-{tmp[2]}'
+                peak2 = f'{tmp[3]}:{tmp[4]}-{tmp[5]}'
+                tmp2 = tmp[6].split('><')[0][1:].split(';')
+                tmp3 = tmp[6].split('><')[1][:-1].split(';')
+                corr = float(tmp[7])
+                for t2 in tmp2:
+                    gene1 = t2.split('_')
+                    for t3 in tmp3:
+                        gene2 = t3.split('_')
+                        # one of the peaks is in promoter, peaks belong to the same gene or are close in distance
+                        if ((gene1[1] == "promoter") != (gene2[1] == "promoter")) and ((gene1[0] == gene2[0]) or (float(tmp[11]) < peak_dist)):
+                            if gene1[1] == "promoter":
+                                gene = gene1[0]
+                            else:
+                                gene = gene2[0]
+                            if gene in corr_dict:
+                                # peak 1 is in promoter, peak 2 is not in gene body -> peak 2 is added to gene 1
+                                if peak2 not in corr_dict[gene] and gene1[1] == "promoter" and (gene2[0] not in gene_body_dict or peak2 not in gene_body_dict[gene2[0]]):
+                                    corr_dict[gene][0].append(peak2)
+                                    corr_dict[gene][1].append(corr)
+                                # peak 2 is in promoter, peak 1 is not in gene body -> peak 1 is added to gene 2
+                                if peak1 not in corr_dict[gene] and gene2[1] == "promoter" and (gene1[0] not in gene_body_dict or peak1 not in gene_body_dict[gene1[0]]):
+                                    corr_dict[gene][0].append(peak1)
+                                    corr_dict[gene][1].append(corr)
+                            else:
+                                # peak 1 is in promoter, peak 2 is not in gene body -> peak 2 is added to gene 1
+                                if gene1[1] == "promoter" and (gene2[0] not in gene_body_dict or peak2 not in gene_body_dict[gene2[0]]):
+                                    corr_dict[gene] = [[peak2], [corr]]
+                                # peak 2 is in promoter, peak 1 is not in gene body -> peak 1 is added to gene 2
+                                if gene2[1] == "promoter" and (gene1[0] not in gene_body_dict or peak1 not in gene_body_dict[gene1[0]]):
+                                    corr_dict[gene] = [[peak1], [corr]]
+            elif tmp[12] == "peak-gene":
+                peak1 = f'{tmp[0]}:{tmp[1]}-{tmp[2]}'
+                tmp2 = tmp[6].split('><')[0][1:].split(';')
+                gene2 = tmp[6].split('><')[1][:-1]
+                corr = float(tmp[7])
+                for t2 in tmp2:
+                    gene1 = t2.split('_')
+                    # peak 1 belongs to gene 2 or are close in distance -> peak 1 is added to gene 2
+                    if ((gene1[0] == gene2) or (float(tmp[11]) < peak_dist)):
+                        gene = gene1[0]
+                        if gene in corr_dict:
+                            if peak1 not in corr_dict[gene] and gene1[1] != "promoter" and (gene1[0] not in gene_body_dict or peak1 not in gene_body_dict[gene1[0]]):
+                                corr_dict[gene][0].append(peak1)
+                                corr_dict[gene][1].append(corr)
+                        else:
+                            if gene1[1] != "promoter" and (gene1[0] not in gene_body_dict or peak1 not in gene_body_dict[gene1[0]]):
+                                corr_dict[gene] = [[peak1], [corr]]
+            elif tmp[12] == "gene-peak":
+                peak2 = f'{tmp[3]}:{tmp[4]}-{tmp[5]}'
+                gene1 = tmp[6].split('><')[0][1:]
+                tmp3 = tmp[6].split('><')[1][:-1].split(';')
+                corr = float(tmp[7])
+                for t3 in tmp3:
+                    gene2 = t3.split('_')
+                    # peak 2 belongs to gene 1 or are close in distance -> peak 2 is added to gene 1
+                    if ((gene1 == gene2[0]) or (float(tmp[11]) < peak_dist)):
+                        gene = gene1
+                        if gene in corr_dict:
+                            if peak2 not in corr_dict[gene] and gene2[1] != "promoter" and (gene2[0] not in gene_body_dict or peak2 not in gene_body_dict[gene2[0]]):
+                                corr_dict[gene][0].append(peak2)
+                                corr_dict[gene][1].append(corr)
+                        else:
+                            if gene2[1] != "promoter" and (gene2[0] not in gene_body_dict or peak2 not in gene_body_dict[gene2[0]]):
+                                corr_dict[gene] = [[peak2], [corr]]
+
+    gene_dict = promoter_dict
+    enhancer_dict = {}
+    promoter_genes = list(promoter_dict.keys())
+    if verbose:
+        print(f'Found {len(promoter_genes)} genes with promoter peaks')
+    for gene in promoter_genes:
+        if gene_body:  # add gene-body peaks
+            if gene in gene_body_dict:
+                for peak in gene_body_dict[gene]:
+                    if peak not in gene_dict[gene]:
+                        gene_dict[gene].append(peak)
+        enhancer_dict[gene] = []
+        if gene in corr_dict:  # add enhancer peaks
+            for j, peak in enumerate(corr_dict[gene][0]):
+                corr = corr_dict[gene][1][j]
+                if corr > min_corr:
+                    if peak not in gene_dict[gene]:
+                        gene_dict[gene].append(peak)
+                        enhancer_dict[gene].append(peak)
+
+    # aggregate to genes
+    adata_atac_X_copy = adata_atac.X.A
+    gene_mat = np.zeros((adata_atac.shape[0], len(promoter_genes)))
+    var_names_dict = {x: i for i, x in enumerate(adata_atac.var_names.to_numpy())}
+    for i, gene in tqdm_notebook(enumerate(promoter_genes), total=len(promoter_genes)):
+        peaks = gene_dict[gene]
+        for peak in peaks:
+            if peak in var_names_dict:
+                gene_mat[:, i] += adata_atac_X_copy[:, var_names_dict[peak]]
+    gene_mat[gene_mat < 0] = 0
+    gene_mat = AnnData(X=csr_matrix(gene_mat))
+    gene_mat.obs_names = pd.Index(list(adata_atac.obs_names))
+    gene_mat.var_names = pd.Index(promoter_genes)
+    gene_mat = gene_mat[:, gene_mat.X.sum(0) > 0]
+    if return_dict:
+        return gene_mat, promoter_dict, enhancer_dict
+    else:
+        return gene_mat
+
+
+# Modified from https://www.sc-best-practices.org/preprocessing_visualization/quality_control.html
+def is_outlier(adata, metric, lower_nmads=20, upper_nmads=20):
+    M = adata.obs[metric]
+    lower_bound = max(np.min(M), np.median(M) - lower_nmads * median_abs_deviation(M))
+    upper_bound = min(np.max(M), np.median(M) + upper_nmads * median_abs_deviation(M))
+    if metric.startswith('log1p_'):
+        print(f'{metric[6:]} lower_bound {np.expm1(lower_bound)}, upper_bound {np.expm1(upper_bound)}')
+    else:
+        print(f'{metric} lower_bound {lower_bound}, upper_bound {upper_bound}')
+    outlier = (M < lower_bound) | (upper_bound < M)
+    plt.figure()
+    sns.distplot(M)
+    sns.rugplot(M)
+    sns.distplot(M[~outlier])
+    sns.rugplot(M[~outlier])
+    return outlier
+
+
+# The following code was modified from https://github.com/scverse/scanpy/pull/2731 to add intercept back to residuals
+def sanitize_anndata(adata):
+    adata._sanitize()
+
+
+def view_to_actual(adata):
+    if adata.is_view:
+        adata._init_as_actual(adata.copy())
+
+
+def _get_obs_rep(adata, *, use_raw=False, layer=None, obsm=None, obsp=None):
+    if not isinstance(use_raw, bool):
+        raise TypeError(f"use_raw expected to be bool, was {type(use_raw)}.")
+
+    is_layer = layer is not None
+    is_raw = use_raw is not False
+    is_obsm = obsm is not None
+    is_obsp = obsp is not None
+    choices_made = sum((is_layer, is_raw, is_obsm, is_obsp))
+    assert choices_made <= 1
+    if choices_made == 0:
+        return adata.X
+    elif is_layer:
+        return adata.layers[layer]
+    elif use_raw:
+        return adata.raw.X
+    elif is_obsm:
+        return adata.obsm[obsm]
+    elif is_obsp:
+        return adata.obsp[obsp]
+    else:
+        assert False, (
+            "That was unexpected. Please report this bug at:\n\n\t"
+            " https://github.com/scverse/scanpy/issues"
+        )
+
+
+def _set_obs_rep(adata, val, *, use_raw=False, layer=None, obsm=None, obsp=None):
+    is_layer = layer is not None
+    is_raw = use_raw is not False
+    is_obsm = obsm is not None
+    is_obsp = obsp is not None
+    choices_made = sum((is_layer, is_raw, is_obsm, is_obsp))
+    assert choices_made <= 1
+    if choices_made == 0:
+        adata.X = val
+    elif is_layer:
+        adata.layers[layer] = val
+    elif use_raw:
+        adata.raw.X = val
+    elif is_obsm:
+        adata.obsm[obsm] = val
+    elif is_obsp:
+        adata.obsp[obsp] = val
+    else:
+        assert False, (
+            "That was unexpected. Please report this bug at:\n\n\t"
+            " https://github.com/scverse/scanpy/issues"
+        )
+
+
+def _regress_out_chunk(data):
+    data_chunk = data[0]
+    regressors = data[1]
+    variable_is_categorical = data[2]
+    add_intercept = data[3]
+
+    responses_chunk_list = []
+    import statsmodels.api as sm
+    from statsmodels.tools.sm_exceptions import PerfectSeparationError
+
+    for col_index in range(data_chunk.shape[1]):
+        if not (data_chunk[:, col_index] != data_chunk[0, col_index]).any():
+            responses_chunk_list.append(data_chunk[:, col_index])
+            continue
+
+        if variable_is_categorical:
+            regres = np.c_[np.ones(regressors.shape[0]), regressors[:, col_index]]
+        else:
+            regres = regressors
+        try:
+            if add_intercept:
+                result = sm.GLM(
+                    data_chunk[:, col_index], sm.add_constant(regres), family=sm.families.Gaussian()
+                ).fit()
+                new_column = result.resid_response + result.params.iloc[0]
+            else:
+                result = sm.GLM(
+                    data_chunk[:, col_index], regres, family=sm.families.Gaussian()
+                ).fit()
+                new_column = result.resid_response
+        except PerfectSeparationError:
+            new_column = np.zeros(data_chunk.shape[0])
+
+        responses_chunk_list.append(new_column)
+
+    return np.vstack(responses_chunk_list)
+
+
+def regress_out(adata, keys, layer=None, n_jobs=12, copy=False, add_intercept=False):
+    """\
+    Regress out (mostly) unwanted sources of variation.
+
+    Uses simple linear regression. This is inspired by Seurat's `regressOut`
+    function in R [Satija15]. Note that this function tends to overcorrect
+    in certain circumstances as described in :issue:`526`.
+
+    Parameters
+    ----------
+    adata
+        The annotated data matrix.
+    keys
+        Keys for observation annotation on which to regress.
+    layer
+        If provided, which element of layers to use in regression.
+    n_jobs
+        Number of jobs for parallel computation.
+        `None` means using :attr:`scanpy._settings.ScanpyConfig.n_jobs`.
+    copy
+        Determines whether a copy of `adata` is returned.
+    add_intercept
+        If True, regress_out will add intercept back to residuals in order to transform results back into gene-count space. Defaults to False
+
+    Returns
+    -------
+    Depending on `copy` returns or updates `adata` with the corrected data matrix.
+    """
+    from pandas.api.types import CategoricalDtype
+    adata = adata.copy() if copy else adata
+
+    sanitize_anndata(adata)
+
+    view_to_actual(adata)
+
+    if isinstance(keys, str):
+        keys = [keys]
+
+    X = _get_obs_rep(adata, layer=layer)
+
+    if issparse(X):
+        X = X.toarray()
+
+    variable_is_categorical = False
+    if keys[0] in adata.obs_keys() and isinstance(
+        adata.obs[keys[0]].dtype, CategoricalDtype
+    ):
+        if len(keys) > 1:
+            raise ValueError(
+                "If providing categorical variable, "
+                "only a single one is allowed. For this one "
+                "we regress on the mean for each category."
+            )
+        regressors = np.zeros(X.shape, dtype="float32")
+        for category in adata.obs[keys[0]].cat.categories:
+            mask = (category == adata.obs[keys[0]]).values
+            for ix, x in enumerate(X.T):
+                regressors[mask, ix] = x[mask].mean()
+        variable_is_categorical = True
+    else:
+        if keys:
+            regressors = adata.obs[keys]
+        else:
+            regressors = adata.obs.copy()
+
+        regressors.insert(0, "ones", 1.0)
+
+    len_chunk = np.ceil(min(1000, X.shape[1]) / n_jobs).astype(int)
+    n_chunks = np.ceil(X.shape[1] / len_chunk).astype(int)
+
+    tasks = []
+    chunk_list = np.array_split(X, n_chunks, axis=1)
+    if variable_is_categorical:
+        regressors_chunk = np.array_split(regressors, n_chunks, axis=1)
+    for idx, data_chunk in enumerate(chunk_list):
+        if variable_is_categorical:
+            regres = regressors_chunk[idx]
+        else:
+            regres = regressors
+        tasks.append(tuple((data_chunk, regres, variable_is_categorical, add_intercept)))
+
+    from joblib import Parallel, delayed
+
+    res = Parallel(n_jobs=n_jobs)(delayed(_regress_out_chunk)(task) for task in tasks)
+
+    _set_obs_rep(adata, np.vstack(res).T, layer=layer)
+    return adata if copy else None
+
+
+# The following code was modified from https://github.com/theislab/scvelo/blob/main/scvelo
+def get_modality(adata, modality):
+    if modality in ["X", None]:
+        return adata.X
+    elif modality in adata.layers.keys():
+        return adata.layers[modality]
+    elif modality in adata.obsm.keys():
+        if isinstance(adata.obsm[modality], pd.DataFrame):
+            return adata.obsm[modality].values
+        else:
+            return adata.obsm[modality]
+
+
+def verify_dtypes(adata) -> None:
+    try:
+        _ = adata[:, 0]
+    except Exception:
+        uns = adata.uns
+        adata.uns = {}
+        try:
+            _ = adata[:, 0]
+            print(
+                "Safely deleted unstructured annotations (adata.uns), \n"
+                "as these do not comply with permissible anndata datatypes."
+            )
+        except Exception:
+            print(
+                "The data might be corrupted. Please verify all annotation datatypes."
+            )
+            adata.uns = uns
+
+
+def get_size(adata, modality=None):
+    X = get_modality(adata=adata, modality=modality)
+    return sum(X, axis=1)
+
+
+def set_initial_size(adata, layers=None):
+    if layers is None:
+        layers = ["unspliced", "spliced"]
+    verify_dtypes(adata)
+    layers = [
+        layer
+        for layer in layers
+        if layer in adata.layers.keys()
+        and f"initial_size_{layer}" not in adata.obs.keys()
+    ]
+    for layer in layers:
+        adata.obs[f"initial_size_{layer}"] = get_size(adata, layer)
+    if "initial_size" not in adata.obs.keys():
+        adata.obs["initial_size"] = get_size(adata)
+
+
+def materialize_as_ndarray(key):
+    if isinstance(key, (list, tuple)):
+        return tuple(np.asarray(arr) for arr in key)
+    return np.asarray(key)
+
+
+def get_mean_var(X, ignore_zeros=False, perc=None):
+    data = X.data if issparse(X) else X
+    mask_nans = np.isnan(data) | np.isinf(data) | np.isneginf(data)
+
+    if issparse(X):
+        n_nonzeros = X.getnnz(axis=0)
+    else:
+        n_nonzeros = (X != 0).sum(axis=0)
+
+    if ignore_zeros:
+        n_counts = n_nonzeros
+    else:
+        n_counts = X.shape[0]
+
+    if mask_nans.sum() > 0:
+        if issparse(X):
+            data[mask_nans] = 0
+            n_nans = (n_nonzeros - (X != 0).sum(0)).A1
+        else:
+            X[mask_nans] = 0
+            n_nans = mask_nans.sum(0)
+        n_counts -= n_nans
+
+    if perc is not None:
+        if np.size(perc) < 2:
+            perc = [perc, 100] if perc < 50 else [0, perc]
+        lb, ub = np.percentile(data, perc)
+        if issparse(X):
+            X.data = np.clip(data, lb, ub)
+        else:
+            X = np.clip(data, lb, ub)
+
+    if issparse(X):
+        mean = (X.sum(0) / n_counts).A1
+        mean_sq = (X.multiply(X).sum(0) / n_counts).A1
+    else:
+        mean = X.sum(0) / n_counts
+        mean_sq = np.multiply(X, X).sum(0) / n_counts
+
+    n_counts = np.clip(n_counts, 2, None)  # to avoid division by zero
+    var = (mean_sq - mean**2) * (n_counts / (n_counts - 1))
+
+    mean = np.nan_to_num(mean)
+    var = np.nan_to_num(var)
+
+    return mean, var
+
+
+def filter_genes_dispersion(
+    data,
+    flavor="seurat",
+    min_disp=None,
+    max_disp=None,
+    min_mean=None,
+    max_mean=None,
+    n_bins=20,
+    n_top_genes=None,
+    retain_genes=None,
+    log=True,
+    subset=True,
+    copy=False,
+):
+    """Extract highly variable genes.
+
+    Expects non-logarithmized data.
+    The normalized dispersion is obtained by scaling with the mean and standard
+    deviation of the dispersions for genes falling into a given bin for mean
+    expression of genes. This means that for each bin of mean expression, highly
+    variable genes are selected.
+
+    Parameters
+    ----------
+    data : :class:`~anndata.AnnData`, `np.ndarray`, `sp.sparse`
+        The (annotated) data matrix of shape `n_obs` × `n_vars`. Rows correspond
+        to cells and columns to genes.
+    flavor : {'seurat', 'cell_ranger', 'svr'}, optional (default: 'seurat')
+        Choose the flavor for computing normalized dispersion. If choosing
+        'seurat', this expects non-logarithmized data - the logarithm of mean
+        and dispersion is taken internally when `log` is at its default value
+        `True`. For 'cell_ranger', this is usually called for logarithmized data
+        - in this case you should set `log` to `False`. In their default
+        workflows, Seurat passes the cutoffs whereas Cell Ranger passes
+        `n_top_genes`.
+    min_mean=0.0125, max_mean=3, min_disp=0.5, max_disp=`None` : `float`, optional
+        If `n_top_genes` unequals `None`, these cutoffs for the means and the
+        normalized dispersions are ignored.
+    n_bins : `int` (default: 20)
+        Number of bins for binning the mean gene expression. Normalization is
+        done with respect to each bin. If just a single gene falls into a bin,
+        the normalized dispersion is artificially set to 1. You'll be informed
+        about this if you set `settings.verbosity = 4`.
+    n_top_genes : `int` or `None` (default: `None`)
+        Number of highly-variable genes to keep.
+    retain_genes: `list`, optional (default: `None`)
+        List of gene names to be retained independent of thresholds.
+    log : `bool`, optional (default: `True`)
+        Use the logarithm of the mean to variance ratio.
+    subset : `bool`, optional (default: `True`)
+        Keep highly-variable genes only (if True) else write a bool
+        array for highly-variable genes while keeping all genes.
+    copy : `bool`, optional (default: `False`)
+        If an :class:`~anndata.AnnData` is passed, determines whether a copy
+        is returned.
+
+    Returns
+    -------
+    If an AnnData `adata` is passed, returns or updates `adata` depending on \
+    `copy`. It filters the `adata` and adds the annotations
+    """
+
+    import warnings
+    adata = data.copy() if copy else data
+    set_initial_size(adata)
+
+    mean, var = materialize_as_ndarray(get_mean_var(adata.X))
+
+    if n_top_genes is not None and adata.n_vars < n_top_genes:
+        print(
+            "Skip filtering by dispersion since number "
+            "of variables are less than `n_top_genes`."
+        )
+    else:
+        if flavor == "svr":
+            from sklearn.svm import SVR
+
+            log_mu = np.log2(mean)
+            log_cv = np.log2(np.sqrt(var) / mean)
+            clf = SVR(gamma=150.0 / len(mean))
+            clf.fit(log_mu[:, None], log_cv)
+            score = log_cv - clf.predict(log_mu[:, None])
+            nth_score = np.sort(score)[::-1][n_top_genes - 1]
+            adata.var["highly_variable"] = score >= nth_score
+
+        else:
+            cut_disp = [min_disp, max_disp, min_mean, max_mean]
+            if n_top_genes is not None and not all(x is None for x in cut_disp):
+                print("If you pass `n_top_genes`, all cutoffs are ignored.")
+            if min_disp is None:
+                min_disp = 0.5
+            if max_disp is None:
+                max_disp = np.inf
+            if min_mean is None:
+                min_mean = 0.0125
+            if max_mean is None:
+                max_mean = 3
+
+            mean[mean == 0] = 1e-12
+            dispersion = var / mean
+            if log:
+                dispersion[dispersion == 0] = np.nan
+                dispersion = np.log(dispersion)
+                mean = np.log1p(mean)
+                mean[np.isnan(mean)] = 0  # deal with negative means
+
+            df = pd.DataFrame()
+            df["mean"], df["dispersion"] = mean, dispersion
+
+            if flavor == "seurat":
+                df["mean_bin"] = pd.cut(df["mean"], bins=n_bins)
+                disp_grouped = df.groupby("mean_bin")["dispersion"]
+                disp_mean_bin = disp_grouped.mean()
+                disp_std_bin = disp_grouped.std(ddof=1)
+
+                one_gene_per_bin = disp_std_bin.isnull()
+
+                disp_std_bin[one_gene_per_bin] = disp_mean_bin[one_gene_per_bin].values
+                disp_mean_bin[one_gene_per_bin] = 0
+
+                mu = disp_mean_bin[df["mean_bin"].values].values
+                std = disp_std_bin[df["mean_bin"].values].values
+                df["dispersion_norm"] = ((df["dispersion"] - mu) / std).fillna(0)
+            elif flavor == "cell_ranger":
+                from statsmodels import robust
+
+                cut = np.percentile(df["mean"], np.arange(10, 105, 5))
+                df["mean_bin"] = pd.cut(df["mean"], np.r_[-np.inf, cut, np.inf])
+                disp_grouped = df.groupby("mean_bin")["dispersion"]
+                disp_median_bin = disp_grouped.median()
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    disp_mad_bin = disp_grouped.apply(robust.mad)
+                mu = disp_median_bin[df["mean_bin"].values].values
+                std = disp_mad_bin[df["mean_bin"].values].values
+                df["dispersion_norm"] = (np.abs(df["dispersion"] - mu) / std).fillna(0)
+            else:
+                raise ValueError('`flavor` needs to be "seurat" or "cell_ranger"')
+            dispersion_norm = df["dispersion_norm"].values
+            if n_top_genes is not None:
+                cut_off = df["dispersion_norm"].nlargest(n_top_genes).values[-1]
+                gene_subset = df["dispersion_norm"].values >= cut_off
+            else:
+                gene_subset = np.logical_and.reduce(
+                    (
+                        mean > min_mean,
+                        mean < max_mean,
+                        dispersion_norm > min_disp,
+                        dispersion_norm < max_disp,
+                    )
+                )
+
+            adata.var["means"] = df["mean"].values
+            adata.var["dispersions"] = df["dispersion"].values
+            adata.var["dispersions_norm"] = df["dispersion_norm"].values
+            adata.var["highly_variable"] = gene_subset
+
+        if subset:
+            gene_subset = adata.var["highly_variable"]
+            if retain_genes is not None:
+                if isinstance(retain_genes, str):
+                    retain_genes = [retain_genes]
+                gene_subset = gene_subset | adata.var_names.isin(retain_genes)
+            adata._inplace_subset_var(gene_subset)
+
+        print(f"Extracted {np.sum(gene_subset)} highly variable genes.")
+        adata.uns['hvg'] = {'flavor': flavor}
+    return adata if copy else None
