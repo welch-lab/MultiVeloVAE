@@ -1849,8 +1849,7 @@ class VAEChrom():
 
         data_loader = torch.utils.data.DataLoader(train_set, batch_size=self.config["batch_size"], shuffle=True)
         if self.config["test_iter"] is None:
-            # self.config["test_iter"] = len(self.train_idx)//self.config["batch_size"]*2
-            self.config["test_iter"] = 100
+            self.config["test_iter"] = len(self.train_idx)//self.config["batch_size"]*2
 
         self.train_idx = torch.tensor(self.train_idx, dtype=int, device=self.device)
         self.test_idx = torch.tensor(self.test_idx, dtype=int, device=self.device)
