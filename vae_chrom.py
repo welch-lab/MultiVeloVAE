@@ -812,6 +812,7 @@ class VAEChrom():
         self.loss_train, self.loss_test = [], []
         self.rec_train, self.klt_train, self.klz_train = [], [], []
         self.rec_test, self.klt_test, self.klz_test = [], [], []
+        self.loss_test_color = []
         self.counter = 0
         self.n_drop = 0
         self.best_model_state = None
@@ -1615,10 +1616,15 @@ class VAEChrom():
         if reset:
             self.best_model_state = None
             self.best_counter = 0
-        elif len(self.loss_test)*self.config["test_iter"] > self.counter_start and loss_test < np.min(self.loss_test[self.counter_start//self.config["test_iter"]:]):
-            print(self.counter, len(self.loss_test), loss_test, self.config["test_iter"])
-            self.best_counter = counter
-            self.best_model_state = (copy.deepcopy(self.encoder.state_dict()), copy.deepcopy(self.decoder.state_dict()))
+        elif ((len(self.loss_test)-2)*self.config["test_iter"]+2) >= self.counter_start:
+            if loss_test < np.min(self.loss_test[(self.counter_start-2)//self.config["test_iter"]+1:]):
+                self.best_counter = counter
+                self.best_model_state = (copy.deepcopy(self.encoder.state_dict()), copy.deepcopy(self.decoder.state_dict()))
+                self.loss_test_color.append('blue')
+            else:
+                self.loss_test_color.append('red')
+        else:
+            self.loss_test_color.append('blue')
 
     def train_epoch(self, train_loader, test_set, optimizer, optimizer2=None, k=1, net='both'):
         B = len(train_loader)
@@ -1638,6 +1644,8 @@ class VAEChrom():
                     else:
                         self.n_drop = 0
                     self.save_state_dict(self.counter, -elbo_test)
+                else:
+                    self.loss_test_color.append('blue')
                 self.loss_test.append(-elbo_test)
                 self.rec_test.append(-rec_test)
                 self.klt_test.append(-klt_test)
@@ -1646,6 +1654,7 @@ class VAEChrom():
 
                 if (self.n_drop >= self.config["early_stop"]) and (self.config["early_stop"] > 0):
                     stop_training = True
+                    self.counter = self.counter + 1
                     break
 
             optimizer.zero_grad()
@@ -1840,7 +1849,8 @@ class VAEChrom():
 
         data_loader = torch.utils.data.DataLoader(train_set, batch_size=self.config["batch_size"], shuffle=True)
         if self.config["test_iter"] is None:
-            self.config["test_iter"] = len(self.train_idx)//self.config["batch_size"]*2
+            # self.config["test_iter"] = len(self.train_idx)//self.config["batch_size"]*2
+            self.config["test_iter"] = 100
 
         self.train_idx = torch.tensor(self.train_idx, dtype=int, device=self.device)
         self.test_idx = torch.tensor(self.test_idx, dtype=int, device=self.device)
@@ -2112,6 +2122,7 @@ class VAEChrom():
         self.klz_train.append(-klz_train)
 
         self.loss_test.append(-elbo_test)
+        self.loss_test_color.append('blue')
         self.rec_test.append(-rec_test)
         self.klt_test.append(-klt_test)
         self.klz_test.append(-klz_test)
@@ -2121,10 +2132,10 @@ class VAEChrom():
             plot_train_loss_log(self.klt_train, range(1, len(self.klt_train)+1), save=f'{figure_path}/train_loss_klt_velovae.png')
             plot_train_loss_log(self.klz_train, range(1, len(self.klz_train)+1), save=f'{figure_path}/train_loss_klz_velovae.png')
             if self.config["test_iter"] > 0:
-                plot_test_loss_log(self.loss_test, [i*self.config["test_iter"]+1 for i in range(len(self.loss_test))], save=f'{figure_path}/test_loss_velovae.png')
-                plot_test_loss_log(self.rec_test, [i*self.config["test_iter"]+1 for i in range(len(self.rec_test))], save=f'{figure_path}/test_loss_rec_velovae.png')
-                plot_test_loss_log(self.klt_test, [i*self.config["test_iter"]+1 for i in range(len(self.klt_test))], save=f'{figure_path}/test_loss_klt_velovae.png')
-                plot_test_loss_log(self.klz_test, [i*self.config["test_iter"]+1 for i in range(len(self.klz_test))], save=f'{figure_path}/test_loss_klz_velovae.png')
+                plot_test_loss_log(self.loss_test, [i*self.config["test_iter"]+1 for i in range(len(self.loss_test))], color=self.loss_test_color, save=f'{figure_path}/test_loss_velovae.png')
+                plot_test_loss_log(self.rec_test, [i*self.config["test_iter"]+1 for i in range(len(self.rec_test))], color=self.loss_test_color, save=f'{figure_path}/test_loss_rec_velovae.png')
+                plot_test_loss_log(self.klt_test, [i*self.config["test_iter"]+1 for i in range(len(self.klt_test))], color=self.loss_test_color, save=f'{figure_path}/test_loss_klt_velovae.png')
+                plot_test_loss_log(self.klz_test, [i*self.config["test_iter"]+1 for i in range(len(self.klz_test))], color=self.loss_test_color, save=f'{figure_path}/test_loss_klz_velovae.png')
         print(f"Final: Train ELBO = {elbo_train:.3f},\tTest ELBO = {elbo_test:.3f}")
         print(f"*********      Finished. Total Time = {convert_time(time.time()-start)}     *********")
 

@@ -993,11 +993,15 @@ def plot_train_loss_log(loss, iters, save=None):
     save_fig(fig, save)
 
 
-def plot_test_loss_log(loss, iters, save=None):
+def plot_test_loss_log(loss, iters, color=None, save=None):
     fig, ax = plt.subplots(facecolor='white')
     loss_min = np.min(loss)
     loss_log = np.log1p(loss - loss_min)
-    ax.plot(iters, loss_log, '.-')
+    if color is not None:
+        ax.plot(iters, loss_log, '-')
+        ax.scatter(iters, loss_log, c=color)
+    else:
+        ax.plot(iters, loss_log, '.-')
     ax.set_title(f"Testing Loss Log (min={loss_min})")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
