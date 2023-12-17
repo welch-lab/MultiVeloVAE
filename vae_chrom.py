@@ -810,14 +810,14 @@ class VAEChrom():
         self.z = None
 
         self.loss_train, self.loss_test = [], []
+        self.loss_test_iter, self.loss_test_color = [], []
         self.rec_train, self.klt_train, self.klz_train = [], [], []
         self.rec_test, self.klt_test, self.klz_test = [], [], []
-        self.loss_test_color = []
         self.counter = 0
         self.n_drop = 0
         self.best_model_state = None
         self.best_counter = 0
-        self.counter_start = 0
+        self.loss_idx_start = 0
 
         self.clip_fn = nn.Hardtanh(-1e30, 1e30)
 
@@ -1612,19 +1612,23 @@ class VAEChrom():
                              sparsify=self.config['sparsify'])
         return elbo, rec, klt, klz
 
-    def save_state_dict(self, counter=0, loss_test=0, reset=False):
+    def save_state_dict(self, loss_test=0, reset=False):
         if reset:
             self.best_model_state = None
             self.best_counter = 0
-        elif ((len(self.loss_test)-2)*self.config["test_iter"]+2) >= self.counter_start:
-            if loss_test < np.min(self.loss_test[(self.counter_start-2)//self.config["test_iter"]+1:]):
-                self.best_counter = counter
+        elif len(self.loss_test) >= self.loss_idx_start + 1:
+            if loss_test <= np.min(self.loss_test[self.loss_idx_start:]):
+                self.best_counter = self.counter
                 self.best_model_state = (copy.deepcopy(self.encoder.state_dict()), copy.deepcopy(self.decoder.state_dict()))
                 self.loss_test_color.append('blue')
             else:
                 self.loss_test_color.append('red')
+            self.loss_test.append(loss_test)
+            self.loss_test_iter.append(self.counter)
         else:
             self.loss_test_color.append('blue')
+            self.loss_test.append(loss_test)
+            self.loss_test_iter.append(self.counter)
 
     def train_epoch(self, train_loader, test_set, optimizer, optimizer2=None, k=1, net='both'):
         B = len(train_loader)
@@ -1632,7 +1636,7 @@ class VAEChrom():
         stop_training = False
 
         for i, batch in enumerate(train_loader):
-            if self.counter % self.config["test_iter"] == 1:
+            if self.counter % self.config["test_iter"] == (2 if self.use_knn else 1):
                 elbo_test, rec_test, klt_test, klz_test = self.test(test_set,
                                                                     None,
                                                                     self.counter,
@@ -1643,10 +1647,7 @@ class VAEChrom():
                         self.n_drop = self.n_drop + 1
                     else:
                         self.n_drop = 0
-                    self.save_state_dict(self.counter, -elbo_test)
-                else:
-                    self.loss_test_color.append('blue')
-                self.loss_test.append(-elbo_test)
+                self.save_state_dict(-elbo_test)
                 self.rec_test.append(-rec_test)
                 self.klt_test.append(-klt_test)
                 self.klz_test.append(-klz_test)
@@ -1921,7 +1922,7 @@ class VAEChrom():
             if stop_training:
                 print(f"*********     Stage 1: Early Stop Triggered at epoch {epoch+1}.     *********")
                 if self.best_model_state is not None:
-                    print(f"*********     Retrieving best model from iteration {self.best_counter}.     *********")
+                    print(f"*********     Retrieving best model from iteration {self.best_counter}.      *********")
                     self.encoder.load_state_dict(self.best_model_state[0])
                     self.decoder.load_state_dict(self.best_model_state[1])
                 break
@@ -1933,6 +1934,7 @@ class VAEChrom():
             n_test1 = len(self.loss_test)
             self.set_mode('eval', 'encoder')
             self.save_state_dict(reset=True)
+            self.config['test_iter'] = self.config['test_iter'] // 2
             param_post = list(self.decoder.net_rho.parameters())
             param_post += list(self.decoder.net_kc.parameters())
             param_ode = [self.decoder.alpha_c,
@@ -2010,7 +2012,7 @@ class VAEChrom():
                     self.decoder.init_weights(reinit_t=False)
 
                 self.n_drop = 0
-                self.counter_start = self.counter
+                self.loss_idx_start = len(self.loss_test)
                 print(f"*********             Velocity Refinement Round {r+1}             *********")
 
                 for epoch in range(self.config["n_epochs_post"]):
@@ -2054,8 +2056,9 @@ class VAEChrom():
 
                     if stop_training:
                         print(f"*********     Round {r+1}: Early Stop Triggered at epoch {epoch+count_epoch+1}.     *********")
+                    if stop_training or epoch == self.config["n_epochs_post"]:
                         if self.best_model_state is not None:
-                            print(f"*********     Retrieving best model from iteration {self.best_counter}.     *********")
+                            print(f"*********     Retrieving best model from iteration {self.best_counter}.      *********")
                             self.encoder.load_state_dict(self.best_model_state[0])
                             self.decoder.load_state_dict(self.best_model_state[1])
                             self.save_state_dict(reset=True)
@@ -2120,8 +2123,7 @@ class VAEChrom():
         self.klt_train.append(-klt_train)
         self.klz_train.append(-klz_train)
 
-        self.loss_test.append(-elbo_test)
-        self.loss_test_color.append('blue')
+        self.save_state_dict(-elbo_test)
         self.rec_test.append(-rec_test)
         self.klt_test.append(-klt_test)
         self.klz_test.append(-klz_test)
@@ -2131,10 +2133,10 @@ class VAEChrom():
             plot_train_loss_log(self.klt_train, range(1, len(self.klt_train)+1), save=f'{figure_path}/train_loss_klt_velovae.png')
             plot_train_loss_log(self.klz_train, range(1, len(self.klz_train)+1), save=f'{figure_path}/train_loss_klz_velovae.png')
             if self.config["test_iter"] > 0:
-                plot_test_loss_log(self.loss_test, [i*self.config["test_iter"]+1 for i in range(len(self.loss_test))], color=self.loss_test_color, save=f'{figure_path}/test_loss_velovae.png')
-                plot_test_loss_log(self.rec_test, [i*self.config["test_iter"]+1 for i in range(len(self.rec_test))], color=self.loss_test_color, save=f'{figure_path}/test_loss_rec_velovae.png')
-                plot_test_loss_log(self.klt_test, [i*self.config["test_iter"]+1 for i in range(len(self.klt_test))], color=self.loss_test_color, save=f'{figure_path}/test_loss_klt_velovae.png')
-                plot_test_loss_log(self.klz_test, [i*self.config["test_iter"]+1 for i in range(len(self.klz_test))], color=self.loss_test_color, save=f'{figure_path}/test_loss_klz_velovae.png')
+                plot_test_loss_log(self.loss_test, self.loss_test_iter, color=self.loss_test_color, save=f'{figure_path}/test_loss_velovae.png')
+                plot_test_loss_log(self.rec_test, self.loss_test_iter, color=self.loss_test_color, save=f'{figure_path}/test_loss_rec_velovae.png')
+                plot_test_loss_log(self.klt_test, self.loss_test_iter, color=self.loss_test_color, save=f'{figure_path}/test_loss_klt_velovae.png')
+                plot_test_loss_log(self.klz_test, self.loss_test_iter, color=self.loss_test_color, save=f'{figure_path}/test_loss_klz_velovae.png')
         print(f"Final: Train ELBO = {elbo_train:.3f},\tTest ELBO = {elbo_test:.3f}")
         print(f"*********      Finished. Total Time = {convert_time(time.time()-start)}     *********")
 

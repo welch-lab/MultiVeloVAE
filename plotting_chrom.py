@@ -382,7 +382,7 @@ def plot_phase(c, u, s,
                save=None,
                plot_pred=True,
                show=False):
-    fig, ax = plt.subplots(figsize=(6, 6), facecolor='white')
+    fig, ax = plt.subplots(figsize=(10, 10), facecolor='white')
     if cell_labels is None:
         if by == 'us':
             ax.scatter(s, u, c="b", alpha=0.5)
@@ -500,7 +500,7 @@ def plot_time(t_latent,
     save : str, optional
         Figure name for saving (including path)
     """
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(10, 8))
     _plot_heatmap(ax, t_latent, X_embed, "Latent Time", None, cmap=cmap, axis_off=True)
     save_fig(fig, save)
 
@@ -982,7 +982,7 @@ def scatter_plot(adata,
 
 
 def plot_train_loss_log(loss, iters, save=None):
-    fig, ax = plt.subplots(facecolor='white')
+    fig, ax = plt.subplots(facecolor='white', figsize=(12, 6))
     loss_min = np.min(loss)
     loss_log = np.log1p(loss - loss_min)
     ax.plot(iters, loss_log, '.-')
@@ -994,7 +994,7 @@ def plot_train_loss_log(loss, iters, save=None):
 
 
 def plot_test_loss_log(loss, iters, color=None, save=None):
-    fig, ax = plt.subplots(facecolor='white')
+    fig, ax = plt.subplots(facecolor='white', figsize=(12, 6))
     loss_min = np.min(loss)
     loss_log = np.log1p(loss - loss_min)
     if color is not None:
