@@ -1,0 +1,8 @@
+*.sh
+notebooks/
+checkpoints/
+data/
+figures/
+__pycache__/
+.ipynb_checkpoints
+.vscode

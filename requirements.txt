@@ -1,0 +1,26 @@
+typing_extensions
+
+# Deep Learning
+torch>=1.8.0
+
+# scRNA Data Analysis
+anndata>=0.7.5
+scanpy>=1.5
+scvelo>=0.2.3
+multivelo>=0.1.2
+umap-learn>=0.3.10
+numba>=0.41.0
+numpy>=1.23.5
+scipy>=1.4.1
+pandas>=0.23.0
+scikit-learn>=0.23.0
+
+# Plotting
+matplotlib>=3.3.0
+loess
+seaborn>=0.11.0
+
+# Other
+tqdm
+joblib
+ipywidgets
