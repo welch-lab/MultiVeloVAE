@@ -98,7 +98,6 @@ class Decoder(nn.Module):
                  tmax=1,
                  reinit=False,
                  init_ton_zero=False,
-                 init_delta=False,
                  init_method='steady',
                  init_key=None,
                  checkpoint=None):
@@ -122,7 +121,6 @@ class Decoder(nn.Module):
         self.rna_only_idx = np.array(rna_only_idx)
         self.reinit = reinit
         self.init_ton_zero = init_ton_zero
-        self.init_delta = init_delta
         self.init_method = init_method
         self.init_key = init_key
         self.checkpoint = checkpoint
@@ -246,9 +244,7 @@ class Decoder(nn.Module):
         G = self.adata.n_vars
         print("Initializing using the steady-state and dynamical models.")
         out = init_params(c, u, s, p, fit_scaling=True, global_std=self.global_std, tmax=self.tmax, rna_only=self.rna_only)
-        alpha_c, alpha, beta, gamma, delta, scaling_c, scaling_u, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, t, cpred, upred, spred = out
-        if not self.init_delta:
-            delta = np.ones_like(alpha) * 1e-10
+        alpha_c, alpha, beta, gamma, scaling_c, scaling_u, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, t, cpred, upred, spred = out
         scaling_s = np.ones_like(scaling_u)
         offset_c, offset_u, offset_s = np.zeros_like(scaling_u), np.zeros_like(scaling_u), np.zeros_like(scaling_u)
 
@@ -385,7 +381,6 @@ class Decoder(nn.Module):
         self.alpha = self.to_param(alpha)
         self.beta = self.to_param(beta)
         self.gamma = self.to_param(gamma)
-        self.delta = self.to_param(delta)
         self.scaling_c = nn.Parameter(torch.tensor(np.log(scaling_c) if self.log_params else softplusinv(scaling_c)))
         self.scaling_u = nn.Parameter(torch.tensor(np.log(scaling_u) if self.log_params else softplusinv(scaling_u)))
         self.scaling_s = nn.Parameter(torch.tensor(np.log(scaling_s) if self.log_params else softplusinv(scaling_s)))
@@ -433,8 +428,6 @@ class Decoder(nn.Module):
             out = self.beta
         elif x == 'gamma':
             out = self.gamma
-        elif x == 'delta':
-            out = self.delta
         elif x == 'scaling_c':
             out = self.scaling_c
         elif x == 'scaling_u':
@@ -496,7 +489,6 @@ class Decoder(nn.Module):
         alpha = self.get_param_1d('alpha', condition, four_basis, self.is_full_vb, sample)
         beta = self.get_param_1d('beta', condition, four_basis, self.is_full_vb, sample)
         gamma = self.get_param_1d('gamma', condition, four_basis, self.is_full_vb, sample)
-        delta = self.get_param_1d('delta', condition, four_basis, self.is_full_vb, sample)
         scaling_c = self.get_param_1d('scaling_c', condition, four_basis, mask_idx=self.rna_only_idx, mask_to=1)
         scaling_u = self.get_param_1d('scaling_u', condition, four_basis)
         scaling_s = self.get_param_1d('scaling_s', condition, four_basis, mask_idx=self.ref_batch)
@@ -504,10 +496,10 @@ class Decoder(nn.Module):
         offset_u = self.get_param_1d('offset_u', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
         offset_s = self.get_param_1d('offset_s', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
 
-        return alpha_c, alpha, beta, gamma, delta, scaling_c, scaling_u, scaling_s, offset_c, offset_u, offset_s
+        return alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s, offset_c, offset_u, offset_s
 
     def forward(self, t, z, c0=None, u0=None, s0=None, t0=None, condition=None, regressor=None, neg_slope=0.0, sample=True, four_basis=False, return_velocity=False, use_input_time=False):
-        alpha_c, alpha, beta, gamma, delta, scaling_c, scaling_u, scaling_s, offset_c, offset_u, offset_s = self.reparameterize(condition, sample, four_basis)
+        alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s, offset_c, offset_u, offset_s = self.reparameterize(condition, sample, four_basis)
 
         z_in = z
         if condition is not None:
@@ -562,8 +554,7 @@ class Decoder(nn.Module):
                                         rho,
                                         alpha,
                                         beta,
-                                        gamma,
-                                        delta)
+                                        gamma)
 
         else:
             tau = F.leaky_relu(t_ - t0, neg_slope)
@@ -576,8 +567,7 @@ class Decoder(nn.Module):
                                         self.rho,
                                         alpha,
                                         beta,
-                                        gamma,
-                                        delta)
+                                        gamma)
             if len(self.rna_only_idx) > 0 and condition is not None:
                 mask = np.in1d(np.arange(self.dim_cond), self.rna_only_idx)
                 mask = torch.tensor(mask, device=chat.device).int()
@@ -588,7 +578,7 @@ class Decoder(nn.Module):
 
         if return_velocity:
             vc = self.kc * alpha_c - alpha_c * chat
-            vu = self.rho * alpha * chat - beta * uhat - delta * uhat
+            vu = self.rho * alpha * chat - beta * uhat
             vs = beta * uhat - gamma * shat
             return chat, uhat, shat, t_, vc, vu, vs
         else:
@@ -620,7 +610,6 @@ class VAEChrom():
                  init_key=None,
                  tprior=None,
                  init_ton_zero=True,
-                 train_delta=False,
                  unit_scale=True,
                  deming_std=False,
                  log_params=False,
@@ -725,7 +714,6 @@ class VAEChrom():
             "neg_slope": 0.0,
             "neg_slope2": 0.01,
             "k_alt": 0,
-            "train_delta": train_delta,
             "train_ton": False,
             "train_scaling": True,
             "train_offset": True,
@@ -787,7 +775,6 @@ class VAEChrom():
                                tmax=tmax,
                                reinit=reinit_params,
                                init_ton_zero=init_ton_zero,
-                               init_delta=self.config['train_delta'],
                                init_method=init_method,
                                init_key=init_key,
                                checkpoint=checkpoints[1]).float().to(self.device)
@@ -826,8 +813,7 @@ class VAEChrom():
             self.p_log_alpha = torch.tensor([[2.5], [0.5]], dtype=torch.float, device=self.device)
             self.p_log_beta = torch.tensor([[2.5], [0.5]], dtype=torch.float, device=self.device)
             self.p_log_gamma = torch.tensor([[2.5], [0.5]], dtype=torch.float, device=self.device)
-            self.p_log_delta = torch.tensor([[0.5], [0.5]], dtype=torch.float, device=self.device)
-            self.p_params = [self.p_log_alpha_c, self.p_log_alpha, self.p_log_beta, self.p_log_gamma, self.p_log_delta]
+            self.p_params = [self.p_log_alpha_c, self.p_log_alpha, self.p_log_beta, self.p_log_gamma]
 
         if plot_init:
             self.plot_initial(gene_plot, figure_path, embed)
@@ -1265,7 +1251,7 @@ class VAEChrom():
         self.global_counter += 1
 
         if condition is not None:
-            params_eval = ['alpha', 'beta', 'gamma', 'delta'] if self.config['rna_only'] else ['alpha_c', 'alpha', 'beta', 'gamma', 'delta']
+            params_eval = ['alpha', 'beta', 'gamma'] if self.config['rna_only'] else ['alpha_c', 'alpha', 'beta', 'gamma']
             for x in params_eval:
                 for i in range(self.n_batch):
                     if i != self.ref_batch:
@@ -1278,7 +1264,7 @@ class VAEChrom():
 
         if self.config["is_full_vb"]:
             kld_params = None
-            params_eval = ['alpha', 'beta', 'gamma', 'delta'] if self.config['rna_only'] else ['alpha_c', 'alpha', 'beta', 'gamma', 'delta']
+            params_eval = ['alpha', 'beta', 'gamma'] if self.config['rna_only'] else ['alpha_c', 'alpha', 'beta', 'gamma']
             for i, x in enumerate(params_eval):
                 if self.enable_cvae:
                     for j in range(self.n_batch):
@@ -1870,8 +1856,6 @@ class VAEChrom():
                      self.decoder.alpha,
                      self.decoder.beta,
                      self.decoder.gamma]
-        if self.config['train_delta']:
-            param_ode.append(self.decoder.delta)
         if self.config['train_scaling']:
             param_ode.extend([self.decoder.scaling_c,
                               self.decoder.scaling_u])
@@ -1941,8 +1925,6 @@ class VAEChrom():
                          self.decoder.alpha,
                          self.decoder.beta,
                          self.decoder.gamma]
-            if self.config['train_delta']:
-                param_ode.append(self.decoder.delta)
             optimizer_post = torch.optim.AdamW(param_post, lr=self.config["learning_rate_post"], weight_decay=self.config["lambda_post"])
             optimizer_ode = torch.optim.AdamW(param_ode, lr=self.config["learning_rate_ode"], weight_decay=self.config["lambda"])
 
@@ -2160,7 +2142,6 @@ class VAEChrom():
                     self.adata.var[f"{key}_alpha_{i}"] = self.decoder.get_param('alpha', idx=(i, 0)).detach().cpu().numpy()
                     self.adata.var[f"{key}_beta_{i}"] = self.decoder.get_param('beta', idx=(i, 0)).detach().cpu().numpy()
                     self.adata.var[f"{key}_gamma_{i}"] = self.decoder.get_param('gamma', idx=(i, 0)).detach().cpu().numpy()
-                    self.adata.var[f"{key}_delta_{i}"] = self.decoder.get_param('delta', idx=(i, 0)).detach().cpu().numpy()
                     if self.config['rna_only'] or i in self.rna_only_idx:
                         self.adata.var[f"{key}_std_log_alpha_c_{i}"] = 0
                     else:
@@ -2168,7 +2149,6 @@ class VAEChrom():
                     self.adata.var[f"{key}_std_log_alpha_{i}"] = self.decoder.get_param('alpha', idx=(i, 1)).detach().cpu().numpy()
                     self.adata.var[f"{key}_std_log_beta_{i}"] = self.decoder.get_param('beta', idx=(i, 1)).detach().cpu().numpy()
                     self.adata.var[f"{key}_std_log_gamma_{i}"] = self.decoder.get_param('gamma', idx=(i, 1)).detach().cpu().numpy()
-                    self.adata.var[f"{key}_std_log_delta_{i}"] = self.decoder.get_param('delta', idx=(i, 1)).detach().cpu().numpy()
             else:
                 if self.config['rna_only']:
                     self.adata.var[f"{key}_alpha_c"] = 0
@@ -2177,7 +2157,6 @@ class VAEChrom():
                 self.adata.var[f"{key}_alpha"] = self.decoder.get_param('alpha', idx=0).detach().cpu().numpy()
                 self.adata.var[f"{key}_beta"] = self.decoder.get_param('beta', idx=0).detach().cpu().numpy()
                 self.adata.var[f"{key}_gamma"] = self.decoder.get_param('gamma', idx=0).detach().cpu().numpy()
-                self.adata.var[f"{key}_delta"] = self.decoder.get_param('delta', idx=0).detach().cpu().numpy()
                 if self.config['rna_only']:
                     self.adata.var[f"{key}_std_log_alpha_c"] = 0
                 else:
@@ -2185,7 +2164,6 @@ class VAEChrom():
                 self.adata.var[f"{key}_std_log_alpha"] = self.decoder.get_param('alpha', idx=1).detach().cpu().numpy()
                 self.adata.var[f"{key}_std_log_beta"] = self.decoder.get_param('beta', idx=1).detach().cpu().numpy()
                 self.adata.var[f"{key}_std_log_gamma"] = self.decoder.get_param('gamma', idx=1).detach().cpu().numpy()
-                self.adata.var[f"{key}_std_log_delta"] = self.decoder.get_param('delta', idx=1).detach().cpu().numpy()
         else:
             if self.enable_cvae:
                 for i in range(self.n_batch):
@@ -2196,7 +2174,6 @@ class VAEChrom():
                     self.adata.var[f"{key}_alpha_{i}"] = self.decoder.get_param('alpha', idx=i).detach().cpu().numpy()
                     self.adata.var[f"{key}_beta_{i}"] = self.decoder.get_param('beta', idx=i).detach().cpu().numpy()
                     self.adata.var[f"{key}_gamma_{i}"] = self.decoder.get_param('gamma', idx=i).detach().cpu().numpy()
-                    self.adata.var[f"{key}_delta_{i}"] = self.decoder.get_param('delta', idx=i).detach().cpu().numpy()
             else:
                 if self.config['rna_only']:
                     self.adata.var[f"{key}_alpha_c"] = 0
@@ -2205,7 +2182,6 @@ class VAEChrom():
                 self.adata.var[f"{key}_alpha"] = self.decoder.get_param('alpha').detach().cpu().numpy()
                 self.adata.var[f"{key}_beta"] = self.decoder.get_param('beta').detach().cpu().numpy()
                 self.adata.var[f"{key}_gamma"] = self.decoder.get_param('gamma').detach().cpu().numpy()
-                self.adata.var[f"{key}_delta"] = self.decoder.get_param('delta').detach().cpu().numpy()
         if self.enable_cvae:
             for i in range(self.n_batch):
                 if self.config['rna_only'] or i in self.rna_only_idx:

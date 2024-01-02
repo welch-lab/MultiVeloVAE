@@ -87,58 +87,28 @@ def pred_single(t, alpha_c, alpha, beta, gamma, ts, cinit=0, uinit=0, sinit=0):
     return ct.squeeze(), ut.squeeze(), st.squeeze()
 
 
-def pred_exp(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma, delta):
+def pred_exp(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
     expac, expb, expg = torch.exp(-alpha_c*tau), torch.exp(-beta*tau), torch.exp(-gamma*tau)
-    expbd = torch.exp(-(beta+delta)*tau)
     eps = 1e-6
 
     cpred = c0*expac + kc*(1-expac)
-    upred = u0*expbd + rho*alpha*kc/(beta+delta)*(1-expbd) + (kc-c0)*rho*alpha/((beta+delta)-alpha_c+eps)*(expbd-expac)
+    upred = u0*expb + rho*alpha*kc/beta*(1-expb) + (kc-c0)*rho*alpha/(beta-alpha_c+eps)*(expb-expac)
     spred = s0*expg + rho*alpha*kc/gamma*(1-expg)
     spred += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     spred += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
     return cpred, upred, spred
 
 
-def pred_exp_backward(tau, c, u, s, kc, alpha_c, rho, alpha, beta, gamma, delta):
-    expac, expg = torch.exp(alpha_c*tau), torch.exp(gamma*tau)
-    expbd = torch.exp((beta+delta)*tau)
-    eps = 1e-6
-    expbac, expgb, expgac = torch.exp((beta-alpha_c+eps)*tau), torch.exp((gamma-beta+eps)*tau), torch.exp((gamma-alpha_c+eps)*tau)
-
-    c0 = F.hardtanh(c*expac + kc*(1-expac), 0, 1)
-    u0 = F.hardtanh(u*expbd + rho*alpha*kc/(beta+delta)*(1-expbd) + (kc-c0)*rho*alpha/((beta+delta)-alpha_c+eps)*(expbac-1), 0, u.max()*1.2)
-    s0 = s*expg + rho*alpha*kc/gamma*(1-expg)
-    s0 += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expgb-1)
-    s0 += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expgac-1)
-    return u0, u0, F.hardtanh(s0, 0, s.max()*1.2)
-
-
-def pred_exp_numpy(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma, delta):
+def pred_exp_numpy(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
     expac, expb, expg = np.exp(-alpha_c*tau), np.exp(-beta*tau), np.exp(-gamma*tau)
-    expbd = np.exp(-(beta+delta)*tau)
     eps = 1e-6
 
     cpred = c0*expac + kc*(1-expac)
-    upred = u0*expbd + rho*alpha*kc/(beta+delta)*(1-expbd) + (kc-c0)*rho*alpha/((beta+delta)-alpha_c+eps)*(expbd-expac)
+    upred = u0*expb + rho*alpha*kc/beta*(1-expb) + (kc-c0)*rho*alpha/(beta-alpha_c+eps)*(expb-expac)
     spred = s0*expg + rho*alpha*kc/gamma*(1-expg)
     spred += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     spred += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
     return np.clip(cpred, a_min=0, a_max=1), np.clip(upred, a_min=0, a_max=None), np.clip(spred, a_min=0, a_max=None)
-
-
-def pred_exp_backward_numpy(tau, c, u, s, kc, alpha_c, rho, alpha, beta, gamma, delta):
-    expac, expg = np.exp(alpha_c*tau), np.exp(gamma*tau)
-    expbd = np.exp((beta+delta)*tau)
-    eps = 1e-6
-    expbac, expgb, expgac = np.exp((beta-alpha_c+eps)*tau), np.exp((gamma-beta+eps)*tau), np.exp((gamma-alpha_c+eps)*tau)
-
-    c0 = np.clip(c*expac + kc*(1-expac), a_min=0, a_max=1)
-    u0 = np.clip(u*expbd + rho*alpha*kc/(beta+delta)*(1-expbd) + (kc-c0)*rho*alpha/((beta+delta)-alpha_c+eps)*(expbac-1), a_min=0, a_max=np.max(u)*1.2)
-    s0 = s*expg + rho*alpha*kc/gamma*(1-expg)
-    s0 += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expgb-1)
-    s0 += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expgac-1)
-    return c0, u0, np.clip(s0, a_min=0, a_max=np.max(s)*1.2)
 
 
 def linreg(u, s):
@@ -330,12 +300,11 @@ def init_gene(c, u, s, percent, fit_scaling=True, tmax=1):
 
 def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rna_only=False):
     ngene = u.shape[1]
-    params = np.ones((ngene, 7))  # alpha_c, alpha, beta, gamma, delta, scaling_c, scaling
+    params = np.ones((ngene, 6))  # alpha_c, alpha, beta, gamma, scaling_c, scaling
     params[:, 0] = 0.1
     params[:, 1] = np.clip(np.max(u, 0), 0.001, None)
     params[:, 3] = np.clip(np.max(u, 0), 0.001, None)/np.clip(np.max(s, 0), 0.001, None)
-    params[:, 4] = 0.0
-    params[:, 5] = np.clip(np.max(c, 0), 0.001, None)
+    params[:, 4] = np.clip(np.max(c, 0), 0.001, None)
     t = np.zeros((ngene, len(s)))
     ts = np.zeros((ngene))
     c0, u0, s0 = np.zeros((ngene)), np.zeros((ngene)), np.zeros((ngene))
@@ -369,7 +338,7 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
         if rna_only:
             c0[i] = 1
             params[i, 0] = 0
-            params[i, 5] = 1
+            params[i, 4] = 1
 
         cpred_i, upred_i, spred_i = pred_single(t[i],
                                                 params[i, 0],
@@ -378,8 +347,8 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
                                                 params[i, 3],
                                                 ts[i],
                                                 cinit=1 if rna_only else 0)
-        cpred[:, i] = cpred_i * params[i, 5]
-        upred[:, i] = upred_i * params[i, 6]
+        cpred[:, i] = cpred_i * params[i, 4]
+        upred[:, i] = upred_i * params[i, 5]
         spred[:, i] = spred_i
 
     if global_std:
@@ -394,10 +363,10 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
         sigma_u = np.nanstd(dist_u, 0)
         sigma_s = np.nanstd(dist_s, 0)
 
-    alpha_c, alpha, beta, gamma, delta = params[:, 0], params[:, 1], params[:, 2], params[:, 3], params[:, 4]
-    scaling_c, scaling = params[:, 5], params[:, 6]
+    alpha_c, alpha, beta, gamma = params[:, 0], params[:, 1], params[:, 2], params[:, 3]
+    scaling_c, scaling = params[:, 4], params[:, 5]
 
-    return alpha_c, alpha, beta, gamma, delta, scaling_c, scaling, ts, c0, u0, s0, sigma_c, sigma_u, sigma_s, t.T, cpred, upred, spred
+    return alpha_c, alpha, beta, gamma, scaling_c, scaling, ts, c0, u0, s0, sigma_c, sigma_u, sigma_s, t.T, cpred, upred, spred
 
 
 def get_ts_global(tgl, c, u, s, perc):
@@ -468,73 +437,71 @@ def reinit_params(c, u, s, t, ts):
     return alpha_c, alpha, beta, gamma, ton
 
 
-def pred_steady(tau_s, alpha_c, alpha, beta, gamma, delta):
+def pred_steady(tau_s, alpha_c, alpha, beta, gamma):
     eps = 1e-6
     expac, expb, expg = torch.exp(-alpha_c*tau_s), torch.exp(-beta*tau_s), torch.exp(-gamma*tau_s)
-    expbd = torch.exp(-(beta+delta)*tau_s)
+    expbd = torch.exp(-beta*tau_s)
     c0 = torch.tensor([1.0], device=alpha.device)-expac
-    u0 = alpha/((beta+delta)+eps)*(torch.tensor([1.0], device=alpha.device)-expbd) + alpha/((beta+delta)-alpha_c+eps)*(expbd-expac)
+    u0 = alpha/(beta+eps)*(torch.tensor([1.0], device=alpha.device)-expbd) + alpha/(beta-alpha_c+eps)*(expbd-expac)
     s0 = alpha/(gamma+eps)*(torch.tensor([1.0], device=alpha.device)-expg)
     s0 += (alpha/beta-alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     s0 += alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
     return c0, u0, s0
 
 
-def ode(t, alpha_c, alpha, beta, gamma, delta, to, ts, neg_slope=0.0):
+def ode(t, alpha_c, alpha, beta, gamma, to, ts, neg_slope=0.0):
     eps = 1e-6
     o = (t <= ts).int()
 
     tau_on = F.leaky_relu(t-to, negative_slope=neg_slope)
     expac, expb, expg = torch.exp(-alpha_c*tau_on), torch.exp(-beta*tau_on), torch.exp(-gamma*tau_on)
-    expbd = torch.exp(-(beta+delta)*tau_on)
+    expbd = torch.exp(-beta*tau_on)
     chat_on = torch.tensor([1.0], device=alpha.device)-expac
-    uhat_on = alpha/((beta+delta)+eps)*(torch.tensor([1.0], device=alpha.device)-expbd) + alpha/((beta+delta)-alpha_c+eps)*(expbd-expac)
+    uhat_on = alpha/(beta+eps)*(torch.tensor([1.0], device=alpha.device)-expbd) + alpha/(beta-alpha_c+eps)*(expbd-expac)
     shat_on = alpha/(gamma+eps)*(torch.tensor([1.0], device=alpha.device)-expg)
     shat_on += (alpha/beta-alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     shat_on += alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
 
-    c0_, u0_, s0_ = pred_steady(F.relu(ts-to), alpha_c, alpha, beta, gamma, delta)
+    c0_, u0_, s0_ = pred_steady(F.relu(ts-to), alpha_c, alpha, beta, gamma)
 
     tau_off = F.leaky_relu(t-ts, negative_slope=neg_slope)
     expac, expb, expg = torch.exp(-alpha_c*tau_off), torch.exp(-beta*tau_off), torch.exp(-gamma*tau_off)
-    expbd = torch.exp(-(beta+delta)*tau_off)
+    expbd = torch.exp(-beta*tau_off)
     chat_off = c0_*expac
     uhat_off = u0_*expbd
     shat_off = s0_*expg-u0_*beta/(gamma-beta+eps)*(expg-expb)
     return (chat_on*o + chat_off*(1-o)), (uhat_on*o + uhat_off*(1-o)), (shat_on*o + shat_off*(1-o))
 
 
-def pred_steady_numpy(ts, alpha_c, alpha, beta, gamma, delta):
+def pred_steady_numpy(ts, alpha_c, alpha, beta, gamma):
     alpha_c_ = np.clip(alpha_c, a_min=0, a_max=None)
     alpha_ = np.clip(alpha, a_min=0, a_max=None)
     beta_ = np.clip(beta, a_min=0, a_max=None)
     gamma_ = np.clip(gamma, a_min=0, a_max=None)
-    delta_ = np.clip(delta, a_min=0, a_max=None)
     eps = 1e-6
     ts_ = ts.squeeze()
     expac, expb, expg = np.exp(-alpha_c_*ts_), np.exp(-beta_*ts_), np.exp(-gamma_*ts_)
-    expbd = np.exp(-(beta_+delta_)*ts_)
     c0 = 1.0-expac
-    u0 = alpha_/((beta_+delta_)+eps)*(1.0-expbd)+alpha_/((beta_+delta_)-alpha_c_+eps)*(expbd-expac)
+    u0 = alpha_/(beta_+eps)*(1.0-expb)+alpha_/(beta_-alpha_c_+eps)*(expb-expac)
     s0 = alpha_/(gamma_+eps)*(1.0-expg)+(alpha_/beta_-alpha_/(beta_-alpha_c_+eps))*beta_/(gamma_-beta_+eps)*(expg-expb)
     s0 += alpha_*beta_/(gamma_-alpha_c_+eps)/(beta_-alpha_c_+eps)*(expg-expac)
     return c0, u0, s0
 
 
-def ode_numpy(t, alpha_c, alpha, beta, gamma, delta, to, ts, scaling_c=None, scaling_u=None, scaling_s=None, offset_c=None, offset_u=None, offset_s=None, k=10.0):
+def ode_numpy(t, alpha_c, alpha, beta, gamma, to, ts, scaling_c=None, scaling_u=None, scaling_s=None, offset_c=None, offset_u=None, offset_s=None, k=10.0):
     eps = 1e-6
     o = (t <= ts).astype(int)
 
     tau_on = F.softplus(torch.tensor(t-to), beta=k).numpy()
     assert np.all(~np.isnan(tau_on))
     expac, expb, expg = np.exp(-alpha_c*tau_on), np.exp(-beta*tau_on), np.exp(-gamma*tau_on)
-    expbd = np.exp(-(beta+delta)*tau_on)
+    expbd = np.exp(-beta*tau_on)
     chat_on = 1.0-expac
-    uhat_on = alpha/((beta+delta)+eps)*(1.0-expbd) + alpha/((beta+delta)-alpha_c+eps)*(expbd-expac)
+    uhat_on = alpha/(beta+eps)*(1.0-expbd) + alpha/(beta-alpha_c+eps)*(expbd-expac)
     shat_on = alpha/(gamma+eps)*(1.0-expg) + (alpha/beta-alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     shat_on += alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
 
-    c0_, u0_, s0_ = pred_steady_numpy(np.clip(ts-to, 0, None), alpha_c, alpha, beta, gamma, delta)
+    c0_, u0_, s0_ = pred_steady_numpy(np.clip(ts-to, 0, None), alpha_c, alpha, beta, gamma)
     if ts.ndim == 2 and to.ndim == 2:
         c0_ = c0_.reshape(-1, 1)
         u0_ = u0_.reshape(-1, 1)
@@ -542,7 +509,7 @@ def ode_numpy(t, alpha_c, alpha, beta, gamma, delta, to, ts, scaling_c=None, sca
     tau_off = F.softplus(torch.tensor(t-ts), beta=k).numpy()
     assert np.all(~np.isnan(tau_off))
     expac, expb, expg = np.exp(-alpha_c*tau_off), np.exp(-beta*tau_off), np.exp(-gamma*tau_off)
-    expbd = np.exp(-(beta+delta)*tau_off)
+    expbd = np.exp(-beta*tau_off)
     chat_off = c0_*expac
     uhat_off = u0_*expbd
     shat_off = s0_*expg-u0_*beta/(gamma-beta+eps)*(expg-expb)
