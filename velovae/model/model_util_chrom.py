@@ -315,17 +315,16 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
         cfilt = ci[(si > 0) & (ui > 0) & (ci > 0)]
         ufilt = ui[(si > 0) & (ui > 0) & (ci > 0)]
         sfilt = si[(si > 0) & (ui > 0) & (ci > 0)]
-        u_sparse_ratio = np.sum(ui == 0) / len(ui)
         if (len(sfilt) >= 5):
             if rna_only:
                 out = init_gene_rna(ufilt, sfilt, percent, fit_scaling, tmax)
                 alpha, beta, gamma, t_, u0_, s0_, ts_, scaling = out
                 c0_ = 1
-                params[i, :] = np.array([0, alpha, beta, gamma, beta*u_sparse_ratio, 1, scaling])
+                params[i, :] = np.array([0, alpha, beta, gamma, 1, scaling])
             else:
                 out = init_gene(cfilt, ufilt, sfilt, percent, fit_scaling, tmax)
                 alpha_c, alpha, beta, gamma, t_, c0_, u0_, s0_, ts_, scaling_c, scaling = out
-                params[i, :] = np.array([alpha_c, alpha, beta, gamma, beta*u_sparse_ratio, scaling_c, scaling])
+                params[i, :] = np.array([alpha_c, alpha, beta, gamma, scaling_c, scaling])
             t[i, (si > 0) & (ui > 0) & (ci > 0)] = t_
             c0[i] = c0_
             u0[i] = u0_
