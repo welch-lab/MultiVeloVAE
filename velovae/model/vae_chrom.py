@@ -651,9 +651,6 @@ class VAEChrom():
         if np.any(adata.layers['Ms'] < 0):
             print('Warning: negative expression values detected in layers["Ms"]. Please make sure all values are non-negative.')
 
-        self.adata = adata
-        self.adata_atac = adata_atac
-
         self.config = {
             # model parameters
             "dim_z": dim_z,
@@ -730,22 +727,33 @@ class VAEChrom():
         self.set_lr(adata, adata_atac, learning_rate)
         self.get_prior(adata)
 
-        if cluster_key is not None and cluster_key in self.adata.obs.keys():
-            self.cell_labels_raw = self.adata.obs[cluster_key].to_numpy() if cluster_key in self.adata.obs else np.array(['Unknown' for i in range(self.adata.n_obs)])
-            self.cell_types_raw = np.unique(self.cell_labels_raw)
+        self.cell_type_colors = None
+        if cluster_key is not None and cluster_key in adata.obs.keys():
+            self.cell_labels_raw = adata.obs[cluster_key].to_numpy()
+            if adata.obs[cluster_key].dtype.name == 'category':
+                self.cell_types_raw = adata.obs[cluster_key].cat.categories.to_numpy()
+            else:
+                self.cell_types_raw = np.unique(self.cell_labels_raw)
             self.label_dic, self.label_dic_rev = encode_type(self.cell_types_raw)
-
-            self.n_type = len(self.cell_types_raw)
+            n_type = len(self.cell_types_raw)
             self.cell_labels = np.array([self.label_dic[x] for x in self.cell_labels_raw])
-            self.cell_types = np.array([self.label_dic[self.cell_types_raw[i]] for i in range(self.n_type)])
+            self.cell_types = np.array([self.label_dic[self.cell_types_raw[i]] for i in range(n_type)])
+
+            if f'{cluster_key}_colors' in adata.uns.keys():
+                cell_type_colors = adata.uns[f'{cluster_key}_colors']
+                self.cell_type_colors = {self.cell_types_raw[i]: cell_type_colors[i] for i in range(n_type)}
         else:
-            self.cell_labels = np.full(self.adata.n_obs, '')
+            self.cell_labels_raw = np.full(adata.n_obs, '')
+            self.cell_labels = np.full(adata.n_obs, '')
 
         self.rna_only_idx = np.array(self.config['rna_only_idx'])
         if not self.enable_cvae and len(self.rna_only_idx) == 1 and self.rna_only_idx[0] == 0:
             self.config['rna_only'] = True
         if self.enable_cvae and np.any(np.array(self.rna_only_idx) > self.n_batch):
             raise ValueError('RNA-only index out of range.')
+
+        self.adata = adata
+        self.adata_atac = adata_atac
 
         self.encoder = Encoder(3*self.adata.n_vars,
                                self.config['dim_z'],
@@ -897,14 +905,14 @@ class VAEChrom():
                 print('Warning: number of batch classes is smaller than 1/10 of dim_z. Consider decreasing dim_z.')
         else:
             if self.config['rna_only']:
-                dim_z = 3 + self.adata.n_vars // 512
+                dim_z = 3 + adata.n_vars // 512
             else:
-                dim_z = 4 + self.adata.n_vars // 256
+                dim_z = 4 + adata.n_vars // 256
             if self.enable_cvae:
                 dim_z += 1
             self.config['dim_z'] = dim_z
             print(f'Latent dimension set to {dim_z}.')
-        self.batch_hvg_genes = np.ones((self.n_batch, self.adata.n_vars), dtype=bool)
+        self.batch_hvg_genes = np.ones((self.n_batch, adata.n_vars), dtype=bool)
         if batch_hvg_key is not None:
             for batch in self.batch_names_raw:
                 if f"{batch_hvg_key}-{batch}" in adata.var.keys():
@@ -1040,6 +1048,7 @@ class VAEChrom():
                      uhat[:, i],
                      shat[:, i],
                      self.cell_labels_raw[self.train_idx],
+                     self.cell_type_colors,
                      gene_plot[i],
                      save=f"{figure_path}/sig-{gene_plot[i].replace('.', '-')}-init.png",
                      sparsify=self.config['sparsify'])
@@ -1052,6 +1061,7 @@ class VAEChrom():
                      (uhat[:, i] - offset_u_) / scaling_u_,
                      (shat[:, i] - offset_s_) / scaling_s_,
                      self.cell_labels_raw[self.train_idx],
+                     self.cell_type_colors,
                      gene_plot[i],
                      save=f"{figure_path}/sigscaled-{gene_plot[i].replace('.', '-')}-init.png",
                      sparsify=self.config['sparsify'])
@@ -1067,6 +1077,7 @@ class VAEChrom():
                        None,
                        None,
                        self.cell_labels_raw[self.train_idx],
+                       self.cell_type_colors,
                        save=f"{figure_path}/phase-{gene_plot[i].replace('.', '-')}-init-cu.png")
 
             plot_phase(c[:, i],
@@ -1080,6 +1091,7 @@ class VAEChrom():
                        None,
                        None,
                        self.cell_labels_raw[self.train_idx],
+                       self.cell_type_colors,
                        save=f"{figure_path}/phase-{gene_plot[i].replace('.', '-')}-init-us.png")
 
             plot_phase((c[:, i] - offset_c_) / scaling_c_,
@@ -1093,6 +1105,7 @@ class VAEChrom():
                        None,
                        None,
                        self.cell_labels_raw[self.train_idx],
+                       self.cell_type_colors,
                        save=f"{figure_path}/phasescaled-{gene_plot[i].replace('.', '-')}-init-cu.png")
 
             plot_phase((c[:, i] - offset_c_) / scaling_c_,
@@ -1106,6 +1119,7 @@ class VAEChrom():
                        None,
                        None,
                        self.cell_labels_raw[self.train_idx],
+                       self.cell_type_colors,
                        save=f"{figure_path}/phasescaled-{gene_plot[i].replace('.', '-')}-init-us.png")
 
     def forward(self, data_in, t=None, z=None, c0=None, u0=None, s0=None, t0=None, t1=None, condition=None, regressor=None, sample=True):
@@ -1522,13 +1536,6 @@ class VAEChrom():
 
             for i in range(len(gind)):
                 idx = gind[i]
-                if np.any(np.isnan(chat[:, i])):
-                    print(gene_plot[i], chat[:, i])
-                if np.any(np.isnan(uhat[:, i])):
-                    print(gene_plot[i], uhat[:, i])
-                if np.any(np.isnan(shat[:, i])):
-                    print(gene_plot[i], shat[:, i])
-
                 scaling_c_ = scaling_c[:, idx] if self.enable_cvae else scaling_c[idx]
                 scaling_u_ = scaling_u[:, idx] if self.enable_cvae else scaling_u[idx]
                 scaling_s_ = scaling_s[:, idx] if self.enable_cvae else scaling_s[idx]
@@ -1544,6 +1551,7 @@ class VAEChrom():
                          uhat[:, i],
                          shat[:, i],
                          self.cell_labels_raw[cell_idx.detach().cpu().numpy()],
+                         self.cell_type_colors,
                          gene_plot[i],
                          save=f"{path}/sig-{gene_plot[i].replace('.', '-')}-{testid_str}.png",
                          sparsify=self.config['sparsify'])
@@ -1556,6 +1564,7 @@ class VAEChrom():
                          (uhat[:, i] - offset_u_) / scaling_u_,
                          (shat[:, i] - offset_s_) / scaling_s_,
                          self.cell_labels_raw[cell_idx.detach().cpu().numpy()],
+                         self.cell_type_colors,
                          gene_plot[i],
                          save=f"{path}/sigscaled-{gene_plot[i].replace('.', '-')}-{testid_str}.png",
                          sparsify=self.config['sparsify'])
@@ -1581,6 +1590,7 @@ class VAEChrom():
                              out["uhat_fw"][:, i],
                              out["shat_fw"][:, i],
                              self.cell_labels_raw[cell_idx.detach().cpu().numpy()],
+                             self.cell_type_colors,
                              gene_plot[i],
                              save=f"{path}/sig-{gene_plot[i].replace('.', '-')}-{testid_str}-bw.png",
                              sparsify=self.config['sparsify'])
@@ -1593,6 +1603,7 @@ class VAEChrom():
                              (out["uhat_fw"][:, i] - offset_u_) / scaling_u_,
                              (out["shat_fw"][:, i] - offset_s_) / scaling_s_,
                              self.cell_labels_raw[cell_idx.detach().cpu().numpy()],
+                             self.cell_type_colors,
                              gene_plot[i],
                              save=f"{path}/sigscaled-{gene_plot[i].replace('.', '-')}-{testid_str}-bw.png",
                              sparsify=self.config['sparsify'])
@@ -1969,6 +1980,7 @@ class VAEChrom():
                                   u_plot,
                                   s_plot,
                                   cell_labels=self.cell_labels_raw[train_idx],
+                                  cell_type_colors=self.cell_type_colors,
                                   tpred=t0_plot,
                                   cpred=c0_plot,
                                   upred=u0_plot,
@@ -2081,6 +2093,7 @@ class VAEChrom():
                               u0_plot,
                               s0_plot,
                               cell_labels=self.cell_labels_raw[self.train_idx.detach().cpu().numpy()],
+                              cell_type_colors=self.cell_type_colors,
                               title=gene_plot[i],
                               save=f"{figure_path}/sigx0-{gene_plot[i].replace('.', '-')}-updated.png")
 

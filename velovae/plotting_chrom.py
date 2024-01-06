@@ -65,6 +65,7 @@ def save_fig(fig, save, bbox_extra_artists=None):
 def plot_sig_(t,
               c, u, s,
               cell_labels,
+              cell_type_colors=None,
               tpred=None,
               cpred=None, upred=None, spred=None,
               type_specific=False,
@@ -73,8 +74,12 @@ def plot_sig_(t,
               **kwargs):
     fig, ax = plt.subplots(3, 1, figsize=(15, 20), facecolor='white')
     D = kwargs['sparsify'] if 'sparsify' in kwargs else 1
-    cell_types = np.unique(cell_labels)
-    colors = get_colors(len(cell_types), None)
+    if cell_type_colors is None:
+        cell_types = np.unique(cell_labels)
+        colors = get_colors(len(cell_types), None)
+    else:
+        cell_types = np.array(list(cell_type_colors.keys()))
+        colors = np.array([cell_type_colors[type_] for type_ in cell_types])
     for i, type_ in enumerate(cell_types):
         mask_type = cell_labels == type_
         ax[0].plot(t[mask_type][::D], c[mask_type][::D], '.', color=colors[i % len(colors)], alpha=0.7, label=type_)
@@ -155,6 +160,7 @@ def plot_sig(t,
              c, u, s,
              cpred, upred, spred,
              cell_labels=None,
+             cell_type_colors=None,
              title="Gene",
              save=None,
              **kwargs):
@@ -184,8 +190,12 @@ def plot_sig(t,
         fig, ax = plt.subplots(2, 3, figsize=(36, 12), facecolor='white')
         labels_pred = kwargs['labels_pred'] if 'labels_pred' in kwargs else []
         labels_demo = kwargs['labels_demo'] if 'labels_demo' in kwargs else None
-        cell_types = np.unique(cell_labels)
-        colors = get_colors(len(cell_types), None)
+        if cell_type_colors is None:
+            cell_types = np.unique(cell_labels)
+            colors = get_colors(len(cell_types), None)
+        else:
+            cell_types = np.array(list(cell_type_colors.keys()))
+            colors = np.array([cell_type_colors[type_] for type_ in cell_types])
 
         # Plot the input data in the true labels
         for i, type_ in enumerate(cell_types):
@@ -379,6 +389,7 @@ def plot_phase(c, u, s,
                t=None,
                track_idx=None,
                cell_labels=None,
+               cell_type_colors=None,
                save=None,
                plot_pred=True,
                show=False):
@@ -389,8 +400,12 @@ def plot_phase(c, u, s,
         else:
             ax.scatter(u, c, c="b", alpha=0.5)
     else:
-        cell_types = np.unique(cell_labels)
-        colors = get_colors(len(cell_types), None)
+        if cell_type_colors is None:
+            cell_types = np.unique(cell_labels)
+            colors = get_colors(len(cell_types), None)
+        else:
+            cell_types = np.array(list(cell_type_colors.keys()))
+            colors = np.array([cell_type_colors[type_] for type_ in cell_types])
         for i, type_ in enumerate(cell_types):
             mask_type = cell_labels == type_
             if by == 'us':
