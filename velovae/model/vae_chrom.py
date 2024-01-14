@@ -34,7 +34,7 @@ class Encoder(nn.Module):
         self.fc1 = nn.Linear(Cin+dim_cond+dim_reg, N1)
         self.bn1 = nn.BatchNorm1d(N1)
         self.dpt1 = nn.Dropout(p=0.2)
-        self.net1 = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1)
+        self.net = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1)
 
         self.fc_mu_t = nn.Linear(N1, dim_z if t_network else 1)
         self.fc_std_t = nn.Linear(N1, dim_z if t_network else 1)
@@ -51,7 +51,7 @@ class Encoder(nn.Module):
             self.init_weights()
 
     def init_weights(self):
-        for m in self.net1.modules():
+        for m in self.net.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.constant_(m.bias, 0.0)
@@ -68,7 +68,7 @@ class Encoder(nn.Module):
             data_in = torch.cat((data_in, condition), 1)
         if regressor is not None:
             data_in = torch.cat((data_in, regressor), 1)
-        h = self.net1(data_in)
+        h = self.net(data_in)
         mu_tx = self.fc_mu_t(h) if self.t_network else self.spt(self.fc_mu_t(h))
         std_tx = self.spt1(self.fc_std_t(h))
         mu_zx = self.fc_mu_z(h)
@@ -912,15 +912,15 @@ class VAEChrom():
                 dim_z += 1
             self.config['dim_z'] = dim_z
             print(f'Latent dimension set to {dim_z}.')
-        self.batch_hvg_genes = np.ones((self.n_batch, adata.n_vars), dtype=bool)
+        self.batch_hvg_genes_ = np.ones((self.n_batch, adata.n_vars), dtype=bool)
         if batch_hvg_key is not None:
             for batch in self.batch_names_raw:
                 if f"{batch_hvg_key}-{batch}" in adata.var.keys():
-                    self.batch_hvg_genes[self.batch_dic[batch]] = adata.var[f"{batch_hvg_key}-{batch}"].to_numpy()
+                    self.batch_hvg_genes_[self.batch_dic[batch]] = adata.var[f"{batch_hvg_key}-{batch}"].to_numpy()
                 else:
                     print(f'Warning: highly variable genes for batch {batch} not found in var:batch_{batch_hvg_key}. All genes will be used for batch {batch}.')
-                    self.batch_hvg_genes[self.batch_dic[batch]] = True
-        self.batch_hvg_genes = torch.tensor(self.batch_hvg_genes, dtype=torch.float, device=self.device)
+                    self.batch_hvg_genes_[self.batch_dic[batch]] = True
+        self.batch_hvg_genes = torch.tensor(self.batch_hvg_genes_, dtype=torch.float, device=self.device)
         self.batch_count_balance = None
         if batch_count is not None:
             self.batch_count_balance = torch.tensor(batch_count / batch_count[self.ref_batch], dtype=torch.float, device=self.device)
@@ -953,8 +953,17 @@ class VAEChrom():
 
     def set_lr(self, adata, adata_atac, learning_rate):
         if learning_rate is None:
-            p = np.sum(adata_atac.layers['Mc'] > 0) + np.sum(adata.layers['Mu'] > 0) + (np.sum(adata.layers['Ms'] > 0))
-            p /= adata.n_obs * adata.n_vars * 3
+            if self.enable_cvae:
+                p = 0
+                for i in range(self.n_batch):
+                    idx = self.batch_ == i
+                    batch_gene = self.batch_hvg_genes_[i]
+                    p += np.sum(adata_atac.layers['Mc'][np.ix_(idx, batch_gene)] > 0)
+                    p += np.sum(adata.layers['Mu'][np.ix_(idx, batch_gene)] > 0)
+                    p += np.sum(adata.layers['Ms'][np.ix_(idx, batch_gene)] > 0)
+            else:
+                p = np.sum(adata_atac.layers['Mc'] > 0) + np.sum(adata.layers['Mu'] > 0) + (np.sum(adata.layers['Ms'] > 0))
+            p = p / (adata.n_obs * adata.n_vars * 3)
             self.config["learning_rate"] = 10**(p-4)
             print(f'Learning rate set to {self.config["learning_rate"]*10000:.1f}e-4 based on data sparsity.')
         else:
@@ -1959,12 +1968,12 @@ class VAEChrom():
                 t, z = self.update_x0(X[:, :G//3], X[:, G//3:G//3*2], X[:, G//3*2:])
                 if plot:
                     if np.sum(np.isnan(self.t0)) > 0:
-                        print('t0 contains nan')
+                        print('Debug: t0 contains nan.')
                     if np.sum(np.isnan(self.c0)) > 0 or np.sum(np.isnan(self.u0)) > 0 or np.sum(np.isnan(self.s0)) > 0:
-                        print('c0, u0, or s0 contains nan')
+                        print('Debug: c0, u0, or s0 contains nan.')
                     if r == 0:
-                        plot_time(self.t0.squeeze(), Xembed, save=f"{figure_path}/timet0-round{r+1}.png")
-                        plot_time(t, Xembed, save=f"{figure_path}/time-round{r+1}.png")
+                        plot_time(self.t0.squeeze(), Xembed, save=f"{figure_path}/timet0-train-test.png")
+                        plot_time(t, Xembed, save=f"{figure_path}/time-train-test.png")
                     train_idx = self.train_idx.detach().cpu().numpy()
                     t0_plot = self.t0[train_idx].squeeze()
                     for i in range(len(gind)):
@@ -2081,7 +2090,6 @@ class VAEChrom():
                 s0_prev = self.s0.detach().cpu().numpy()
 
             if plot and self.config['n_refine'] > 1:
-                plot_time(self.t0.detach().cpu().numpy().squeeze(), Xembed, save=f"{figure_path}/timet0-updated.png")
                 t0_plot = self.t0[self.train_idx].detach().cpu().numpy().squeeze()
                 for i in range(len(gind)):
                     idx = gind[i]
