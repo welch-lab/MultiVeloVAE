@@ -924,6 +924,9 @@ class VAEChrom():
         self.batch_count_balance = None
         if batch_count is not None:
             self.batch_count_balance = torch.tensor(batch_count / batch_count[self.ref_batch], dtype=torch.float, device=self.device)
+        if self.enable_cvae:
+            self.config['kl_t'] = self.config['kl_t'] * self.n_batch
+            self.config['kl_z'] = self.config['kl_z'] * self.n_batch
 
     def init_regressor(self, adata, var_to_regress):
         self.var_to_regress = None
@@ -958,12 +961,19 @@ class VAEChrom():
                 for i in range(self.n_batch):
                     idx = self.batch_ == i
                     batch_gene = self.batch_hvg_genes_[i]
-                    p += np.sum(adata_atac.layers['Mc'][np.ix_(idx, batch_gene)] > 0)
+                    if not self.config['rna_only']:
+                        p += np.sum(adata_atac.layers['Mc'][np.ix_(idx, batch_gene)] > 0)
                     p += np.sum(adata.layers['Mu'][np.ix_(idx, batch_gene)] > 0)
                     p += np.sum(adata.layers['Ms'][np.ix_(idx, batch_gene)] > 0)
             else:
-                p = np.sum(adata_atac.layers['Mc'] > 0) + np.sum(adata.layers['Mu'] > 0) + (np.sum(adata.layers['Ms'] > 0))
-            p = p / (adata.n_obs * adata.n_vars * 3)
+                if self.config['rna_only']:
+                    p = np.sum(adata.layers['Mu'] > 0) + (np.sum(adata.layers['Ms'] > 0))
+                else:
+                    p = np.sum(adata_atac.layers['Mc'] > 0) + np.sum(adata.layers['Mu'] > 0) + (np.sum(adata.layers['Ms'] > 0))
+            if self.config['rna_only']:
+                p = p / (adata.n_obs * adata.n_vars * 2)
+            else:
+                p = p / (adata.n_obs * adata.n_vars * 3)
             self.config["learning_rate"] = 10**(p-4)
             print(f'Learning rate set to {self.config["learning_rate"]*10000:.1f}e-4 based on data sparsity.')
         else:
@@ -973,15 +983,18 @@ class VAEChrom():
         self.config["learning_rate_t0"] = self.config["learning_rate"]
         if self.config['early_stop_thred'] is None:
             if self.enable_cvae:
-                if self.config['rna_only']:
-                    self.config['early_stop_thred'] = 0.3 + (self.n_batch-1) * 0.1
+                if self.config['batch_hvg_key'] is None:
+                    if self.config['rna_only']:
+                        self.config['early_stop_thred'] = (self.n_batch-1) * 0.8
+                    else:
+                        self.config['early_stop_thred'] = (self.n_batch-1) * 1.0
                 else:
-                    self.config['early_stop_thred'] = 0.4 + (self.n_batch-1) * 0.2
+                    if self.config['rna_only']:
+                        self.config['early_stop_thred'] = (self.n_batch-1) * 1.6
+                    else:
+                        self.config['early_stop_thred'] = (self.n_batch-1) * 2.0
             else:
-                if self.config['rna_only']:
-                    self.config['early_stop_thred'] = 0.3
-                else:
-                    self.config['early_stop_thred'] = 0.4
+                self.config['early_stop_thred'] = 0.4
             print(f"Early stop threshold set to {self.config['early_stop_thred']:.1f}.")
 
     def get_prior(self, adata):
