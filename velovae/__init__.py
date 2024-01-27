@@ -1,5 +1,5 @@
-from velovae.model import *
-from velovae.analysis.evaluation import *
+from .model import *
+from .analysis.evaluation import *
 from .plotting import (get_colors,
                        plot_cluster,
                        plot_heatmap,

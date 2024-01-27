@@ -6,7 +6,7 @@ import pandas as pd
 from os import makedirs
 from .evaluation_util import *
 from .evaluation_util import time_score
-from velovae.plotting import get_colors, plot_cluster, plot_phase_grid, plot_sig_grid, plot_time_grid
+from ..plotting import get_colors, plot_cluster, plot_phase_grid, plot_sig_grid, plot_time_grid
 from multiprocessing import cpu_count
 from scipy.stats import spearmanr
 

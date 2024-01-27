@@ -7,8 +7,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from velovae.plotting_chrom import plot_sig_, plot_sig, plot_vel, plot_phase, plot_time
-from velovae.plotting_chrom import plot_train_loss_log, plot_test_loss_log
+from ..plotting_chrom import plot_sig_, plot_sig, plot_vel, plot_phase, plot_time
+from ..plotting_chrom import plot_train_loss_log, plot_test_loss_log
 from .model_util import hist_equal, convert_time, get_gene_index
 from .model_util import elbo_collapsed_categorical, assign_gene_mode_tprior
 from .model_util_chrom import pred_exp, init_params, get_ts_global, reinit_params
@@ -632,6 +632,10 @@ class VAEChrom():
             rna_only_idx = []
         elif isinstance(rna_only_idx, int):
             rna_only_idx = [rna_only_idx]
+        elif len(rna_only_idx) == 0:
+            rna_only_idx = []
+        else:
+            raise ValueError('rna_only_idx is invalid.')
         if len(rna_only_idx) > 0:
             print('Running in mixed RNA-only mode.')
             if ref_batch is not None and ref_batch in rna_only_idx:
@@ -925,8 +929,9 @@ class VAEChrom():
         if batch_count is not None:
             self.batch_count_balance = torch.tensor(batch_count / batch_count[self.ref_batch], dtype=torch.float, device=self.device)
         if self.enable_cvae:
-            self.config['kl_t'] = self.config['kl_t'] * self.n_batch
-            self.config['kl_z'] = self.config['kl_z'] * self.n_batch
+            self.config['kl_t'] = self.config['kl_t'] * 2
+            self.config['kl_z'] = self.config['kl_z'] * (2**(self.n_batch-1))
+            print(f"KL weights set to {self.config['kl_t']} {self.config['kl_z']}.")
 
     def init_regressor(self, adata, var_to_regress):
         self.var_to_regress = None
@@ -950,7 +955,7 @@ class VAEChrom():
                     var_not_found.append(x)
             print(f'Found {var_found}. Regressing them out.')
             if len(var_not_found) > 0:
-                print(f'Warning: Variables {var_not_found} not found and will be ignored.')
+                raise ValueError(f'Warning: Variables {var_not_found} not found. Please check the obs keys and try again.')
         if self.var_to_regress is not None:
             self.var_to_regress = torch.tensor(self.var_to_regress, dtype=torch.float, device=self.device)
 
@@ -961,7 +966,7 @@ class VAEChrom():
                 for i in range(self.n_batch):
                     idx = self.batch_ == i
                     batch_gene = self.batch_hvg_genes_[i]
-                    if not self.config['rna_only']:
+                    if i not in self.config['rna_only_idx']:
                         p += np.sum(adata_atac.layers['Mc'][np.ix_(idx, batch_gene)] > 0)
                     p += np.sum(adata.layers['Mu'][np.ix_(idx, batch_gene)] > 0)
                     p += np.sum(adata.layers['Ms'][np.ix_(idx, batch_gene)] > 0)
@@ -984,15 +989,9 @@ class VAEChrom():
         if self.config['early_stop_thred'] is None:
             if self.enable_cvae:
                 if self.config['batch_hvg_key'] is None:
-                    if self.config['rna_only']:
-                        self.config['early_stop_thred'] = (self.n_batch-1) * 0.8
-                    else:
-                        self.config['early_stop_thred'] = (self.n_batch-1) * 1.0
+                    self.config['early_stop_thred'] = 0.4 * self.n_batch
                 else:
-                    if self.config['rna_only']:
-                        self.config['early_stop_thred'] = (self.n_batch-1) * 1.6
-                    else:
-                        self.config['early_stop_thred'] = (self.n_batch-1) * 2.0
+                    self.config['early_stop_thred'] = 0.8 * self.n_batch
             else:
                 self.config['early_stop_thred'] = 0.4
             print(f"Early stop threshold set to {self.config['early_stop_thred']:.1f}.")
@@ -1951,7 +1950,7 @@ class VAEChrom():
             n_test1 = len(self.loss_test)
             self.set_mode('eval', 'encoder')
             self.save_state_dict(reset=True)
-            self.config['test_iter'] = self.config['test_iter'] // 2
+            self.config['test_iter'] = self.config['test_iter'] // (3 if self.enable_cvae else 2)
             param_post = list(self.decoder.net_rho.parameters())
             param_post += list(self.decoder.net_kc.parameters())
             param_ode = [self.decoder.alpha_c,
@@ -1968,6 +1967,9 @@ class VAEChrom():
             noise_change = np.inf
             x0_change = np.inf
             x0_change_prev = np.inf
+
+            if self.enable_cvae:
+                self.config['early_stop'] *= self.n_batch
 
             for r in range(self.config['n_refine']):
                 stop_training = (x0_change - x0_change_prev >= -0.01 and r > 1) or (x0_change < 0.01)
