@@ -446,7 +446,12 @@ def post_analysis(adata,
     That, Yhat = {}, {}
     vkeys = []
     for i, method in enumerate(methods):
-        vkey = 'velocity' if method in ['scVelo', 'UniTVelo', 'DeepVelo'] else f'{keys[i]}_velocity'
+        if method in ['scVelo', 'UniTVelo', 'DeepVelo']:
+            vkey = 'velo_s_norm'
+        elif method in ['MultiVelo, MultiVeloVAE']:
+            vkey = f'{keys[i]}_velocity_norm'
+        else:
+            vkey = f'{keys[i]}_velocity'
         vkeys.append(vkey)
 
     # Compute metrics and generate plots for each method
@@ -549,7 +554,7 @@ def post_analysis(adata,
         plot_cluster(adata.obsm[f"X_{embed}"],
                      adata.obs[cluster_key].to_numpy(),
                      embed=embed,
-                     save=(None if figure_path is None else 
+                     save=(None if figure_path is None else
                            f"{figure_path}/{test_id}_umap.png"))
 
     # Generate plots

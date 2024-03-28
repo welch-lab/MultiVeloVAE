@@ -244,7 +244,7 @@ class Decoder(nn.Module):
         G = self.adata.n_vars
         print("Initializing using the steady-state and dynamical models.")
         out = init_params(c, u, s, p, fit_scaling=True, global_std=self.global_std, tmax=self.tmax, rna_only=self.rna_only)
-        alpha_c, alpha, beta, gamma, scaling_c, scaling_u, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, t, cpred, upred, spred = out
+        alpha_c, alpha, beta, gamma, scaling_c, scaling_u, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, mu_c, mu_u, mu_s, t, cpred, upred, spred = out
         scaling_s = np.ones_like(scaling_u)
         offset_c, offset_u, offset_s = np.zeros_like(scaling_u), np.zeros_like(scaling_u), np.zeros_like(scaling_u)
 
@@ -263,6 +263,12 @@ class Decoder(nn.Module):
             sigma_c = np.clip(sigma_c, np.min(sigma_c[self.adata.var['quantile_genes']]), np.max(sigma_c[self.adata.var['quantile_genes']]))
             sigma_u = np.clip(sigma_u, np.min(sigma_u[self.adata.var['quantile_genes']]), np.max(sigma_u[self.adata.var['quantile_genes']]))
             sigma_s = np.clip(sigma_s, np.min(sigma_s[self.adata.var['quantile_genes']]), np.max(sigma_s[self.adata.var['quantile_genes']]))
+            mu_c[np.isnan(mu_c)] = 0
+            mu_u[np.isnan(mu_u)] = 0
+            mu_s[np.isnan(mu_s)] = 0
+            mu_c = np.clip(mu_c, np.min(mu_c[self.adata.var['quantile_genes']]), np.max(mu_c[self.adata.var['quantile_genes']]))
+            mu_u = np.clip(mu_u, np.min(mu_u[self.adata.var['quantile_genes']]), np.max(mu_u[self.adata.var['quantile_genes']]))
+            mu_s = np.clip(mu_s, np.min(mu_s[self.adata.var['quantile_genes']]), np.max(mu_s[self.adata.var['quantile_genes']]))
         print(f"Initial induction: {np.sum(w >= 0.5)}, repression: {np.sum(w < 0.5)} out of {G}.")
         self.adata.var["w_init"] = w
         logit_pw = 0.5*(np.log(w+1e-10) - np.log(1-w-1e-10))
@@ -401,6 +407,9 @@ class Decoder(nn.Module):
         self.register_buffer('sigma_c', torch.tensor(sigma_c))
         self.register_buffer('sigma_u', torch.tensor(sigma_u))
         self.register_buffer('sigma_s', torch.tensor(sigma_s))
+        self.register_buffer('mu_c', torch.tensor(mu_c))
+        self.register_buffer('mu_u', torch.tensor(mu_u))
+        self.register_buffer('mu_s', torch.tensor(mu_s))
         self.register_buffer('zero_vec', torch.zeros_like(self.u0))
         if self.cvae:
             self.register_buffer('one_mat', torch.ones_like(self.scaling_u))
@@ -512,7 +521,8 @@ class Decoder(nn.Module):
         else:
             self.kc = self.net_kc(z_in if self.parallel_arch else self.rho)
 
-        t_ = self.net_t(t) if self.t_network and (not use_input_time) else t
+        t_in = t
+        t_ = self.net_t(t_in) if self.t_network and (not use_input_time) else t
         if (c0 is None) or (u0 is None) or (s0 is None) or (t0 is None):
             if four_basis:
                 zero_mtx = torch.zeros_like(self.rho)
@@ -817,6 +827,7 @@ class VAEChrom():
         self.best_model_state = None
         self.best_counter = 0
         self.loss_idx_start = 0
+        self.r = -1
 
         self.clip_fn = nn.Hardtanh(-1e30, 1e30)
 
@@ -1399,7 +1410,7 @@ class VAEChrom():
             for n in range(Nb):
                 i = n*B
                 j = min([(n+1)*B, N])
-                data_in = torch.tensor(data[i:j], dtype=torch.float, device=self.device)
+                data_in = data[i:j]
                 if mode == "test":
                     batch_idx = self.test_idx[i:j]
                 elif mode == "train":
@@ -1749,8 +1760,19 @@ class VAEChrom():
     def update_x0(self, c, u, s):
         start = time.time()
         self.set_mode('eval')
-        out, _, _, _, _ = self.pred_all(np.concatenate((c, u, s), 1), "both")
+        out, _, _, _, _ = self.pred_all(torch.tensor(np.concatenate((c, u, s), 1), dtype=torch.float, device=self.device), "both")
         chat, uhat, shat, t, z = out["chat"], out["uhat"], out["shat"], out["t"], out["mu_z"]
+        if self.r == 0:
+            key = self.config['key']
+            self.adata.obs[f"{key}_time_1step"] = out["t"]
+            self.adata.obsm[f"{key}_t_1step"] = out["mu_t"]
+            self.adata.obsm[f"{key}_z_1step"] = out["mu_z"]
+            if self.enable_cvae and self.ref_batch >= 0:
+                out, _, _, _, _ = self.pred_all(torch.tensor(np.concatenate((c, u, s), 1), dtype=torch.float, device=self.device), "both", batch=torch.full((self.adata.n_obs,), self.ref_batch, dtype=int, device=self.device))
+                self.adata.obs[f"{key}_time_1step_"] = out["t"]
+                self.adata.obsm[f"{key}_t_1step_"] = out["mu_t"]
+                self.adata.obsm[f"{key}_z_1step_"] = out["mu_z"]
+
         dt = (self.config["dt"][0]*(t.max()-t.min()), self.config["dt"][1]*(t.max()-t.min()))
         train_idx = self.train_idx.detach().cpu().numpy()
         init_mask = (t <= np.quantile(t, 0.01))
@@ -1972,6 +1994,7 @@ class VAEChrom():
                 self.config['early_stop'] *= self.n_batch
 
             for r in range(self.config['n_refine']):
+                self.r = r
                 stop_training = (x0_change - x0_change_prev >= -0.01 and r > 1) or (x0_change < 0.01)
                 if self.config['loss_std_type'] == 'deming' and noise_change > 0.001 and r < self.config['n_refine']-1:
                     self.update_std_noise(train_set)
@@ -1985,7 +2008,7 @@ class VAEChrom():
                     if np.sum(np.isnan(self.t0)) > 0:
                         print('Debug: t0 contains nan.')
                     if np.sum(np.isnan(self.c0)) > 0 or np.sum(np.isnan(self.u0)) > 0 or np.sum(np.isnan(self.s0)) > 0:
-                        print('Debug: c0, u0, or s0 contains nan.')
+                        print('Debug: c0, u0, or s0 contains nan. Consider raising early stopping threshold.')
                     if r == 0:
                         plot_time(self.t0.squeeze(), Xembed, save=f"{figure_path}/timet0-train-test.png")
                         plot_time(t, Xembed, save=f"{figure_path}/time-train-test.png")
@@ -2248,6 +2271,9 @@ class VAEChrom():
         self.adata.var[f"{key}_sigma_c"] = self.decoder.sigma_c.detach().cpu().numpy()
         self.adata.var[f"{key}_sigma_u"] = self.decoder.sigma_u.detach().cpu().numpy()
         self.adata.var[f"{key}_sigma_s"] = self.decoder.sigma_s.detach().cpu().numpy()
+        self.adata.var[f"{key}_mu_c"] = self.decoder.mu_c.detach().cpu().numpy()
+        self.adata.var[f"{key}_mu_u"] = self.decoder.mu_u.detach().cpu().numpy()
+        self.adata.var[f"{key}_mu_s"] = self.decoder.mu_s.detach().cpu().numpy()
         self.adata.var[f"{key}_ton"] = self.decoder.ton.detach().cpu().numpy()
         self.adata.varm[f"{key}_basis"] = F.softmax(self.decoder.logit_pw, 1).detach().cpu().numpy()
 
@@ -2255,7 +2281,7 @@ class VAEChrom():
                             self.adata.layers['Mu'].A if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu'],
                             self.adata.layers['Ms'].A if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']), 1).astype(float)
         G = x.shape[1]//3
-        out, _, _, _, _ = self.pred_all(x, "both")
+        out, _, _, _, _ = self.pred_all(torch.tensor(x, dtype=torch.float, device=self.device), "both")
         chat, uhat, shat, t, std_t, t_, z, std_z = out["chat"], out["uhat"], out["shat"], out["mu_t"], out["std_t"], out["t"], out["mu_z"], out["std_z"]
         std_c = np.clip(np.nanstd(x[:, :G], axis=0), 0.01, None)
         std_u = np.clip(np.nanstd(x[:, G:G*2], axis=0), 0.01, None)
@@ -2284,16 +2310,16 @@ class VAEChrom():
             self.adata.obsm[f"{key}_std_t_batch"] = std_t
             self.adata.obsm[f"{key}_z_batch"] = z
             self.adata.obsm[f"{key}_std_z_batch"] = std_z
-            out, _, _, _, _ = self.pred_all(x, "both", batch=torch.full((self.adata.n_obs,), self.ref_batch, dtype=int, device=self.device))
+            out, _, _, _, _ = self.pred_all(torch.tensor(x, dtype=torch.float, device=self.device), "both", batch=torch.full((self.adata.n_obs,), self.ref_batch, dtype=int, device=self.device))
             chat, uhat, shat, t, std_t, t_, z, std_z = out["chat"], out["uhat"], out["shat"], out["mu_t"], out["std_t"], out["t"], out["mu_z"], out["std_z"]
+        self.adata.layers[f"{key}_chat"] = chat
+        self.adata.layers[f"{key}_uhat"] = uhat
+        self.adata.layers[f"{key}_shat"] = shat
         self.adata.obs[f"{key}_time"] = t_
         self.adata.obsm[f"{key}_t"] = t
         self.adata.obsm[f"{key}_std_t"] = std_t
         self.adata.obsm[f"{key}_z"] = z
         self.adata.obsm[f"{key}_std_z"] = std_z
-        self.adata.layers[f"{key}_chat"] = chat
-        self.adata.layers[f"{key}_uhat"] = uhat
-        self.adata.layers[f"{key}_shat"] = shat
 
         rho = np.zeros_like(uhat)
         kc = np.zeros_like(uhat)

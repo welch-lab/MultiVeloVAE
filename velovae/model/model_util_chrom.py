@@ -361,11 +361,14 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
         sigma_c = np.nanstd(dist_c, 0)
         sigma_u = np.nanstd(dist_u, 0)
         sigma_s = np.nanstd(dist_s, 0)
+    mu_c = np.nanmean(c, 0)
+    mu_u = np.nanmean(u, 0)
+    mu_s = np.nanmean(s, 0)
 
     alpha_c, alpha, beta, gamma = params[:, 0], params[:, 1], params[:, 2], params[:, 3]
     scaling_c, scaling = params[:, 4], params[:, 5]
 
-    return alpha_c, alpha, beta, gamma, scaling_c, scaling, ts, c0, u0, s0, sigma_c, sigma_u, sigma_s, t.T, cpred, upred, spred
+    return alpha_c, alpha, beta, gamma, scaling_c, scaling, ts, c0, u0, s0, sigma_c, sigma_u, sigma_s, mu_c, mu_u, mu_s, t.T, cpred, upred, spred
 
 
 def get_ts_global(tgl, c, u, s, perc):
@@ -1104,14 +1107,20 @@ def aggregate_peaks_10x(adata_atac, peak_annot_file, linkage_file, peak_dist=100
     gene_dict = promoter_dict
     enhancer_dict = {}
     promoter_genes = list(promoter_dict.keys())
+    if gene_body:
+        promoter_genes.extend(list(gene_body_dict.keys()))
+        promoter_genes = list(set(promoter_genes))
     if verbose:
         print(f'Found {len(promoter_genes)} genes with promoter peaks')
     for gene in promoter_genes:
         if gene_body:  # add gene-body peaks
             if gene in gene_body_dict:
-                for peak in gene_body_dict[gene]:
-                    if peak not in gene_dict[gene]:
-                        gene_dict[gene].append(peak)
+                if gene not in gene_dict:
+                    gene_dict[gene] = gene_body_dict[gene]
+                else:
+                    for peak in gene_body_dict[gene]:
+                        if peak not in gene_dict[gene]:
+                            gene_dict[gene].append(peak)
         enhancer_dict[gene] = []
         if gene in corr_dict:  # add enhancer peaks
             for j, peak in enumerate(corr_dict[gene][0]):
