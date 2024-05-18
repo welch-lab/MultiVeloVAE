@@ -4,6 +4,7 @@ import copy
 import anndata as ad
 from scipy.sparse import issparse
 import numpy as np
+from sklearn.neighbors import NearestNeighbors
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -147,8 +148,6 @@ class Decoder(nn.Module):
 
         if self.t_network:
             self.net_t = nn.Linear(dim_z, 1)
-
-        self.rho, self.kc = None, None
 
         if self.checkpoint is not None:
             self.alpha_c = nn.Parameter(torch.empty(self.params_shape))
@@ -515,26 +514,26 @@ class Decoder(nn.Module):
             z_in = torch.cat((z_in, condition), 1)
         if regressor is not None:
             z_in = torch.cat((z_in, regressor), 1)
-        self.rho = self.net_rho(z_in)
+        rho = self.net_rho(z_in)
         if self.rna_only:
-            self.kc = torch.ones_like(self.rho)
+            kc = torch.ones_like(rho)
         else:
-            self.kc = self.net_kc(z_in if self.parallel_arch else self.rho)
+            kc = self.net_kc(z_in if self.parallel_arch else rho)
 
         t_in = t
         t_ = self.net_t(t_in) if self.t_network and (not use_input_time) else t
         if (c0 is None) or (u0 is None) or (s0 is None) or (t0 is None):
             if four_basis:
-                zero_mtx = torch.zeros_like(self.rho)
-                kc = torch.stack([self.kc, self.kc, zero_mtx, zero_mtx], 1)
-                rho = torch.stack([self.rho, zero_mtx, self.rho, zero_mtx], 1)
+                zero_mtx = torch.zeros_like(rho)
+                kc_ = torch.stack([kc, kc, zero_mtx, zero_mtx], 1)
+                rho_ = torch.stack([rho, zero_mtx, rho, zero_mtx], 1)
                 c0 = torch.stack([self.zero_vec, self.zero_vec, self.c0.exp() if self.log_params else self.c0, self.c0.exp() if self.log_params else self.c0])
                 u0 = torch.stack([self.zero_vec, self.u0.exp() if self.log_params else self.u0, self.zero_vec, self.u0.exp() if self.log_params else self.u0])
                 s0 = torch.stack([self.zero_vec, self.s0.exp() if self.log_params else self.s0, self.zero_vec, self.s0.exp() if self.log_params else self.s0])
                 tau = torch.stack([F.leaky_relu(t_ - self.ton, neg_slope) for i in range(4)], 1)
             else:
-                kc = self.kc
-                rho = self.rho
+                kc_ = kc
+                rho_ = rho
                 c0 = self.zero_vec
                 u0 = self.zero_vec
                 s0 = self.zero_vec
@@ -559,9 +558,9 @@ class Decoder(nn.Module):
                                         c0,
                                         u0,
                                         s0,
-                                        kc,
+                                        kc_,
                                         alpha_c,
-                                        rho,
+                                        rho_,
                                         alpha,
                                         beta,
                                         gamma)
@@ -572,9 +571,9 @@ class Decoder(nn.Module):
                                         (c0-offset_c)/scaling_c,
                                         (u0-offset_u)/scaling_u,
                                         (s0-offset_s)/scaling_s,
-                                        self.kc,
+                                        kc,
                                         alpha_c,
-                                        self.rho,
+                                        rho,
                                         alpha,
                                         beta,
                                         gamma)
@@ -587,12 +586,12 @@ class Decoder(nn.Module):
         shat = shat * scaling_s + offset_s
 
         if return_velocity:
-            vc = self.kc * alpha_c - alpha_c * chat
-            vu = self.rho * alpha * chat - beta * uhat
+            vc = kc * alpha_c - alpha_c * chat
+            vu = rho * alpha * chat - beta * uhat
             vs = beta * uhat - gamma * shat
-            return chat, uhat, shat, t_, vc, vu, vs
+            return chat, uhat, shat, t_, kc, rho, vc, vu, vs
         else:
-            return chat, uhat, shat, t_
+            return chat, uhat, shat, t_, kc, rho
 
 
 class VAEChrom():
@@ -805,18 +804,12 @@ class VAEChrom():
 
         self.use_knn = False
         self.reg_velocity = False
-        self.c0 = None
-        self.u0 = None
-        self.s0 = None
-        self.t0 = None
-        self.x0_index = None
-        self.c1 = None
-        self.u1 = None
-        self.s1 = None
-        self.t1 = None
-        self.x1_index = None
-        self.t = None
-        self.z = None
+        self.c0, self.u0, self.s0 = None, None, None
+        self.c1, self.u1, self.s1 = None, None, None
+        self.t0, self.t1 = None, None
+        self.x0_index, self.x1_index = None, None
+        self.t, self.z = None, None
+        self.t_, self.z_ = None, None
 
         self.loss_train, self.loss_test = [], []
         self.loss_test_iter, self.loss_test_color = [], []
@@ -1182,45 +1175,45 @@ class VAEChrom():
                 z = mu_z
 
         if t1 is not None:
-            chat, uhat, shat, t_, vc, vu, vs = self.decoder.forward(t,
-                                                                    z,
-                                                                    c0,
-                                                                    u0,
-                                                                    s0,
-                                                                    t0,
-                                                                    condition,
-                                                                    regressor,
-                                                                    neg_slope=self.config["neg_slope"],
-                                                                    sample=sample,
-                                                                    return_velocity=True,
-                                                                    use_input_time=self.use_knn)
-            chat_fw, uhat_fw, shat_fw, _, vc_fw, vu_fw, vs_fw = self.decoder.forward(t1,
-                                                                                     z,
-                                                                                     chat,
-                                                                                     uhat,
-                                                                                     shat,
-                                                                                     t_,
-                                                                                     condition,
-                                                                                     regressor,
-                                                                                     neg_slope=self.config["neg_slope"],
-                                                                                     sample=sample,
-                                                                                     return_velocity=True,
-                                                                                     use_input_time=True)
+            chat, uhat, shat, t_, kc, rho, vc, vu, vs = self.decoder.forward(t,
+                                                                             z,
+                                                                             c0,
+                                                                             u0,
+                                                                             s0,
+                                                                             t0,
+                                                                             condition,
+                                                                             regressor,
+                                                                             neg_slope=self.config["neg_slope"],
+                                                                             sample=sample,
+                                                                             return_velocity=True,
+                                                                             use_input_time=self.use_knn)
+            chat_fw, uhat_fw, shat_fw, _, kc, rho, vc_fw, vu_fw, vs_fw = self.decoder.forward(t1,
+                                                                                              z,
+                                                                                              chat,
+                                                                                              uhat,
+                                                                                              shat,
+                                                                                              t_,
+                                                                                              condition,
+                                                                                              regressor,
+                                                                                              neg_slope=self.config["neg_slope"],
+                                                                                              sample=sample,
+                                                                                              return_velocity=True,
+                                                                                              use_input_time=True)
         else:
-            chat, uhat, shat, t_ = self.decoder.forward(t,
-                                                        z,
-                                                        c0,
-                                                        u0,
-                                                        s0,
-                                                        t0,
-                                                        condition,
-                                                        regressor,
-                                                        neg_slope=self.config["neg_slope"],
-                                                        four_basis=self.config["four_basis"] if not self.use_knn else False,
-                                                        sample=sample,
-                                                        use_input_time=self.use_knn)
+            chat, uhat, shat, t_, kc, rho = self.decoder.forward(t,
+                                                                 z,
+                                                                 c0,
+                                                                 u0,
+                                                                 s0,
+                                                                 t0,
+                                                                 condition,
+                                                                 regressor,
+                                                                 neg_slope=self.config["neg_slope"],
+                                                                 four_basis=self.config["four_basis"] if not self.use_knn else False,
+                                                                 sample=sample,
+                                                                 use_input_time=self.use_knn)
             chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = None, None, None, None, None, None, None, None, None
-        return mu_t, std_t, mu_z, std_z, chat, uhat, shat, t_, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw
+        return mu_t, std_t, mu_z, std_z, chat, uhat, shat, t_, kc, rho, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw
 
     def vae_risk(self,
                  q_tx,
@@ -1360,7 +1353,7 @@ class VAEChrom():
 
         return loss, err_rec, self.config["kl_t"]*kldt, self.config["kl_z"]*kldz
 
-    def pred_all(self, data, mode='test', output=["chat", "uhat", "shat", "t", "z"], gene_idx=None, batch=None):
+    def pred_all(self, data, mode='test', output=["chat", "uhat", "shat", "t", "z", "kc", "rho"], gene_idx=None, batch=None, var_to_regress=None):
         N, G = data.shape[0], data.shape[1]//3
         if gene_idx is None:
             gene_idx = np.array(range(G))
@@ -1373,6 +1366,8 @@ class VAEChrom():
         save_shat_fw = "shat_fw" in output and self.use_knn and self.config["velocity_continuity"]
         if batch is None:
             batch = self.batch
+        if var_to_regress is None:
+            var_to_regress = self.var_to_regress
         if "chat" in output:
             chat_res = np.zeros((N, len(gene_idx)))
         if save_chat_fw:
@@ -1396,6 +1391,10 @@ class VAEChrom():
         if "z" in output:
             mu_z_out = np.zeros((N, self.config['dim_z']))
             std_z_out = np.zeros((N, self.config['dim_z']))
+        if "kc" in output:
+            kc_res = np.zeros((N, len(gene_idx)))
+        if "rho" in output:
+            rho_res = np.zeros((N, len(gene_idx)))
         if "v" in output:
             vc_res = np.zeros((N, len(gene_idx)))
             vu_res = np.zeros((N, len(gene_idx)))
@@ -1412,25 +1411,25 @@ class VAEChrom():
                 j = min([(n+1)*B, N])
                 data_in = data[i:j]
                 if mode == "test":
-                    batch_idx = self.test_idx[i:j]
+                    idx = self.test_idx[i:j]
                 elif mode == "train":
-                    batch_idx = self.train_idx[i:j]
+                    idx = self.train_idx[i:j]
                 else:
-                    batch_idx = torch.arange(i, j, device=self.device)
+                    idx = torch.arange(i, j, device=self.device)
 
-                c0 = self.c0[batch_idx] if self.use_knn else None
-                u0 = self.u0[batch_idx] if self.use_knn else None
-                s0 = self.s0[batch_idx] if self.use_knn else None
-                t0 = self.t0[batch_idx] if self.use_knn else None
-                t1 = self.t1[batch_idx] if self.use_knn and self.config['velocity_continuity'] else None
-                t = self.t[batch_idx] if self.use_knn else None
-                z = self.z[batch_idx] if self.use_knn else None
-                p_t = self.p_t[:, batch_idx, :]
-                p_z = self.p_z[:, batch_idx, :]
-                onehot = F.one_hot(batch[batch_idx], self.n_batch).float() if self.enable_cvae else None
-                regressor = self.var_to_regress[batch_idx] if self.var_to_regress is not None else None
+                c0 = self.c0[idx] if self.use_knn else None
+                u0 = self.u0[idx] if self.use_knn else None
+                s0 = self.s0[idx] if self.use_knn else None
+                t0 = self.t0[idx] if self.use_knn else None
+                t1 = self.t1[idx] if self.use_knn and self.config['velocity_continuity'] else None
+                t = self.t[idx] if self.use_knn else None
+                z = self.z[idx] if self.use_knn else None
+                p_t = self.p_t[:, idx, :]
+                p_z = self.p_z[:, idx, :]
+                onehot = F.one_hot(batch[idx], self.n_batch).float() if self.enable_cvae else None
+                regressor = var_to_regress[idx] if var_to_regress is not None else None
                 out = self.forward(data_in, t, z, c0, u0, s0, t0, t1, onehot, regressor, sample=False)
-                mu_tx, std_tx, mu_zx, std_zx, chat, uhat, shat, t_, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = out
+                mu_tx, std_tx, mu_zx, std_zx, chat, uhat, shat, t_, kc, rho, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = out
 
                 loss = self.vae_risk((mu_tx, std_tx),
                                      p_t,
@@ -1454,10 +1453,10 @@ class VAEChrom():
                                      vc_fw,
                                      vu_fw,
                                      vs_fw,
-                                     self.c1[batch_idx] if self.use_knn and self.config['velocity_continuity'] else None,
-                                     self.u1[batch_idx] if self.use_knn and self.config['velocity_continuity'] else None,
-                                     self.s1[batch_idx] if self.use_knn and self.config['velocity_continuity'] else None,
-                                     self.s_knn[batch_idx] if self.reg_velocity else None,
+                                     self.c1[idx] if self.use_knn and self.config['velocity_continuity'] else None,
+                                     self.u1[idx] if self.use_knn and self.config['velocity_continuity'] else None,
+                                     self.s1[idx] if self.use_knn and self.config['velocity_continuity'] else None,
+                                     self.s_knn[idx] if self.reg_velocity else None,
                                      onehot,
                                      sample=False)
 
@@ -1465,15 +1464,15 @@ class VAEChrom():
                 rec = rec - ((j-i)/N)*loss[1].detach().cpu().item()
                 klt = klt - ((j-i)/N)*loss[2].detach().cpu().item()
                 klz = klz - ((j-i)/N)*loss[3].detach().cpu().item()
-                if "chat" in output and gene_idx is not None:
+                if "chat" in output:
                     if chat.ndim == 3:
                         chat = torch.sum(chat*w_hard, 1)
                     chat_res[i:j] = chat[:, gene_idx].detach().cpu().numpy()
-                if "uhat" in output and gene_idx is not None:
+                if "uhat" in output:
                     if uhat.ndim == 3:
                         uhat = torch.sum(uhat*w_hard, 1)
                     uhat_res[i:j] = uhat[:, gene_idx].detach().cpu().numpy()
-                if "shat" in output and gene_idx is not None:
+                if "shat" in output:
                     if shat.ndim == 3:
                         shat = torch.sum(shat*w_hard, 1)
                     shat_res[i:j] = shat[:, gene_idx].detach().cpu().numpy()
@@ -1494,6 +1493,10 @@ class VAEChrom():
                 if "z" in output:
                     mu_z_out[i:j] = mu_zx.detach().cpu().numpy()
                     std_z_out[i:j] = std_zx.detach().cpu().numpy()
+                if "kc" in output:
+                    kc_res[i:j] = kc[:, gene_idx].detach().cpu().numpy()
+                if "rho" in output:
+                    rho_res[i:j] = rho[:, gene_idx].detach().cpu().numpy()
                 if "v" in output:
                     vc_res[i:j] = vc[:, gene_idx].detach().cpu().numpy()
                     vu_res[i:j] = vu[:, gene_idx].detach().cpu().numpy()
@@ -1519,6 +1522,10 @@ class VAEChrom():
         if "z" in output:
             out['mu_z'] = mu_z_out
             out['std_z'] = std_z_out
+        if "kc" in output:
+            out['kc'] = kc_res
+        if "rho" in output:
+            out['rho'] = rho_res
         if "v" in output:
             out["vc"] = vc_res
             out["vu"] = vu_res
@@ -1526,7 +1533,7 @@ class VAEChrom():
 
         return out, elbo, rec, klt, klz
 
-    def test(self,
+    def eval(self,
              dataset,
              Xembed,
              testid=0,
@@ -1666,7 +1673,7 @@ class VAEChrom():
 
         for i, batch in enumerate(train_loader):
             if self.counter % self.config["test_iter"] == (2 if self.use_knn else 1):
-                elbo_test, rec_test, klt_test, klz_test = self.test(test_set,
+                elbo_test, rec_test, klt_test, klz_test = self.eval(test_set,
                                                                     None,
                                                                     self.counter,
                                                                     True)
@@ -1706,7 +1713,7 @@ class VAEChrom():
             onehot = F.one_hot(self.batch[batch_idx], self.n_batch).float() if self.enable_cvae else None
             regressor = self.var_to_regress[batch_idx] if self.var_to_regress is not None else None
             out = self.forward(xbatch, t, z, c0, u0, s0, t0, t1, onehot, regressor)
-            mu_tx, std_tx, mu_zx, std_zx, chat, uhat, shat, t_, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = out
+            mu_tx, std_tx, mu_zx, std_zx, chat, uhat, shat, _, _, _, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = out
 
             loss = self.vae_risk((mu_tx, std_tx),
                                  p_t,
@@ -1757,21 +1764,31 @@ class VAEChrom():
 
         return stop_training
 
-    def update_x0(self, c, u, s):
+    def update_x0(self, c, u, s, save=True, ref_batch=False):
         start = time.time()
         self.set_mode('eval')
         out, _, _, _, _ = self.pred_all(torch.tensor(np.concatenate((c, u, s), 1), dtype=torch.float, device=self.device), "both")
-        chat, uhat, shat, t, z = out["chat"], out["uhat"], out["shat"], out["t"], out["mu_z"]
-        if self.r == 0:
-            key = self.config['key']
-            self.adata.obs[f"{key}_time_1step"] = out["t"]
-            self.adata.obsm[f"{key}_t_1step"] = out["mu_t"]
-            self.adata.obsm[f"{key}_z_1step"] = out["mu_z"]
-            if self.enable_cvae and self.ref_batch >= 0:
-                out, _, _, _, _ = self.pred_all(torch.tensor(np.concatenate((c, u, s), 1), dtype=torch.float, device=self.device), "both", batch=torch.full((self.adata.n_obs,), self.ref_batch, dtype=int, device=self.device))
-                self.adata.obs[f"{key}_time_1step_"] = out["t"]
-                self.adata.obsm[f"{key}_t_1step_"] = out["mu_t"]
-                self.adata.obsm[f"{key}_z_1step_"] = out["mu_z"]
+        chat, uhat, shat, t, mu_t, z = out["chat"], out["uhat"], out["shat"], out["t"], out["mu_t"], out["mu_z"]
+        if self.enable_cvae:
+            out, _, _, _, _ = self.pred_all(torch.tensor(np.concatenate((c, u, s), 1), dtype=torch.float, device=self.device), "both", batch=torch.full((self.adata.n_obs,), self.ref_batch, dtype=int, device=self.device))
+            _, _, _, t_, mu_t_, z_ = out["chat"], out["uhat"], out["shat"], out["t"], out["mu_t"], out["mu_z"]
+            if ref_batch:
+                chat, uhat, shat, t, mu_t, z = out["chat"], out["uhat"], out["shat"], out["t"], out["mu_t"], out["mu_z"]
+        if self.x0_index is None:
+            self.t = torch.reshape(torch.tensor(t, dtype=torch.float, device=self.device), (-1, 1))
+            self.z = torch.tensor(z, dtype=torch.float, device=self.device)
+            if save:
+                key = self.config['key']
+                self.adata.obs[f"{key}_time_1step"] = t
+                self.adata.obsm[f"{key}_t_1step"] = mu_t
+                self.adata.obsm[f"{key}_z_1step"] = z
+            if self.enable_cvae:
+                self.t_ = torch.reshape(torch.tensor(t_, dtype=torch.float, device=self.device), (-1, 1))
+                self.z_ = torch.tensor(z_, dtype=torch.float, device=self.device)
+                if save:
+                    self.adata.obs[f"{key}_time_1step_"] = t_
+                    self.adata.obsm[f"{key}_t_1step_"] = mu_t_
+                    self.adata.obsm[f"{key}_z_1step_"] = z_
 
         dt = (self.config["dt"][0]*(t.max()-t.min()), self.config["dt"][1]*(t.max()-t.min()))
         train_idx = self.train_idx.detach().cpu().numpy()
@@ -1834,7 +1851,7 @@ class VAEChrom():
             self.s1 = s1
             self.t1 = t1.reshape(-1, 1)
         print(f"Finished. Actual Time: {convert_time(time.time()-start)}")
-        return t, z
+        return t
 
     def update_std_noise(self, dataset):
         G = dataset.data.shape[1]//3
@@ -1879,7 +1896,7 @@ class VAEChrom():
             Xembed_test = Xembed[self.test_idx]
             plot = False
 
-        G = X.shape[1]
+        G = X.shape[1]//3
 
         print("*********      Creating Training and Validation Datasets      *********")
         train_set = SCData(X[self.train_idx], device=self.device)
@@ -1945,7 +1962,7 @@ class VAEChrom():
                                                  self.config["k_alt"])
 
             if epoch == 0 or (epoch+1) % self.config["save_epoch"] == 0:
-                elbo_train, _, _, _ = self.test(train_set,
+                elbo_train, _, _, _ = self.eval(train_set,
                                                 Xembed_train,
                                                 f"train-{epoch+1}",
                                                 False,
@@ -2003,7 +2020,7 @@ class VAEChrom():
                     print(f"*********      Stage 2: Early Stop Triggered at round {r}.      *********")
                     break
 
-                t, z = self.update_x0(X[:, :G//3], X[:, G//3:G//3*2], X[:, G//3*2:])
+                t = self.update_x0(X[:, :G], X[:, G:G*2], X[:, G*2:])
                 if plot:
                     if np.sum(np.isnan(self.t0)) > 0:
                         print('Debug: t0 contains nan.')
@@ -2019,9 +2036,9 @@ class VAEChrom():
                         c0_plot = self.c0[train_idx, idx]
                         u0_plot = self.u0[train_idx, idx]
                         s0_plot = self.s0[train_idx, idx]
-                        c_plot = X[:, :G//3][train_idx, idx]
-                        u_plot = X[:, G//3:G//3*2][train_idx, idx]
-                        s_plot = X[:, G//3*2:][train_idx, idx]
+                        c_plot = X[:, :G][train_idx, idx]
+                        u_plot = X[:, G:G*2][train_idx, idx]
+                        s_plot = X[:, G*2:][train_idx, idx]
                         plot_sig_(t[train_idx],
                                   c_plot,
                                   u_plot,
@@ -2039,8 +2056,6 @@ class VAEChrom():
                 self.u0 = torch.tensor(self.u0, dtype=torch.float, device=self.device)
                 self.s0 = torch.tensor(self.s0, dtype=torch.float, device=self.device)
                 self.t0 = torch.tensor(self.t0, dtype=torch.float, device=self.device)
-                self.t = torch.reshape(torch.tensor(t, dtype=torch.float, device=self.device), (-1, 1))
-                self.z = torch.tensor(z, dtype=torch.float, device=self.device)
                 if self.config["velocity_continuity"]:
                     self.c1 = torch.tensor(self.c1, dtype=torch.float, device=self.device)
                     self.u1 = torch.tensor(self.u1, dtype=torch.float, device=self.device)
@@ -2058,7 +2073,7 @@ class VAEChrom():
 
                 for epoch in range(self.config["n_epochs_post"]):
                     if epoch == 0:
-                        elbo_train, _, _, _ = self.test(train_set,
+                        elbo_train, _, _, _ = self.eval(train_set,
                                                         Xembed_train,
                                                         f"train-round{r+1}-first",
                                                         False,
@@ -2083,7 +2098,7 @@ class VAEChrom():
                                                          'decoder')
 
                     if stop_training or epoch == self.config["n_epochs_post"]:
-                        elbo_train, _, _, _ = self.test(train_set,
+                        elbo_train, _, _, _ = self.eval(train_set,
                                                         Xembed_train,
                                                         f"train-round{r+1}-last",
                                                         False,
@@ -2143,7 +2158,7 @@ class VAEChrom():
                               title=gene_plot[i],
                               save=f"{figure_path}/sigx0-{gene_plot[i].replace('.', '-')}-updated.png")
 
-        elbo_train, rec_train, klt_train, klz_train = self.test(train_set,
+        elbo_train, rec_train, klt_train, klz_train = self.eval(train_set,
                                                                 Xembed_train,
                                                                 "train-final",
                                                                 False,
@@ -2151,7 +2166,7 @@ class VAEChrom():
                                                                 gene_plot,
                                                                 True,
                                                                 figure_path)
-        elbo_test, rec_test, klt_test, klz_test = self.test(test_set,
+        elbo_test, rec_test, klt_test, klz_test = self.eval(test_set,
                                                             Xembed_test,
                                                             "test-final",
                                                             True,
@@ -2180,6 +2195,97 @@ class VAEChrom():
                 plot_test_loss_log(self.klz_test, self.loss_test_iter, color=self.loss_test_color, save=f'{figure_path}/test_loss_klz_velovae.png')
         print(f"Final: Train ELBO = {elbo_train:.3f},\tTest ELBO = {elbo_test:.3f}")
         print(f"*********      Finished. Total Time = {convert_time(time.time()-start)}     *********")
+
+    def test(self, c, u, s, batch=None):
+        if c.shape != u.shape or c.shape != s.shape:
+            raise ValueError("c, u, and s must have the same shape.")
+        if c.ndim == 1:
+            c = c.reshape(1, -1)
+        if u.ndim == 1:
+            u = u.reshape(1, -1)
+        if s.ndim == 1:
+            s = s.reshape(1, -1)
+        x = np.concatenate((c.A if issparse(c) else c,
+                            u.A if issparse(u) else u,
+                            s.A if issparse(s) else s), 1).astype(float)
+        self.set_mode('eval')
+
+        if not self.enable_cvae:
+            out, _, _, _, _ = self.pred_all(torch.tensor(x, dtype=torch.float, device=self.device), "both")
+        else:
+            if batch is not None:
+                print('Using supplied batch list for latent variable computation.')
+                batch_ = np.array([self.batch_dic[x] for x in np.array(batch)])
+                batch_ = torch.tensor(batch_, dtype=int, device=self.device)
+                out, _, _, _, _ = self.pred_all(torch.tensor(x, dtype=torch.float, device=self.device), "both", batch=batch_)
+            else:
+                print('Using reference batch for latent variable computation.')
+                batch_ = torch.full((x.shape[0],), self.ref_batch, dtype=int, device=self.device)
+                out, _, _, _, _ = self.pred_all(torch.tensor(x, dtype=torch.float, device=self.device), "both", batch=batch_)
+
+        c0_test, u0_test, s0_test, t0_test = np.empty_like(c), np.empty_like(u), np.empty_like(s), np.empty(x.shape[0])
+        var_to_regress = np.empty((x.shape[0], self.var_to_regress.shape[1]))
+        z_test, t_test = out["mu_z"], out["t"]
+        knn_model = NearestNeighbors(n_neighbors=1)
+        knn_model.fit(self.z.detach().cpu().numpy())
+        ind = knn_model.kneighbors(z_test, return_distance=False)
+        c0_self = self.c0.detach().cpu().numpy()
+        u0_self = self.u0.detach().cpu().numpy()
+        s0_self = self.s0.detach().cpu().numpy()
+        t0_self = self.t0.detach().cpu().numpy()
+        var_to_regress_self = self.var_to_regress.detach().cpu().numpy()
+        for i in range(z_test.shape[0]):
+            c0_test[i] = c0_self[ind[i][0]]
+            u0_test[i] = u0_self[ind[i][0]]
+            s0_test[i] = s0_self[ind[i][0]]
+            t0_test[i] = t0_self[ind[i][0], 0]
+            var_to_regress[i] = var_to_regress_self[ind[i][0]]
+        c0_test = torch.tensor(c0_test, dtype=torch.float, device=self.device)
+        u0_test = torch.tensor(u0_test, dtype=torch.float, device=self.device)
+        s0_test = torch.tensor(s0_test, dtype=torch.float, device=self.device)
+        t0_test = torch.tensor(t0_test[:, None], dtype=torch.float, device=self.device)
+        var_to_regress = torch.tensor(var_to_regress, dtype=torch.float, device=self.device)
+        if self.enable_cvae:
+            batch_ref = torch.full((x.shape[0],), self.ref_batch, dtype=int, device=self.device)
+        z_test, t_test = torch.tensor(z_test, dtype=torch.float, device=self.device), torch.tensor(t_test[:, None], dtype=torch.float, device=self.device)
+        x = torch.tensor(x, dtype=torch.float, device=self.device)
+
+        N, G = x.shape[0], x.shape[1]//3
+        chat_res = np.zeros((N, G))
+        uhat_res = np.zeros((N, G))
+        shat_res = np.zeros((N, G))
+        time_out = np.zeros((N))
+        kc_res = np.zeros((N, G))
+        rho_res = np.zeros((N, G))
+        with torch.no_grad():
+            B = min(N//5, 5000)
+            Nb = N // B
+            if Nb*B < N:
+                Nb += 1
+            for n in range(Nb):
+                i = n*B
+                j = min([(n+1)*B, N])
+                data_in = x[i:j]
+                idx = torch.arange(i, j, device=self.device)
+
+                c0 = c0_test[idx]
+                u0 = u0_test[idx]
+                s0 = s0_test[idx]
+                t0 = t0_test[idx]
+                t = t_test[idx]
+                z = z_test[idx]
+                onehot = F.one_hot(batch_ref[idx], self.n_batch).float() if self.enable_cvae else None
+                regressor = var_to_regress[idx] if var_to_regress is not None else None
+                out = self.forward(data_in, t, z, c0, u0, s0, t0, None, onehot, regressor, sample=False)
+                _, _, _, _, chat, uhat, shat, t_, kc, rho, _, _, _, _, _, _, _, _, _ = out
+                chat_res[i:j] = chat.detach().cpu().numpy()
+                uhat_res[i:j] = uhat.detach().cpu().numpy()
+                shat_res[i:j] = shat.detach().cpu().numpy()
+                time_out[i:j] = t_.detach().cpu().squeeze().numpy()
+                kc_res[i:j] = kc.detach().cpu().numpy()
+                rho_res[i:j] = rho.detach().cpu().numpy()
+
+        return chat_res, uhat_res, shat_res, z_test.detach().cpu().numpy(), time_out, kc, rho
 
     def save_model(self, file_path, enc_name='encoder', dec_name='decoder'):
         os.makedirs(file_path, exist_ok=True)
@@ -2277,18 +2383,18 @@ class VAEChrom():
         self.adata.var[f"{key}_ton"] = self.decoder.ton.detach().cpu().numpy()
         self.adata.varm[f"{key}_basis"] = F.softmax(self.decoder.logit_pw, 1).detach().cpu().numpy()
 
-        x = np.concatenate((self.adata_atac.layers['Mc'].A if issparse(self.adata_atac.layers['Mc']) else self.adata_atac.layers['Mc'],
+        X = np.concatenate((self.adata_atac.layers['Mc'].A if issparse(self.adata_atac.layers['Mc']) else self.adata_atac.layers['Mc'],
                             self.adata.layers['Mu'].A if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu'],
                             self.adata.layers['Ms'].A if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']), 1).astype(float)
-        G = x.shape[1]//3
-        out, _, _, _, _ = self.pred_all(torch.tensor(x, dtype=torch.float, device=self.device), "both")
-        chat, uhat, shat, t, std_t, t_, z, std_z = out["chat"], out["uhat"], out["shat"], out["mu_t"], out["std_t"], out["t"], out["mu_z"], out["std_z"]
-        std_c = np.clip(np.nanstd(x[:, :G], axis=0), 0.01, None)
-        std_u = np.clip(np.nanstd(x[:, G:G*2], axis=0), 0.01, None)
-        std_s = np.clip(np.nanstd(x[:, G*2:], axis=0), 0.01, None)
-        diff_c = (x[:, :G] - chat) / std_c
-        diff_u = (x[:, G:G*2] - uhat) / std_u
-        diff_s = (x[:, G*2:] - shat) / std_s
+        G = X.shape[1]//3
+        out, _, _, _, _ = self.pred_all(torch.tensor(X, dtype=torch.float, device=self.device), "both")
+        chat, uhat, shat, t, std_t, t_, z, std_z, kc, rho = out["chat"], out["uhat"], out["shat"], out["mu_t"], out["std_t"], out["t"], out["mu_z"], out["std_z"], out["kc"], out["rho"]
+        std_c = np.clip(np.nanstd(X[:, :G], axis=0), 0.01, None)
+        std_u = np.clip(np.nanstd(X[:, G:G*2], axis=0), 0.01, None)
+        std_s = np.clip(np.nanstd(X[:, G*2:], axis=0), 0.01, None)
+        diff_c = (X[:, :G] - chat) / std_c
+        diff_u = (X[:, G:G*2] - uhat) / std_u
+        diff_s = (X[:, G*2:] - shat) / std_s
         sigma_c = np.clip(np.nanstd(diff_c, axis=0), 1e-3, None)
         sigma_u = np.clip(np.nanstd(diff_u, axis=0), 1e-3, None)
         sigma_s = np.clip(np.nanstd(diff_s, axis=0), 1e-3, None)
@@ -2301,7 +2407,7 @@ class VAEChrom():
             nll = nll_c + nll_u + nll_s
         self.adata.var[f"{key}_likelihood"] = np.exp(-nll)
 
-        if self.enable_cvae and self.ref_batch >= 0:
+        if self.enable_cvae:
             self.adata.layers[f"{key}_chat_"] = chat
             self.adata.layers[f"{key}_uhat_"] = uhat
             self.adata.layers[f"{key}_shat_"] = shat
@@ -2310,8 +2416,12 @@ class VAEChrom():
             self.adata.obsm[f"{key}_std_t_batch"] = std_t
             self.adata.obsm[f"{key}_z_batch"] = z
             self.adata.obsm[f"{key}_std_z_batch"] = std_z
-            out, _, _, _, _ = self.pred_all(torch.tensor(x, dtype=torch.float, device=self.device), "both", batch=torch.full((self.adata.n_obs,), self.ref_batch, dtype=int, device=self.device))
-            chat, uhat, shat, t, std_t, t_, z, std_z = out["chat"], out["uhat"], out["shat"], out["mu_t"], out["std_t"], out["t"], out["mu_z"], out["std_z"]
+            self.adata.layers[f"{key}_kc_batch"] = kc
+            self.adata.layers[f"{key}_rho_batch"] = rho
+            batch_ = torch.full((self.adata.n_obs,), self.ref_batch, dtype=int, device=self.device)
+            out, _, _, _, _ = self.pred_all(torch.tensor(X, dtype=torch.float, device=self.device), "both", batch=batch_)
+            chat, uhat, shat, t, std_t, t_, z, std_z, kc, rho = out["chat"], out["uhat"], out["shat"], out["mu_t"], out["std_t"], out["t"], out["mu_z"], out["std_z"], out["kc"], out["rho"]
+
         self.adata.layers[f"{key}_chat"] = chat
         self.adata.layers[f"{key}_uhat"] = uhat
         self.adata.layers[f"{key}_shat"] = shat
@@ -2320,34 +2430,8 @@ class VAEChrom():
         self.adata.obsm[f"{key}_std_t"] = std_t
         self.adata.obsm[f"{key}_z"] = z
         self.adata.obsm[f"{key}_std_z"] = std_z
-
-        rho = np.zeros_like(uhat)
-        kc = np.zeros_like(uhat)
-        with torch.no_grad():
-            B = min(uhat.shape[0]//10, 1000)
-            Nb = uhat.shape[0] // B
-            if Nb*B < uhat.shape[0]:
-                Nb += 1
-            for n in range(Nb):
-                i = n*B
-                j = min([(n+1)*B, uhat.shape[0]])
-                z_in = torch.tensor(z[i:j], dtype=torch.float, device=self.device)
-                if self.enable_cvae:
-                    y_in = F.one_hot(self.batch[i:j], self.n_batch).float()
-                    z_in = torch.cat((z_in, y_in), 1)
-                if self.var_to_regress is not None:
-                    r_in = self.var_to_regress[i:j]
-                    z_in = torch.cat((z_in, r_in), 1)
-                rho_batch = self.decoder.net_rho(z_in)
-                if self.config['rna_only']:
-                    kc_batch = torch.full_like(rho_batch, 1.0)
-                else:
-                    kc_batch = self.decoder.net_kc(z_in if self.config["indicator_arch"] == 'parallel' else rho_batch)
-                rho[i:j] = rho_batch.detach().cpu().numpy()
-                kc[i:j] = kc_batch.detach().cpu().numpy()
-
-        self.adata.layers[f"{key}_rho"] = rho
         self.adata.layers[f"{key}_kc"] = kc
+        self.adata.layers[f"{key}_rho"] = rho
 
         self.adata.obs[f"{key}_t0"] = self.t0.detach().cpu().numpy().squeeze() if self.t0 is not None else 0
         self.adata.layers[f"{key}_c0"] = self.c0.detach().cpu().numpy() if self.c0 is not None else np.zeros_like(self.adata.layers['Mu'])
