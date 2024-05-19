@@ -1,10 +1,12 @@
 import os
 import time
 import copy
+import logging
 import anndata as ad
 from scipy.sparse import issparse
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,6 +20,7 @@ from .model_util_chrom import loss_vel, cosine_similarity, find_dirichlet_param,
 from .transition_graph import encode_type
 from .training_data_chrom import SCData
 from .velocity_chrom import rna_velocity_vae
+logger = logging.getLogger(__name__)
 
 
 class Encoder(nn.Module):
@@ -354,7 +357,7 @@ class Decoder(nn.Module):
                     filt = (si > 0) * (ui > 0) * (ci > 0)
                     if np.any(np.sum(filt, axis=0) == 0):
                         j = np.where(np.sum(filt, axis=0) == 0)[0]
-                        print(f'Warning: batch class {i} gene {j} has no valid data.')
+                        logger.warn(f'Batch class {i} gene {j} has no valid data.')
                     ci[~filt] = np.nan
                     ui[~filt] = np.nan
                     si[~filt] = np.nan
@@ -367,17 +370,17 @@ class Decoder(nn.Module):
             offset_u = np.zeros((self.dim_cond, G))
             offset_s = np.zeros((self.dim_cond, G))
         if np.any(np.isnan(scaling_c)):
-            print('Warning: scaling_c invalid (nan).')
+            logger.warn('Scaling_c invalid (nan).')
         if np.any(np.isinf(scaling_c)):
-            print('Warning: scaling_c invalid (inf).')
+            logger.warn('Scaling_c invalid (inf).')
         if np.any(np.isnan(scaling_u)):
-            print('Warning: scaling_u invalid (nan).')
+            logger.warn('Scaling_u invalid (nan).')
         if np.any(np.isinf(scaling_u)):
-            print('Warning: scaling_u invalid (inf).')
+            logger.warn('Scaling_u invalid (inf).')
         if np.any(np.isnan(scaling_s)):
-            print('Warning: scaling_s invalid (nan).')
+            logger.warn('Scaling_s invalid (nan).')
         if np.any(np.isinf(scaling_s)):
-            print('Warning: scaling_s invalid (inf).')
+            logger.warn('Scaling_s invalid (inf).')
         scaling_c[np.isnan(scaling_c)] = 1.0
         scaling_u[np.isnan(scaling_u)] = 1.0
         scaling_s[np.isnan(scaling_s)] = 1.0
@@ -658,11 +661,11 @@ class VAEChrom():
         if issparse(adata.layers['Ms']):
             adata.layers['Ms'] = adata.layers['Ms'].A
         if np.any(adata_atac.layers['Mc'] < 0):
-            print('Warning: negative expression values detected in layers["Mc"]. Please make sure all values are non-negative.')
+            logger.warn('Negative expression values detected in layers["Mc"]. Please make sure all values are non-negative.')
         if np.any(adata.layers['Mu'] < 0):
-            print('Warning: negative expression values detected in layers["Mu"]. Please make sure all values are non-negative.')
+            logger.warn('Negative expression values detected in layers["Mu"]. Please make sure all values are non-negative.')
         if np.any(adata.layers['Ms'] < 0):
-            print('Warning: negative expression values detected in layers["Ms"]. Please make sure all values are non-negative.')
+            logger.warn('Negative expression values detected in layers["Ms"]. Please make sure all values are non-negative.')
 
         self.config = {
             # model parameters
@@ -839,7 +842,7 @@ class VAEChrom():
             if torch.cuda.is_available():
                 self.device = torch.device(device)
             else:
-                print('Warning: GPU not detected. Using CPU as the device.')
+                logger.warn('GPU not detected. Using CPU as the device.')
                 self.device = torch.device('cpu')
         else:
             self.device = torch.device('cpu')
@@ -862,7 +865,7 @@ class VAEChrom():
             elif net == 'decoder':
                 self.decoder.eval()
         else:
-            print("Warning: mode not recognized. Must be 'train' or 'test'!")
+            logger.warn("Mode not recognized. Must be 'train' or 'test'!")
 
     def split_train_test(self, N):
         rand_perm = np.random.permutation(N)
@@ -878,15 +881,15 @@ class VAEChrom():
         self.ref_batch = ref_batch
         if batch_key is not None and batch_key in adata.obs.keys():
             print('CVAE enabled. Performing batch effect correction.')
-            batch_raw = adata.obs[batch_key].to_numpy()
+            self.batch_labels_raw = adata.obs[batch_key].to_numpy()
             if adata.obs[batch_key].dtype.name == 'category':
                 self.batch_names_raw = adata.obs[batch_key].cat.categories.to_numpy()
                 batch_count = adata.obs[batch_key].value_counts()[self.batch_names_raw].to_numpy()
             else:
-                self.batch_names_raw, batch_count = np.unique(batch_raw, return_counts=True)
+                self.batch_names_raw, batch_count = np.unique(self.batch_labels_raw, return_counts=True)
             self.batch_dic, self.batch_dic_rev = encode_type(self.batch_names_raw)
             self.n_batch = len(self.batch_names_raw)
-            self.batch_ = np.array([self.batch_dic[x] for x in batch_raw])
+            self.batch_ = np.array([self.batch_dic[x] for x in self.batch_labels_raw])
             self.batch = torch.tensor(self.batch_, dtype=int, device=self.device)
         if isinstance(self.ref_batch, int):
             if self.ref_batch >= self.n_batch:
@@ -895,7 +898,7 @@ class VAEChrom():
                 self.ref_batch = 0
             print(f'Reference batch set to {self.ref_batch} ({self.batch_names_raw[self.ref_batch]}).')
             if np.issubdtype(self.batch_names_raw.dtype, np.number) and 0 not in self.batch_names_raw:
-                print('Warning: integer batch names do not start from 0. Reference batch index may not match the actual batch name!')
+                logger.warn('Integer batch names do not start from 0. Reference batch index may not match the actual batch name!')
         elif isinstance(self.ref_batch, str):
             if self.config['ref_batch'] in self.batch_names_raw:
                 self.ref_batch = self.batch_dic[self.config['ref_batch']]
@@ -908,9 +911,9 @@ class VAEChrom():
         self.enable_cvae = self.n_batch > 0
         if self.config['dim_z'] is not None:
             if self.enable_cvae and 2*self.n_batch > self.config['dim_z']:
-                print('Warning: number of batch classes is larger than half of dim_z. Consider increasing dim_z.')
+                logger.warn('Number of batch classes is larger than half of dim_z. Consider increasing dim_z.')
             if self.enable_cvae and 10*self.n_batch < self.config['dim_z']:
-                print('Warning: number of batch classes is smaller than 1/10 of dim_z. Consider decreasing dim_z.')
+                logger.warn('Number of batch classes is smaller than 1/10 of dim_z. Consider decreasing dim_z.')
         else:
             if self.config['rna_only']:
                 dim_z = 3 + adata.n_vars // 512
@@ -926,7 +929,7 @@ class VAEChrom():
                 if f"{batch_hvg_key}-{batch}" in adata.var.keys():
                     self.batch_hvg_genes_[self.batch_dic[batch]] = adata.var[f"{batch_hvg_key}-{batch}"].to_numpy()
                 else:
-                    print(f'Warning: highly variable genes for batch {batch} not found in var:batch_{batch_hvg_key}. All genes will be used for batch {batch}.')
+                    logger.warn(f'Highly variable genes for batch {batch} not found in var:batch_{batch_hvg_key}. All genes will be used for batch {batch}.')
                     self.batch_hvg_genes_[self.batch_dic[batch]] = True
         self.batch_hvg_genes = torch.tensor(self.batch_hvg_genes_, dtype=torch.float, device=self.device)
         self.batch_count_balance = None
@@ -1030,7 +1033,7 @@ class VAEChrom():
                 self.config[key] = config[key]
             else:
                 self.config[key] = config[key]
-                print(f"Warning: unknown hyperparameter: {key}")
+                logger.warn(f"Unknown hyperparameter: {key}")
 
     def plot_initial(self, gene_plot, figure_path="figures", embed=None):
         gind, gene_plot = get_gene_index(self.adata.var_names, gene_plot)
@@ -1890,7 +1893,7 @@ class VAEChrom():
             Xembed_train = Xembed[self.train_idx]
             Xembed_test = Xembed[self.test_idx]
         except KeyError:
-            print(f"Embedding X_{embed} not found! Set to None.")
+            logger.warn(f"Embedding X_{embed} not found! Set to None.")
             Xembed = np.nan*np.ones((self.adata.n_obs, 2))
             Xembed_train = Xembed[self.train_idx]
             Xembed_test = Xembed[self.test_idx]
@@ -2023,9 +2026,9 @@ class VAEChrom():
                 t = self.update_x0(X[:, :G], X[:, G:G*2], X[:, G*2:])
                 if plot:
                     if np.sum(np.isnan(self.t0)) > 0:
-                        print('Debug: t0 contains nan.')
+                        print('t0 contains nan.')
                     if np.sum(np.isnan(self.c0)) > 0 or np.sum(np.isnan(self.u0)) > 0 or np.sum(np.isnan(self.s0)) > 0:
-                        print('Debug: c0, u0, or s0 contains nan. Consider raising early stopping threshold.')
+                        print('c0, u0, or s0 contains nan. Consider raising early stopping threshold.')
                     if r == 0:
                         plot_time(self.t0.squeeze(), Xembed, save=f"{figure_path}/timet0-train-test.png")
                         plot_time(t, Xembed, save=f"{figure_path}/time-train-test.png")
@@ -2196,7 +2199,7 @@ class VAEChrom():
         print(f"Final: Train ELBO = {elbo_train:.3f},\tTest ELBO = {elbo_test:.3f}")
         print(f"*********      Finished. Total Time = {convert_time(time.time()-start)}     *********")
 
-    def test(self, c, u, s, batch=None):
+    def test(self, c, u, s, batch=None, k=1):
         if c.shape != u.shape or c.shape != s.shape:
             raise ValueError("c, u, and s must have the same shape.")
         if c.ndim == 1:
@@ -2226,7 +2229,7 @@ class VAEChrom():
         c0_test, u0_test, s0_test, t0_test = np.empty_like(c), np.empty_like(u), np.empty_like(s), np.empty(x.shape[0])
         var_to_regress = np.empty((x.shape[0], self.var_to_regress.shape[1]))
         z_test, t_test = out["mu_z"], out["t"]
-        knn_model = NearestNeighbors(n_neighbors=1)
+        knn_model = NearestNeighbors(n_neighbors=k)
         knn_model.fit(self.z.detach().cpu().numpy())
         ind = knn_model.kneighbors(z_test, return_distance=False)
         c0_self = self.c0.detach().cpu().numpy()
@@ -2235,18 +2238,23 @@ class VAEChrom():
         t0_self = self.t0.detach().cpu().numpy()
         var_to_regress_self = self.var_to_regress.detach().cpu().numpy()
         for i in range(z_test.shape[0]):
-            c0_test[i] = c0_self[ind[i][0]]
-            u0_test[i] = u0_self[ind[i][0]]
-            s0_test[i] = s0_self[ind[i][0]]
-            t0_test[i] = t0_self[ind[i][0], 0]
-            var_to_regress[i] = var_to_regress_self[ind[i][0]]
+            if k == 1:
+                c0_test[i] = c0_self[ind[i][0]]
+                u0_test[i] = u0_self[ind[i][0]]
+                s0_test[i] = s0_self[ind[i][0]]
+                t0_test[i] = t0_self[ind[i][0], 0]
+                var_to_regress[i] = var_to_regress_self[ind[i][0]]
+            elif k > 1:
+                c0_test[i] = np.mean(c0_self[ind[i]], 0)
+                u0_test[i] = np.mean(u0_self[ind[i]], 0)
+                s0_test[i] = np.mean(s0_self[ind[i]], 0)
+                t0_test[i] = np.mean(t0_self[ind[i]], 0)
+                var_to_regress[i] = np.mean(var_to_regress_self[ind[i]], 0)
         c0_test = torch.tensor(c0_test, dtype=torch.float, device=self.device)
         u0_test = torch.tensor(u0_test, dtype=torch.float, device=self.device)
         s0_test = torch.tensor(s0_test, dtype=torch.float, device=self.device)
         t0_test = torch.tensor(t0_test[:, None], dtype=torch.float, device=self.device)
         var_to_regress = torch.tensor(var_to_regress, dtype=torch.float, device=self.device)
-        if self.enable_cvae:
-            batch_ref = torch.full((x.shape[0],), self.ref_batch, dtype=int, device=self.device)
         z_test, t_test = torch.tensor(z_test, dtype=torch.float, device=self.device), torch.tensor(t_test[:, None], dtype=torch.float, device=self.device)
         x = torch.tensor(x, dtype=torch.float, device=self.device)
 
@@ -2274,7 +2282,10 @@ class VAEChrom():
                 t0 = t0_test[idx]
                 t = t_test[idx]
                 z = z_test[idx]
-                onehot = F.one_hot(batch_ref[idx], self.n_batch).float() if self.enable_cvae else None
+                if not self.enable_cvae:
+                    onehot = None
+                else:
+                    onehot = F.one_hot(batch_[idx], self.n_batch).float() if self.enable_cvae else None
                 regressor = var_to_regress[idx] if var_to_regress is not None else None
                 out = self.forward(data_in, t, z, c0, u0, s0, t0, None, onehot, regressor, sample=False)
                 _, _, _, _, chat, uhat, shat, t_, kc, rho, _, _, _, _, _, _, _, _, _ = out
@@ -2285,7 +2296,94 @@ class VAEChrom():
                 kc_res[i:j] = kc.detach().cpu().numpy()
                 rho_res[i:j] = rho.detach().cpu().numpy()
 
-        return chat_res, uhat_res, shat_res, z_test.detach().cpu().numpy(), time_out, kc, rho
+        return chat_res, uhat_res, shat_res, z_test.detach().cpu().numpy(), time_out, kc_res, rho_res
+
+    def differential_dynamics(self, group1=None, group2=None, idx1=None, idx2=None, n_samples=5000):
+        # inspired by [Lopez2018]
+        eps = 1e-8
+        if group1 is not None:
+            if group1 in self.cell_types_raw:
+                idx1 = self.cell_labels_raw == group1
+            elif self.enable_cvae and group1 in self.batch_names_raw:
+                idx1 = self.batch_labels_raw == group1
+            else:
+                raise ValueError("group1 not found in cell types or batch labels, try specifying idx1 directly")
+        else:
+            if idx1 is None:
+                raise ValueError("Need to specify either group1 or idx1")
+        if len(idx1) == self.adata.n_obs:
+            idx1 = np.where(idx1)[0]
+        if group2 is not None:
+            if group2 in self.cell_types_raw:
+                idx2 = self.cell_labels_raw == group2
+            elif self.enable_cvae and group2 in self.batch_names_raw:
+                idx2 = self.batch_labels_raw == group2
+            else:
+                raise ValueError("group2 not found in cell types or batch labels, try specifying idx2 directly")
+        else:
+            if idx2 is None:
+                print("Using the rest of cells as reference (control).")
+                idx2 = np.setdiff1d(np.arange(self.adata.n_obs), np.where(idx1)[0])
+        if len(idx2) == self.adata.n_obs:
+            idx2 = np.where(idx2)[0]
+        c = self.adata_atac.layers['Mc'].copy()
+        c = c.A if issparse(c) else c
+        u = self.adata.layers['Mu'].copy()
+        u = u.A if issparse(u) else u
+        s = self.adata.layers['Ms'].copy()
+        s = s.A if issparse(s) else s
+        g1_corrected = self.test(c[idx1], u[idx1], s[idx1])
+        g2_corrected = self.test(c[idx2], u[idx2], s[idx2])
+        g1_sample_idx = np.random.choice(np.arange(len(idx1)), n_samples)
+        g2_sample_idx = np.random.choice(np.arange(len(idx2)), n_samples)
+
+        kc1 = g1_corrected[5][g1_sample_idx]
+        kc2 = g2_corrected[5][g2_sample_idx]
+        mean_kc1 = np.mean(kc1, 0)
+        mean_kc2 = np.mean(kc2, 0)
+        p1_kc = np.mean(kc1 > kc2, 0)
+        p2_kc = 1.0 - p1_kc
+        bf_kc = np.log(p1_kc + eps) - np.log(p2_kc + eps)
+        rho1 = g1_corrected[6][g1_sample_idx]
+        rho2 = g2_corrected[6][g2_sample_idx]
+        mean_rho1 = np.mean(rho1, 0)
+        mean_rho2 = np.mean(rho2, 0)
+        p1_rho = np.mean(rho1 > rho2, 0)
+        p2_rho = 1.0 - p1_rho
+        bf_rho = np.log(p1_rho + eps) - np.log(p2_rho + eps)
+
+        df_kc = pd.DataFrame({'mean_kc1': mean_kc1,
+                              'mean_kc2': mean_kc2,
+                              'p1_kc': p1_kc,
+                              'p2_kc': p2_kc,
+                              'bayes_factor_kc': bf_kc},
+                             index=self.adata.var_names)
+        df_kc = df_kc.sort_values('bayes_factor_kc', ascending=False)
+        df_rho = pd.DataFrame({'mean_rho1': mean_rho1,
+                               'mean_rho2': mean_rho2,
+                               'p1_rho': p1_rho,
+                               'p2_rho': p2_rho,
+                               'bayes_factor_rho': bf_rho},
+                              index=self.adata.var_names)
+        df_rho = df_rho.sort_values('bayes_factor_rho', ascending=False)
+
+        s1 = g1_corrected[2][g1_sample_idx]
+        s2 = g2_corrected[2][g2_sample_idx]
+        mean_s1 = np.mean(s1, 0)
+        mean_s2 = np.mean(s2, 0)
+        p1_s = np.mean(s1 > s2, 0)
+        p2_s = 1.0 - p1_s
+        bf_s = np.log(p1_s + eps) - np.log(p2_s + eps)
+
+        df_s = pd.DataFrame({'mean_s1': mean_s1,
+                             'mean_s2': mean_s2,
+                             'p1_s': p1_s,
+                             'p2_s': p2_s,
+                             'bayes_factor_s': bf_s},
+                            index=self.adata.var_names)
+        df_s = df_s.sort_values('bayes_factor_s', ascending=False)
+
+        return df_kc, df_rho, df_s
 
     def save_model(self, file_path, enc_name='encoder', dec_name='decoder'):
         os.makedirs(file_path, exist_ok=True)

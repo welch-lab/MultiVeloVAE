@@ -1,8 +1,9 @@
+import logging
 from scipy import sparse
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
-
+logger = logging.getLogger(__name__)
 
 #######################################################################################
 # Default colors and markers for plotting
@@ -36,7 +37,7 @@ def get_colors(n, color_map=None):
             TAB40 = TAB20B+TAB20C
             return TAB40[:n]
         else:
-            print("Warning: Number of colors exceeds the maximum (40)! Use a continuous colormap (256) instead.")
+            logger.warn("Number of colors exceeds the maximum (40)! Use a continuous colormap (256) instead.")
             return RAINBOW[:n]
     else:
         color_map_obj = list(plt.get_cmap(color_map).colors)
@@ -53,7 +54,7 @@ def save_fig(fig, save, bbox_extra_artists=None):
             idx = save.find('.')
             fig.savefig(save, bbox_extra_artists=bbox_extra_artists, format=save[idx+1:], bbox_inches='tight')
         except FileNotFoundError:
-            print("Saving failed. File path doesn't exist!")
+            logger.warn("Saving failed. File path doesn't exist!")
         plt.close(fig)
 
 
@@ -691,7 +692,7 @@ def dynamic_plot(adata,
     genes = np.array(genes)
     missing_genes = genes[~np.isin(genes, adata.var_names)]
     if len(missing_genes) > 0:
-        print(f'{missing_genes} not found')
+        logger.warn(f'{missing_genes} not found')
     genes = genes[np.isin(genes, adata.var_names)]
     gn = len(genes)
     if gn == 0:
@@ -810,7 +811,7 @@ def scatter_plot(adata,
     genes = np.array(genes)
     missing_genes = genes[~np.isin(genes, adata.var_names)]
     if len(missing_genes) > 0:
-        print(f'{missing_genes} not found')
+        logger.warn(f'{missing_genes} not found')
     genes = genes[np.isin(genes, adata.var_names)]
     gn = len(genes)
     if gn == 0:

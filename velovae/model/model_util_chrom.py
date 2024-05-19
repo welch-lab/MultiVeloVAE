@@ -1,4 +1,7 @@
+import logging
 import numpy as np
+from anndata import AnnData
+import scanpy as sc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +12,6 @@ from sklearn.cluster import AgglomerativeClustering, KMeans
 from scipy.spatial import KDTree
 from scipy.sparse import csr_matrix
 from scipy.stats import dirichlet, bernoulli, kstest
-import scanpy as sc
 from tqdm.notebook import tqdm_notebook
 from .model_util import assign_gene_mode_binary
 from scipy.stats import median_abs_deviation
@@ -17,7 +19,7 @@ from scipy.sparse import issparse
 import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
-from anndata import AnnData
+logger = logging.getLogger(__name__)
 
 
 def inv(x):
@@ -791,13 +793,13 @@ def compute_quantile_scores(adata, n_pcs=30, n_neighbors=30):
     quantile_scores_2bit[:, :, 1] = csr_matrix.dot(conn_norm, quantile_scores_2bit[:, :, 1])
 
     if np.any(np.isnan(quantile_scores)):
-        print('nan found during ellipse fit')
+        logger.warn('nan found during ellipse fit')
     if np.any(np.isinf(quantile_scores)):
-        print('inf found during ellipse fit')
+        logger.warn('inf found during ellipse fit')
     if np.any(np.isnan(quantile_scores_2bit)):
-        print('nan found during ellipse fit')
+        logger.warn('nan found during ellipse fit')
     if np.any(np.isinf(quantile_scores_2bit)):
-        print('inf found during ellipse fit')
+        logger.warn('inf found during ellipse fit')
 
     adata.layers['quantile_scores'] = quantile_scores
     adata.layers['quantile_scores_1st_bit'] = quantile_scores_2bit[:, :, 0]

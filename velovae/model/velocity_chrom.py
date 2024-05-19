@@ -1,7 +1,9 @@
+import logging
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from .model_util_chrom import pred_exp_numpy
 from .transition_graph import encode_type
+logger = logging.getLogger(__name__)
 
 
 def rna_velocity_vae(adata,
@@ -107,7 +109,7 @@ def rna_velocity_vae(adata,
     adata.layers[f"{key}_velocity_c"] = vc
     adata.var[f'{key}_velocity_genes'] = adata.var['quantile_genes'] & (adata.var[f"{key}_likelihood"] > (0.025 if not rna_only else 0.05))
     if np.sum(adata.var[f'{key}_velocity_genes']) < 0.2 * adata.n_vars:
-        print('Warning: less than 1/5 of genes assigned as velocity genes.')
+        logger.warn('Less than 1/5 of genes assigned as velocity genes.')
     adata.uns[f"{key}_velocity_params"] = {'mode': 'dynamical'}
     if return_copy:
         return vc, vu, v, c, u, s
