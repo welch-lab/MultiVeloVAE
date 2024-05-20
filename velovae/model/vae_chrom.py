@@ -897,17 +897,20 @@ class VAEChrom():
             elif self.ref_batch < -self.n_batch:
                 self.ref_batch = 0
             print(f'Reference batch set to {self.ref_batch} ({self.batch_names_raw[self.ref_batch]}).')
+            self.config['ref_batch'] = self.batch_names_raw[self.ref_batch]
             if np.issubdtype(self.batch_names_raw.dtype, np.number) and 0 not in self.batch_names_raw:
                 logger.warn('Integer batch names do not start from 0. Reference batch index may not match the actual batch name!')
         elif isinstance(self.ref_batch, str):
             if self.config['ref_batch'] in self.batch_names_raw:
                 self.ref_batch = self.batch_dic[self.config['ref_batch']]
                 print(f'Reference batch set to {self.ref_batch} ({self.batch_names_raw[self.ref_batch]}).')
+                self.config['ref_batch'] = self.batch_names_raw[self.ref_batch]
             else:
                 raise ValueError('Reference batch not found in the provided batch field!')
         elif batch_count is not None:
             self.ref_batch = 0
             print(f'Reference batch set to {self.ref_batch} ({self.batch_names_raw[self.ref_batch]}).')
+            self.config['ref_batch'] = self.batch_names_raw[self.ref_batch]
         self.enable_cvae = self.n_batch > 0
         if self.config['dim_z'] is not None:
             if self.enable_cvae and 2*self.n_batch > self.config['dim_z']:
@@ -1150,7 +1153,7 @@ class VAEChrom():
                        self.cell_type_colors,
                        save=f"{figure_path}/phasescaled-{gene_plot[i].replace('.', '-')}-init-us.png")
 
-    def forward(self, data_in, t=None, z=None, c0=None, u0=None, s0=None, t0=None, t1=None, condition=None, regressor=None, sample=True):
+    def forward(self, data_in, t=None, z=None, c0=None, u0=None, s0=None, t0=None, t1=None, condition=None, regressor=None, sample=True, return_velocity=False):
         if self.config['unit_scale']:
             sigma_c = self.decoder.sigma_c
             sigma_u = self.decoder.sigma_u
@@ -1203,19 +1206,25 @@ class VAEChrom():
                                                                                               return_velocity=True,
                                                                                               use_input_time=True)
         else:
-            chat, uhat, shat, t_, kc, rho = self.decoder.forward(t,
-                                                                 z,
-                                                                 c0,
-                                                                 u0,
-                                                                 s0,
-                                                                 t0,
-                                                                 condition,
-                                                                 regressor,
-                                                                 neg_slope=self.config["neg_slope"],
-                                                                 four_basis=self.config["four_basis"] if not self.use_knn else False,
-                                                                 sample=sample,
-                                                                 use_input_time=self.use_knn)
-            chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = None, None, None, None, None, None, None, None, None
+            out = self.decoder.forward(t,
+                                       z,
+                                       c0,
+                                       u0,
+                                       s0,
+                                       t0,
+                                       condition,
+                                       regressor,
+                                       neg_slope=self.config["neg_slope"],
+                                       sample=sample,
+                                       four_basis=self.config["four_basis"] if not self.use_knn else False,
+                                       return_velocity=return_velocity,
+                                       use_input_time=self.use_knn)
+            if return_velocity:
+                chat, uhat, shat, t_, kc, rho, vc, vu, vs = out
+                chat_fw, uhat_fw, shat_fw, vc_fw, vu_fw, vs_fw = None, None, None, None, None, None
+            else:
+                chat, uhat, shat, t_, kc, rho = out
+                chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = None, None, None, None, None, None, None, None, None
         return mu_t, std_t, mu_z, std_z, chat, uhat, shat, t_, kc, rho, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw
 
     def vae_risk(self,
@@ -2262,6 +2271,9 @@ class VAEChrom():
         chat_res = np.zeros((N, G))
         uhat_res = np.zeros((N, G))
         shat_res = np.zeros((N, G))
+        vc_res = np.zeros((N, G))
+        vu_res = np.zeros((N, G))
+        vs_res = np.zeros((N, G))
         time_out = np.zeros((N))
         kc_res = np.zeros((N, G))
         rho_res = np.zeros((N, G))
@@ -2287,19 +2299,22 @@ class VAEChrom():
                 else:
                     onehot = F.one_hot(batch_[idx], self.n_batch).float() if self.enable_cvae else None
                 regressor = var_to_regress[idx] if var_to_regress is not None else None
-                out = self.forward(data_in, t, z, c0, u0, s0, t0, None, onehot, regressor, sample=False)
-                _, _, _, _, chat, uhat, shat, t_, kc, rho, _, _, _, _, _, _, _, _, _ = out
+                out = self.forward(data_in, t, z, c0, u0, s0, t0, None, onehot, regressor, sample=False, return_velocity=True)
+                _, _, _, _, chat, uhat, shat, t_, kc, rho, _, _, _, vc, vu, vs, _, _, _ = out
                 chat_res[i:j] = chat.detach().cpu().numpy()
                 uhat_res[i:j] = uhat.detach().cpu().numpy()
                 shat_res[i:j] = shat.detach().cpu().numpy()
+                vc_res[i:j] = vc.detach().cpu().numpy()
+                vu_res[i:j] = vu.detach().cpu().numpy()
+                vs_res[i:j] = vs.detach().cpu().numpy()
                 time_out[i:j] = t_.detach().cpu().squeeze().numpy()
                 kc_res[i:j] = kc.detach().cpu().numpy()
                 rho_res[i:j] = rho.detach().cpu().numpy()
 
-        return chat_res, uhat_res, shat_res, z_test.detach().cpu().numpy(), time_out, kc_res, rho_res
+        return chat_res, uhat_res, shat_res, vc_res, vu_res, vs_res, z_test.detach().cpu().numpy(), time_out, kc_res, rho_res
 
-    def differential_dynamics(self, group1=None, group2=None, idx1=None, idx2=None, n_samples=5000):
-        # inspired by [Lopez2018]
+    def differential_dynamics(self, group1=None, group2=None, idx1=None, idx2=None, mode='vanilla', n_samples=5000, delta=2):
+        # inspired by [Lopez2018] and [Boyeau2019]
         eps = 1e-8
         if group1 is not None:
             if group1 in self.cell_types_raw:
@@ -2337,53 +2352,124 @@ class VAEChrom():
         g1_sample_idx = np.random.choice(np.arange(len(idx1)), n_samples)
         g2_sample_idx = np.random.choice(np.arange(len(idx2)), n_samples)
 
-        kc1 = g1_corrected[5][g1_sample_idx]
-        kc2 = g2_corrected[5][g2_sample_idx]
+        kc1 = g1_corrected[8][g1_sample_idx]
+        kc2 = g2_corrected[8][g2_sample_idx]
         mean_kc1 = np.mean(kc1, 0)
         mean_kc2 = np.mean(kc2, 0)
-        p1_kc = np.mean(kc1 > kc2, 0)
-        p2_kc = 1.0 - p1_kc
-        bf_kc = np.log(p1_kc + eps) - np.log(p2_kc + eps)
-        rho1 = g1_corrected[6][g1_sample_idx]
-        rho2 = g2_corrected[6][g2_sample_idx]
+
+        rho1 = g1_corrected[9][g1_sample_idx]
+        rho2 = g2_corrected[9][g2_sample_idx]
         mean_rho1 = np.mean(rho1, 0)
         mean_rho2 = np.mean(rho2, 0)
-        p1_rho = np.mean(rho1 > rho2, 0)
-        p2_rho = 1.0 - p1_rho
-        bf_rho = np.log(p1_rho + eps) - np.log(p2_rho + eps)
-
-        df_kc = pd.DataFrame({'mean_kc1': mean_kc1,
-                              'mean_kc2': mean_kc2,
-                              'p1_kc': p1_kc,
-                              'p2_kc': p2_kc,
-                              'bayes_factor_kc': bf_kc},
-                             index=self.adata.var_names)
-        df_kc = df_kc.sort_values('bayes_factor_kc', ascending=False)
-        df_rho = pd.DataFrame({'mean_rho1': mean_rho1,
-                               'mean_rho2': mean_rho2,
-                               'p1_rho': p1_rho,
-                               'p2_rho': p2_rho,
-                               'bayes_factor_rho': bf_rho},
-                              index=self.adata.var_names)
-        df_rho = df_rho.sort_values('bayes_factor_rho', ascending=False)
 
         s1 = g1_corrected[2][g1_sample_idx]
         s2 = g2_corrected[2][g2_sample_idx]
         mean_s1 = np.mean(s1, 0)
         mean_s2 = np.mean(s2, 0)
-        p1_s = np.mean(s1 > s2, 0)
-        p2_s = 1.0 - p1_s
-        bf_s = np.log(p1_s + eps) - np.log(p2_s + eps)
 
-        df_s = pd.DataFrame({'mean_s1': mean_s1,
-                             'mean_s2': mean_s2,
-                             'p1_s': p1_s,
-                             'p2_s': p2_s,
-                             'bayes_factor_s': bf_s},
-                            index=self.adata.var_names)
-        df_s = df_s.sort_values('bayes_factor_s', ascending=False)
+        vs1 = g1_corrected[5][g1_sample_idx]
+        vs2 = g2_corrected[5][g2_sample_idx]
+        mean_vs1 = np.mean(vs1, 0)
+        mean_vs2 = np.mean(vs2, 0)
 
-        return df_kc, df_rho, df_s
+        if mode not in ['vanilla', 'change']:
+            logging.warn(f"Mode {mode} not recognized. Using vanilla mode.")
+            mode = 'vanilla'
+        if mode == 'vanilla':
+            p1_kc = np.mean(kc1 > kc2, 0)
+            p2_kc = 1.0 - p1_kc
+            bf_kc = np.log(p1_kc + eps) - np.log(p2_kc + eps)
+            df_kc = pd.DataFrame({'mean_kc1': mean_kc1,
+                                  'mean_kc2': mean_kc2,
+                                  'p1_kc': p1_kc,
+                                  'p2_kc': p2_kc,
+                                  'bayes_factor_kc': bf_kc},
+                                 index=self.adata.var_names)
+            df_kc = df_kc.sort_values('bayes_factor_kc', ascending=False)
+
+            p1_rho = np.mean(rho1 > rho2, 0)
+            p2_rho = 1.0 - p1_rho
+            bf_rho = np.log(p1_rho + eps) - np.log(p2_rho + eps)
+            df_rho = pd.DataFrame({'mean_rho1': mean_rho1,
+                                   'mean_rho2': mean_rho2,
+                                   'p1_rho': p1_rho,
+                                   'p2_rho': p2_rho,
+                                   'bayes_factor_rho': bf_rho},
+                                  index=self.adata.var_names)
+            df_rho = df_rho.sort_values('bayes_factor_rho', ascending=False)
+
+            p1_s = np.mean(s1 > s2, 0)
+            p2_s = 1.0 - p1_s
+            bf_s = np.log(p1_s + eps) - np.log(p2_s + eps)
+            df_s = pd.DataFrame({'mean_s1': mean_s1,
+                                 'mean_s2': mean_s2,
+                                 'p1_s': p1_s,
+                                 'p2_s': p2_s,
+                                 'bayes_factor_s': bf_s},
+                                index=self.adata.var_names)
+            df_s = df_s.sort_values('bayes_factor_s', ascending=False)
+
+            p1_vs = np.mean(vs1 > vs2, 0)
+            p2_vs = 1.0 - p1_vs
+            bf_vs = np.log(p1_vs + eps) - np.log(p2_vs + eps)
+            df_vs = pd.DataFrame({'mean_v1': mean_vs1,
+                                  'mean_v2': mean_vs2,
+                                  'p1_v': p1_vs,
+                                  'p2_v': p2_vs,
+                                  'bayes_factor_v': bf_vs},
+                                 index=self.adata.var_names)
+            df_vs = df_vs.sort_values('bayes_factor_v', ascending=False)
+
+        elif mode == 'change':
+            lfc = np.log2(kc1 + eps) - np.log2(kc2 + eps)
+            p1_kc = np.mean(np.abs(lfc) >= delta, 0)
+            p2_kc = 1.0 - p1_kc
+            bf_kc = np.log(p1_kc + eps) - np.log(p2_kc + eps)
+            df_kc = pd.DataFrame({'mean_kc1': mean_kc1,
+                                  'mean_kc2': mean_kc2,
+                                  'p_kc_change': p1_kc,
+                                  'p_kc_no_change': p2_kc,
+                                  'bayes_factor_kc': bf_kc},
+                                 index=self.adata.var_names)
+            df_kc = df_kc.sort_values('bayes_factor_kc', ascending=False)
+
+            lfc = np.log2(rho1 + eps) - np.log2(rho2 + eps)
+            p1_rho = np.mean(np.abs(lfc) >= delta, 0)
+            p2_rho = 1.0 - p1_rho
+            bf_rho = np.log(p1_rho + eps) - np.log(p2_rho + eps)
+            df_rho = pd.DataFrame({'mean_rho1': mean_rho1,
+                                   'mean_rho2': mean_rho2,
+                                   'p_rho_change': p1_rho,
+                                   'p_rho_no_change': p2_rho,
+                                   'bayes_factor_rho': bf_rho},
+                                  index=self.adata.var_names)
+            df_rho = df_rho.sort_values('bayes_factor_rho', ascending=False)
+
+            lfc = np.log2(s1 + eps) - np.log2(s2 + eps)
+            p1_s = np.mean(np.abs(lfc) >= delta, 0)
+            p2_s = 1.0 - p1_s
+            bf_s = np.log(p1_s + eps) - np.log(p2_s + eps)
+            df_s = pd.DataFrame({'mean_s1': mean_s1,
+                                 'mean_s2': mean_s2,
+                                 'p_s_change': p1_s,
+                                 'p_s_no_change': p2_s,
+                                 'bayes_factor_s': bf_s},
+                                index=self.adata.var_names)
+            df_s = df_s.sort_values('bayes_factor_s', ascending=False)
+
+            lfc = np.log2(vs1 + eps) - np.log2(vs2 + eps)
+            p1_vs = np.mean(np.abs(lfc) >= delta, 0)
+            p2_vs = 1.0 - p1_vs
+            bf_vs = np.log(p1_vs + eps) - np.log(p2_vs + eps)
+            df_vs = pd.DataFrame({'mean_v1': mean_vs1,
+                                  'mean_v2': mean_vs2,
+                                  'p_v_change': p1_vs,
+                                  'p_v_no_change': p2_vs,
+                                  'bayes_factor_v': bf_vs},
+                                 index=self.adata.var_names)
+            df_vs = df_vs.sort_values('bayes_factor_v', ascending=False)
+
+        return df_kc, df_rho, df_s, df_vs
 
     def save_model(self, file_path, enc_name='encoder', dec_name='decoder'):
         os.makedirs(file_path, exist_ok=True)
@@ -2540,7 +2626,7 @@ class VAEChrom():
         self.adata.uns[f"{key}_test_idx"] = self.test_idx.detach().cpu().numpy()
 
         print("Computing velocity.")
-        rna_velocity_vae(self.adata, self.adata_atac, key, batch_key=self.config['batch_key'], use_raw=False, rna_only=self.config['rna_only'])
+        rna_velocity_vae(self.adata, self.adata_atac, key, batch_key=self.config['batch_key'], ref_batch=self.ref_batch, batch_correction=self.enable_cvae, use_raw=False, rna_only=self.config['rna_only'])
 
         if file_name is not None:
             print("Writing anndata output to file.")
