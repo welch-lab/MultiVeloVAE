@@ -2367,8 +2367,8 @@ class VAEChrom():
         mean_s1 = np.mean(s1, 0)
         mean_s2 = np.mean(s2, 0)
 
-        vs1 = g1_corrected[5][g1_sample_idx]
-        vs2 = g2_corrected[5][g2_sample_idx]
+        vs1 = np.abs(g1_corrected[5][g1_sample_idx])
+        vs2 = np.abs(g2_corrected[5][g2_sample_idx])
         mean_vs1 = np.mean(vs1, 0)
         mean_vs2 = np.mean(vs2, 0)
 
