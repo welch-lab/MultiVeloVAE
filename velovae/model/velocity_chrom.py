@@ -11,6 +11,7 @@ def rna_velocity_vae(adata,
                      key,
                      batch_key=None,
                      ref_batch=None,
+                     batch_hvg_key=None,
                      batch_correction=False,
                      use_raw=False,
                      rna_only=False,
@@ -22,7 +23,7 @@ def rna_velocity_vae(adata,
     if batch_key is not None and batch_key in adata.obs:
         batch_raw = adata.obs[batch_key].to_numpy()
         batch_names_raw = np.unique(batch_raw)
-        batch_dic, _ = encode_type(batch_names_raw)
+        batch_dic, batch_dic_rev = encode_type(batch_names_raw)
         n_batch = len(batch_names_raw)
         batch = np.array([batch_dic[x] for x in batch_raw])
         onehot = np.zeros((batch.size, batch.max() + 1))
@@ -160,6 +161,8 @@ def rna_velocity_vae(adata,
     adata.layers[f"{key}_velocity_u"] = vu * scaling_u
     adata.layers[f"{key}_velocity_c"] = vc * scaling_c
     adata.var[f'{key}_velocity_genes'] = adata.var['quantile_genes'] & (adata.var[f"{key}_likelihood"] > (0.025 if not rna_only else 0.05))
+    if ref_batch is not None and f"{batch_hvg_key}-{batch_dic_rev[ref_batch]}" in adata.var:
+        adata.var[f'{key}_velocity_genes'] = adata.var[f'{key}_velocity_genes'] & adata.var[f"{batch_hvg_key}-{batch_dic_rev[ref_batch]}"]
     print(f"Selected {np.sum(adata.var[f'{key}_velocity_genes'])} velocity genes.")
     if np.sum(adata.var[f'{key}_velocity_genes']) < 0.2 * adata.n_vars:
         logger.warn('Less than 1/5 of genes assigned as velocity genes.')

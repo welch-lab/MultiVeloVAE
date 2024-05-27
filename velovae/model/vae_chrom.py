@@ -6,7 +6,6 @@ import anndata as ad
 from scipy.sparse import issparse
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -462,7 +461,7 @@ class Decoder(nn.Module):
                 out = F.softplus(out)
         return out
 
-    def get_param_1d(self, x, condition=None, four_basis=False, is_full_vb=False, sample=True, mask_idx=None, mask_to=1, enforce_positive=True, detach=False):
+    def _get_param(self, x, condition=None, four_basis=False, is_full_vb=False, sample=True, mask_idx=None, mask_to=1, enforce_positive=True, detach=False):
         param = self.get_param(x, enforce_positive=enforce_positive)
         if detach:
             param = param.detach()
@@ -496,16 +495,16 @@ class Decoder(nn.Module):
         return y
 
     def reparameterize(self, condition=None, sample=True, four_basis=False):
-        alpha_c = self.get_param_1d('alpha_c', condition, four_basis, self.is_full_vb, sample, mask_idx=self.rna_only_idx, mask_to=0)
-        alpha = self.get_param_1d('alpha', condition, four_basis, self.is_full_vb, sample)
-        beta = self.get_param_1d('beta', condition, four_basis, self.is_full_vb, sample)
-        gamma = self.get_param_1d('gamma', condition, four_basis, self.is_full_vb, sample)
-        scaling_c = self.get_param_1d('scaling_c', condition, four_basis, mask_idx=self.rna_only_idx, mask_to=1)
-        scaling_u = self.get_param_1d('scaling_u', condition, four_basis)
-        scaling_s = self.get_param_1d('scaling_s', condition, four_basis, mask_idx=self.ref_batch)
-        offset_c = self.get_param_1d('offset_c', condition, four_basis, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False)
-        offset_u = self.get_param_1d('offset_u', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
-        offset_s = self.get_param_1d('offset_s', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
+        alpha_c = self._get_param('alpha_c', condition, four_basis, self.is_full_vb, sample, mask_idx=self.rna_only_idx, mask_to=0)
+        alpha = self._get_param('alpha', condition, four_basis, self.is_full_vb, sample)
+        beta = self._get_param('beta', condition, four_basis, self.is_full_vb, sample)
+        gamma = self._get_param('gamma', condition, four_basis, self.is_full_vb, sample)
+        scaling_c = self._get_param('scaling_c', condition, four_basis, mask_idx=self.rna_only_idx, mask_to=1)
+        scaling_u = self._get_param('scaling_u', condition, four_basis)
+        scaling_s = self._get_param('scaling_s', condition, four_basis, mask_idx=self.ref_batch)
+        offset_c = self._get_param('offset_c', condition, four_basis, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False)
+        offset_u = self._get_param('offset_u', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
+        offset_s = self._get_param('offset_s', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
 
         return alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s, offset_c, offset_u, offset_s
 
@@ -721,6 +720,7 @@ class VAEChrom():
             "n_warmup": 6,
             "n_warmup_post": 4,
             "weight_c": 0.6 if not rna_only else 0.4,
+            "weight_soft_batch": 0.0,
             "early_stop": 6,
             "early_stop_thred": early_stop_thred,
             "train_test_split": 0.7,
@@ -1043,12 +1043,12 @@ class VAEChrom():
         os.makedirs(figure_path, exist_ok=True)
 
         onehot = F.one_hot(self.batch[self.train_idx], self.n_batch).float() if self.enable_cvae else None
-        scaling_c = self.decoder.get_param_1d('scaling_c', onehot, False, False, mask_idx=self.rna_only_idx, mask_to=1, detach=True).cpu().numpy()
-        scaling_u = self.decoder.get_param_1d('scaling_u', onehot, False, False, detach=True).cpu().numpy()
-        scaling_s = self.decoder.get_param_1d('scaling_s', onehot, False, False, mask_idx=self.ref_batch, detach=True).cpu().numpy()
-        offset_c = self.decoder.get_param_1d('offset_c', onehot, False, False, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
-        offset_u = self.decoder.get_param_1d('offset_u', onehot, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
-        offset_s = self.decoder.get_param_1d('offset_s', onehot, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
+        scaling_c = self.decoder._get_param('scaling_c', onehot, False, False, mask_idx=self.rna_only_idx, mask_to=1, detach=True).cpu().numpy()
+        scaling_u = self.decoder._get_param('scaling_u', onehot, False, False, detach=True).cpu().numpy()
+        scaling_s = self.decoder._get_param('scaling_s', onehot, False, False, mask_idx=self.ref_batch, detach=True).cpu().numpy()
+        offset_c = self.decoder._get_param('offset_c', onehot, False, False, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
+        offset_u = self.decoder._get_param('offset_u', onehot, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
+        offset_s = self.decoder._get_param('offset_s', onehot, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
 
         t = self.decoder.t_[:, gind]
         c = self.adata_atac.layers['Mc'][self.train_idx, :][:, gind]
@@ -1162,12 +1162,12 @@ class VAEChrom():
                                        data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]/sigma_u,
                                        data_in[:, data_in.shape[1]//3*2:]/sigma_s), 1)
         else:
-            scaling_c = self.decoder.get_param_1d('scaling_c', condition, False, False, mask_idx=self.rna_only_idx, mask_to=1)
-            scaling_u = self.decoder.get_param_1d('scaling_u', condition, False, False)
-            scaling_s = self.decoder.get_param_1d('scaling_s', condition, False, False, mask_idx=self.ref_batch)
-            offset_c = self.decoder.get_param_1d('offset_c', condition, False, False, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False)
-            offset_u = self.decoder.get_param_1d('offset_u', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
-            offset_s = self.decoder.get_param_1d('offset_s', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
+            scaling_c = self.decoder._get_param('scaling_c', condition, False, False, mask_idx=self.rna_only_idx, mask_to=1)
+            scaling_u = self.decoder._get_param('scaling_u', condition, False, False)
+            scaling_s = self.decoder._get_param('scaling_s', condition, False, False, mask_idx=self.ref_batch)
+            offset_c = self.decoder._get_param('offset_c', condition, False, False, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False)
+            offset_u = self.decoder._get_param('offset_u', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
+            offset_s = self.decoder._get_param('offset_s', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
             data_in_scale = torch.cat(((data_in[:, :data_in.shape[1]//3]-offset_c)/scaling_c,
                                        (data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]-offset_u)/scaling_u,
                                        (data_in[:, data_in.shape[1]//3*2:]-offset_s)/scaling_s), 1)
@@ -1290,7 +1290,7 @@ class VAEChrom():
         w_hvg = None
         if condition is not None:
             w_hvg = torch.mm(condition, self.batch_hvg_genes)
-            logp = w_hvg * logp
+            logp = w_hvg * logp + (~w_hvg.bool()).int() * logp * self.config['weight_soft_batch']
 
         err_rec_n = logp.mean(1) * self.adata.n_vars
         if condition is not None:
@@ -1335,12 +1335,12 @@ class VAEChrom():
             loss = loss + self.config["kl_param"]*kld_params
 
         if self.use_knn and self.config["velocity_continuity"]:
-            scaling_c = self.decoder.get_param_1d('scaling_c', condition, False, False, mask_idx=self.rna_only_idx, mask_to=1)
-            scaling_u = self.decoder.get_param_1d('scaling_u', condition, False, False)
-            scaling_s = self.decoder.get_param_1d('scaling_s', condition, False, False, mask_idx=self.ref_batch)
-            offset_c = self.decoder.get_param_1d('offset_c', condition, False, False, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False)
-            offset_u = self.decoder.get_param_1d('offset_u', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
-            offset_s = self.decoder.get_param_1d('offset_s', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
+            scaling_c = self.decoder._get_param('scaling_c', condition, False, False, mask_idx=self.rna_only_idx, mask_to=1)
+            scaling_u = self.decoder._get_param('scaling_u', condition, False, False)
+            scaling_s = self.decoder._get_param('scaling_s', condition, False, False, mask_idx=self.ref_batch)
+            offset_c = self.decoder._get_param('offset_c', condition, False, False, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False)
+            offset_u = self.decoder._get_param('offset_u', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
+            offset_s = self.decoder._get_param('offset_s', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
             forward_loss = (loss_vel((c0-offset_c)/scaling_c, (chat-offset_c)/scaling_c, vc,
                                      (u0-offset_u)/scaling_u, (uhat-offset_u)/scaling_u, vu,
                                      (s0-offset_s)/scaling_s, (shat-offset_s)/scaling_s, vs,
@@ -1355,10 +1355,10 @@ class VAEChrom():
             loss = loss - self.config["reg_forward"]*forward_loss
 
         if self.reg_velocity and s_knn is not None:
-            scaling_u = self.decoder.get_param_1d('scaling_u', condition, False, False)
-            scaling_s = self.decoder.get_param_1d('scaling_s', condition, False, False, mask_idx=self.ref_batch)
-            offset_u = self.decoder.get_param_1d('offset_u', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
-            offset_s = self.decoder.get_param_1d('offset_s', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
+            scaling_u = self.decoder._get_param('scaling_u', condition, False, False)
+            scaling_s = self.decoder._get_param('scaling_s', condition, False, False, mask_idx=self.ref_batch)
+            offset_u = self.decoder._get_param('offset_u', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
+            offset_s = self.decoder._get_param('offset_s', condition, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
             _, _, beta, gamma, _, _, _ = self.decoder.reparameterize(condition, sample)
             cos_sim = cosine_similarity((uhat-offset_u)/scaling_u, (shat-offset_s)/scaling_s, beta, gamma, s_knn, w_hvg=w_hvg)
             loss = loss - self.config["reg_cos"]*cos_sim
@@ -1575,12 +1575,12 @@ class VAEChrom():
         if plot:
             cell_idx = self.test_idx if test_mode else self.train_idx
             onehot = F.one_hot(self.batch[cell_idx], self.n_batch).float() if self.enable_cvae else None
-            scaling_c = self.decoder.get_param_1d('scaling_c', onehot, False, False, mask_idx=self.rna_only_idx, mask_to=1, detach=True).cpu().numpy()
-            scaling_u = self.decoder.get_param_1d('scaling_u', onehot, False, False, detach=True).cpu().numpy()
-            scaling_s = self.decoder.get_param_1d('scaling_s', onehot, False, False, mask_idx=self.ref_batch, detach=True).cpu().numpy()
-            offset_c = self.decoder.get_param_1d('offset_c', onehot, False, False, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
-            offset_u = self.decoder.get_param_1d('offset_u', onehot, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
-            offset_s = self.decoder.get_param_1d('offset_s', onehot, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
+            scaling_c = self.decoder._get_param('scaling_c', onehot, False, False, mask_idx=self.rna_only_idx, mask_to=1, detach=True).cpu().numpy()
+            scaling_u = self.decoder._get_param('scaling_u', onehot, False, False, detach=True).cpu().numpy()
+            scaling_s = self.decoder._get_param('scaling_s', onehot, False, False, mask_idx=self.ref_batch, detach=True).cpu().numpy()
+            offset_c = self.decoder._get_param('offset_c', onehot, False, False, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
+            offset_u = self.decoder._get_param('offset_u', onehot, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
+            offset_s = self.decoder._get_param('offset_s', onehot, False, False, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False, detach=True).cpu().numpy()
 
             if not self.use_knn:
                 plot_time(t_, Xembed, save=f"{path}/time-{testid_str}.png")
@@ -2208,7 +2208,10 @@ class VAEChrom():
         print(f"Final: Train ELBO = {elbo_train:.3f},\tTest ELBO = {elbo_test:.3f}")
         print(f"*********      Finished. Total Time = {convert_time(time.time()-start)}     *********")
 
-    def test(self, c, u, s, batch=None, k=1):
+    def test(self, c, u, s, batch=None, covar=None, k=1):
+        c = c.A if issparse(c) else c
+        u = u.A if issparse(u) else u
+        s = s.A if issparse(s) else s
         if c.shape != u.shape or c.shape != s.shape:
             raise ValueError("c, u, and s must have the same shape.")
         if c.ndim == 1:
@@ -2217,9 +2220,7 @@ class VAEChrom():
             u = u.reshape(1, -1)
         if s.ndim == 1:
             s = s.reshape(1, -1)
-        x = np.concatenate((c.A if issparse(c) else c,
-                            u.A if issparse(u) else u,
-                            s.A if issparse(s) else s), 1).astype(float)
+        x = np.concatenate((c, u, s), 1).astype(float)
         self.set_mode('eval')
 
         if not self.enable_cvae:
@@ -2236,7 +2237,16 @@ class VAEChrom():
                 out, _, _, _, _ = self.pred_all(torch.tensor(x, dtype=torch.float, device=self.device), "both", batch=batch_)
 
         c0_test, u0_test, s0_test, t0_test = np.empty_like(c), np.empty_like(u), np.empty_like(s), np.empty(x.shape[0])
-        var_to_regress = np.empty((x.shape[0], self.var_to_regress.shape[1]))
+        if self.var_to_regress is not None:
+            if covar is not None:
+                var_to_regress = covar
+                if var_to_regress.ndim == 1:
+                    var_to_regress = var_to_regress[:, None]
+                if var_to_regress.shape[1] != self.var_to_regress.shape[1]:
+                    raise ValueError(f"Number of covariates must be the same as the training data ({self.var_to_regress.shape[1]}).")
+            else:
+                var_to_regress_self = self.var_to_regress.detach().cpu().numpy()
+                var_to_regress = np.empty((x.shape[0], self.var_to_regress.shape[1]))
         z_test, t_test = out["mu_z"], out["t"]
         knn_model = NearestNeighbors(n_neighbors=k)
         knn_model.fit(self.z.detach().cpu().numpy())
@@ -2245,25 +2255,30 @@ class VAEChrom():
         u0_self = self.u0.detach().cpu().numpy()
         s0_self = self.s0.detach().cpu().numpy()
         t0_self = self.t0.detach().cpu().numpy()
-        var_to_regress_self = self.var_to_regress.detach().cpu().numpy()
+
         for i in range(z_test.shape[0]):
             if k == 1:
                 c0_test[i] = c0_self[ind[i][0]]
                 u0_test[i] = u0_self[ind[i][0]]
                 s0_test[i] = s0_self[ind[i][0]]
                 t0_test[i] = t0_self[ind[i][0], 0]
-                var_to_regress[i] = var_to_regress_self[ind[i][0]]
+                if self.var_to_regress is not None and covar is None:
+                    var_to_regress[i] = var_to_regress_self[ind[i][0]]
             elif k > 1:
                 c0_test[i] = np.mean(c0_self[ind[i]], 0)
                 u0_test[i] = np.mean(u0_self[ind[i]], 0)
                 s0_test[i] = np.mean(s0_self[ind[i]], 0)
                 t0_test[i] = np.mean(t0_self[ind[i]], 0)
-                var_to_regress[i] = np.mean(var_to_regress_self[ind[i]], 0)
+                if self.var_to_regress is not None and covar is None:
+                    var_to_regress[i] = np.mean(var_to_regress_self[ind[i]], 0)
         c0_test = torch.tensor(c0_test, dtype=torch.float, device=self.device)
         u0_test = torch.tensor(u0_test, dtype=torch.float, device=self.device)
         s0_test = torch.tensor(s0_test, dtype=torch.float, device=self.device)
         t0_test = torch.tensor(t0_test[:, None], dtype=torch.float, device=self.device)
-        var_to_regress = torch.tensor(var_to_regress, dtype=torch.float, device=self.device)
+        if self.var_to_regress is not None:
+            var_to_regress = torch.tensor(var_to_regress, dtype=torch.float, device=self.device)
+        else:
+            var_to_regress = None
         z_test, t_test = torch.tensor(z_test, dtype=torch.float, device=self.device), torch.tensor(t_test[:, None], dtype=torch.float, device=self.device)
         x = torch.tensor(x, dtype=torch.float, device=self.device)
 
@@ -2294,10 +2309,7 @@ class VAEChrom():
                 t0 = t0_test[idx]
                 t = t_test[idx]
                 z = z_test[idx]
-                if not self.enable_cvae:
-                    onehot = None
-                else:
-                    onehot = F.one_hot(batch_[idx], self.n_batch).float() if self.enable_cvae else None
+                onehot = F.one_hot(batch_[idx], self.n_batch).float() if self.enable_cvae else None
                 regressor = var_to_regress[idx] if var_to_regress is not None else None
                 out = self.forward(data_in, t, z, c0, u0, s0, t0, None, onehot, regressor, sample=False, return_velocity=True)
                 _, _, _, _, chat, uhat, shat, t_, kc, rho, _, _, _, vc, vu, vs, _, _, _ = out
@@ -2312,164 +2324,6 @@ class VAEChrom():
                 rho_res[i:j] = rho.detach().cpu().numpy()
 
         return chat_res, uhat_res, shat_res, vc_res, vu_res, vs_res, z_test.detach().cpu().numpy(), time_out, kc_res, rho_res
-
-    def differential_dynamics(self, group1=None, group2=None, idx1=None, idx2=None, mode='vanilla', n_samples=5000, delta=2):
-        # inspired by [Lopez2018] and [Boyeau2019]
-        eps = 1e-8
-        if group1 is not None:
-            if group1 in self.cell_types_raw:
-                idx1 = self.cell_labels_raw == group1
-            elif self.enable_cvae and group1 in self.batch_names_raw:
-                idx1 = self.batch_labels_raw == group1
-            else:
-                raise ValueError("group1 not found in cell types or batch labels, try specifying idx1 directly")
-        else:
-            if idx1 is None:
-                raise ValueError("Need to specify either group1 or idx1")
-        if len(idx1) == self.adata.n_obs:
-            idx1 = np.where(idx1)[0]
-        if group2 is not None:
-            if group2 in self.cell_types_raw:
-                idx2 = self.cell_labels_raw == group2
-            elif self.enable_cvae and group2 in self.batch_names_raw:
-                idx2 = self.batch_labels_raw == group2
-            else:
-                raise ValueError("group2 not found in cell types or batch labels, try specifying idx2 directly")
-        else:
-            if idx2 is None:
-                print("Using the rest of cells as reference (control).")
-                idx2 = np.setdiff1d(np.arange(self.adata.n_obs), np.where(idx1)[0])
-        if len(idx2) == self.adata.n_obs:
-            idx2 = np.where(idx2)[0]
-        c = self.adata_atac.layers['Mc'].copy()
-        c = c.A if issparse(c) else c
-        u = self.adata.layers['Mu'].copy()
-        u = u.A if issparse(u) else u
-        s = self.adata.layers['Ms'].copy()
-        s = s.A if issparse(s) else s
-        g1_corrected = self.test(c[idx1], u[idx1], s[idx1])
-        g2_corrected = self.test(c[idx2], u[idx2], s[idx2])
-        g1_sample_idx = np.random.choice(np.arange(len(idx1)), n_samples)
-        g2_sample_idx = np.random.choice(np.arange(len(idx2)), n_samples)
-
-        kc1 = g1_corrected[8][g1_sample_idx]
-        kc2 = g2_corrected[8][g2_sample_idx]
-        mean_kc1 = np.mean(kc1, 0)
-        mean_kc2 = np.mean(kc2, 0)
-
-        rho1 = g1_corrected[9][g1_sample_idx]
-        rho2 = g2_corrected[9][g2_sample_idx]
-        mean_rho1 = np.mean(rho1, 0)
-        mean_rho2 = np.mean(rho2, 0)
-
-        s1 = g1_corrected[2][g1_sample_idx]
-        s2 = g2_corrected[2][g2_sample_idx]
-        mean_s1 = np.mean(s1, 0)
-        mean_s2 = np.mean(s2, 0)
-
-        vs1 = np.abs(g1_corrected[5][g1_sample_idx])
-        vs2 = np.abs(g2_corrected[5][g2_sample_idx])
-        mean_vs1 = np.mean(vs1, 0)
-        mean_vs2 = np.mean(vs2, 0)
-
-        if mode not in ['vanilla', 'change']:
-            logging.warn(f"Mode {mode} not recognized. Using vanilla mode.")
-            mode = 'vanilla'
-        if mode == 'vanilla':
-            p1_kc = np.mean(kc1 > kc2, 0)
-            p2_kc = 1.0 - p1_kc
-            bf_kc = np.log(p1_kc + eps) - np.log(p2_kc + eps)
-            df_kc = pd.DataFrame({'mean_kc1': mean_kc1,
-                                  'mean_kc2': mean_kc2,
-                                  'p1_kc': p1_kc,
-                                  'p2_kc': p2_kc,
-                                  'bayes_factor_kc': bf_kc},
-                                 index=self.adata.var_names)
-            df_kc = df_kc.sort_values('bayes_factor_kc', ascending=False)
-
-            p1_rho = np.mean(rho1 > rho2, 0)
-            p2_rho = 1.0 - p1_rho
-            bf_rho = np.log(p1_rho + eps) - np.log(p2_rho + eps)
-            df_rho = pd.DataFrame({'mean_rho1': mean_rho1,
-                                   'mean_rho2': mean_rho2,
-                                   'p1_rho': p1_rho,
-                                   'p2_rho': p2_rho,
-                                   'bayes_factor_rho': bf_rho},
-                                  index=self.adata.var_names)
-            df_rho = df_rho.sort_values('bayes_factor_rho', ascending=False)
-
-            p1_s = np.mean(s1 > s2, 0)
-            p2_s = 1.0 - p1_s
-            bf_s = np.log(p1_s + eps) - np.log(p2_s + eps)
-            df_s = pd.DataFrame({'mean_s1': mean_s1,
-                                 'mean_s2': mean_s2,
-                                 'p1_s': p1_s,
-                                 'p2_s': p2_s,
-                                 'bayes_factor_s': bf_s},
-                                index=self.adata.var_names)
-            df_s = df_s.sort_values('bayes_factor_s', ascending=False)
-
-            p1_vs = np.mean(vs1 > vs2, 0)
-            p2_vs = 1.0 - p1_vs
-            bf_vs = np.log(p1_vs + eps) - np.log(p2_vs + eps)
-            df_vs = pd.DataFrame({'mean_v1': mean_vs1,
-                                  'mean_v2': mean_vs2,
-                                  'p1_v': p1_vs,
-                                  'p2_v': p2_vs,
-                                  'bayes_factor_v': bf_vs},
-                                 index=self.adata.var_names)
-            df_vs = df_vs.sort_values('bayes_factor_v', ascending=False)
-
-        elif mode == 'change':
-            lfc = np.log2(kc1 + eps) - np.log2(kc2 + eps)
-            p1_kc = np.mean(np.abs(lfc) >= delta, 0)
-            p2_kc = 1.0 - p1_kc
-            bf_kc = np.log(p1_kc + eps) - np.log(p2_kc + eps)
-            df_kc = pd.DataFrame({'mean_kc1': mean_kc1,
-                                  'mean_kc2': mean_kc2,
-                                  'p_kc_change': p1_kc,
-                                  'p_kc_no_change': p2_kc,
-                                  'bayes_factor_kc': bf_kc},
-                                 index=self.adata.var_names)
-            df_kc = df_kc.sort_values('bayes_factor_kc', ascending=False)
-
-            lfc = np.log2(rho1 + eps) - np.log2(rho2 + eps)
-            p1_rho = np.mean(np.abs(lfc) >= delta, 0)
-            p2_rho = 1.0 - p1_rho
-            bf_rho = np.log(p1_rho + eps) - np.log(p2_rho + eps)
-            df_rho = pd.DataFrame({'mean_rho1': mean_rho1,
-                                   'mean_rho2': mean_rho2,
-                                   'p_rho_change': p1_rho,
-                                   'p_rho_no_change': p2_rho,
-                                   'bayes_factor_rho': bf_rho},
-                                  index=self.adata.var_names)
-            df_rho = df_rho.sort_values('bayes_factor_rho', ascending=False)
-
-            lfc = np.log2(s1 + eps) - np.log2(s2 + eps)
-            p1_s = np.mean(np.abs(lfc) >= delta, 0)
-            p2_s = 1.0 - p1_s
-            bf_s = np.log(p1_s + eps) - np.log(p2_s + eps)
-            df_s = pd.DataFrame({'mean_s1': mean_s1,
-                                 'mean_s2': mean_s2,
-                                 'p_s_change': p1_s,
-                                 'p_s_no_change': p2_s,
-                                 'bayes_factor_s': bf_s},
-                                index=self.adata.var_names)
-            df_s = df_s.sort_values('bayes_factor_s', ascending=False)
-
-            lfc = np.log2(vs1 + eps) - np.log2(vs2 + eps)
-            p1_vs = np.mean(np.abs(lfc) >= delta, 0)
-            p2_vs = 1.0 - p1_vs
-            bf_vs = np.log(p1_vs + eps) - np.log(p2_vs + eps)
-            df_vs = pd.DataFrame({'mean_v1': mean_vs1,
-                                  'mean_v2': mean_vs2,
-                                  'p_v_change': p1_vs,
-                                  'p_v_no_change': p2_vs,
-                                  'bayes_factor_v': bf_vs},
-                                 index=self.adata.var_names)
-            df_vs = df_vs.sort_values('bayes_factor_v', ascending=False)
-
-        return df_kc, df_rho, df_s, df_vs
 
     def save_model(self, file_path, enc_name='encoder', dec_name='decoder'):
         os.makedirs(file_path, exist_ok=True)
@@ -2626,7 +2480,9 @@ class VAEChrom():
         self.adata.uns[f"{key}_test_idx"] = self.test_idx.detach().cpu().numpy()
 
         print("Computing velocity.")
-        rna_velocity_vae(self.adata, self.adata_atac, key, batch_key=self.config['batch_key'], ref_batch=self.ref_batch, batch_correction=self.enable_cvae, use_raw=False, rna_only=self.config['rna_only'])
+        rna_velocity_vae(self.adata, self.adata_atac, key,
+                         batch_key=self.config['batch_key'], ref_batch=self.ref_batch, batch_hvg_key=self.config['batch_hvg_key'], batch_correction=self.enable_cvae,
+                         use_raw=False, rna_only=self.config['rna_only'])
 
         if file_name is not None:
             print("Writing anndata output to file.")
