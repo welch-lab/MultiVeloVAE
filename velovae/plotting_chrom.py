@@ -1,8 +1,10 @@
 import logging
 from scipy import sparse
 import numpy as np
+import scvelo as scv
 import matplotlib
 import matplotlib.pyplot as plt
+from .model.model_util_chrom import velocity_graph
 logger = logging.getLogger(__name__)
 
 #######################################################################################
@@ -117,7 +119,7 @@ def plot_sig_(t,
             ax[2].plot(tpred[order], spred[order], 'k.', alpha=0.7)
 
         perm = np.random.permutation(len(s))
-        Nsample = 100
+        Nsample = len(u) // 10
         idx = perm[:Nsample]
 
         for i in idx:
@@ -664,6 +666,8 @@ def dynamic_plot(adata,
                  genes,
                  key='vae',
                  by='expression',
+                 modalities=None,
+                 modalities_pred=None,
                  color_by=None,
                  axis_on=True,
                  frame_on=True,
@@ -706,20 +710,32 @@ def dynamic_plot(adata,
     fig, axs = plt.subplots(gn, 3, squeeze=False, figsize=(10, 2.3*gn) if figsize is None else figsize)
     fig.patch.set_facecolor('white')
     for row, gene in enumerate(genes):
-        if by == 'velocity':
+        if modalities is not None:
+            u = adata[:, gene].layers[modalities[-2]].copy()
+            s = adata[:, gene].layers[modalities[-1]].copy()
+        elif by == 'velocity':
             u = adata[:, gene].layers[f'{key}_velocity_u'].copy()
             s = adata[:, gene].layers[f'{key}_velocity'].copy()
         elif show_pred_only:
-            u = adata[:, gene].layers[f'{key}_uhat'].copy()
-            s = adata[:, gene].layers[f'{key}_shat'].copy()
+            if modalities_pred is not None:
+                u = adata[:, gene].layers[modalities_pred[-2]].copy()
+                s = adata[:, gene].layers[modalities_pred[-1]].copy()
+            else:
+                u = adata[:, gene].layers[f'{key}_uhat'].copy()
+                s = adata[:, gene].layers[f'{key}_shat'].copy()
         else:
             u = adata[:, gene].layers['Mu'].copy()
             s = adata[:, gene].layers['Ms'].copy()
         if not no_c:
-            if by == 'velocity':
+            if modalities is not None:
+                c = adata[:, gene].layers[modalities[0]].copy()
+            elif by == 'velocity':
                 c = adata[:, gene].layers[f'{key}_velocity_c'].copy()
             elif show_pred_only:
-                c = adata[:, gene].layers[f'{key}_chat'].copy()
+                if modalities_pred is not None:
+                    c = adata[:, gene].layers[modalities_pred[0]].copy()
+                else:
+                    c = adata[:, gene].layers[f'{key}_chat'].copy()
             else:
                 c = adata_atac[:, gene].layers['Mc'].copy()
         c = c.A if sparse.issparse(c) else c
@@ -744,9 +760,20 @@ def dynamic_plot(adata,
 
         if show_pred:
             if not no_c:
-                axs[row, 0].scatter(time[::downsample], adata[:, gene].layers[f'{key}_chat'].ravel()[::downsample], s=pointsize/2, c='black', alpha=0.2, zorder=1000)
-            axs[row, 1].scatter(time[::downsample], adata[:, gene].layers[f'{key}_uhat'].ravel()[::downsample], s=pointsize/2, c='black', alpha=0.2, zorder=1000)
-            axs[row, 2].scatter(time[::downsample], adata[:, gene].layers[f'{key}_shat'].ravel()[::downsample], s=pointsize/2, c='black', alpha=0.2, zorder=1000)
+                if modalities_pred is not None:
+                    a_c = adata[:, gene].layers[modalities_pred[0]].ravel()
+                else:
+                    a_c = adata[:, gene].layers[f'{key}_chat'].ravel()
+            if modalities_pred is not None:
+                a_u = adata[:, gene].layers[modalities_pred[-2]].ravel()
+                a_s = adata[:, gene].layers[modalities_pred[-1]].ravel()
+            else:
+                a_u = adata[:, gene].layers[f'{key}_uhat'].ravel()
+                a_s = adata[:, gene].layers[f'{key}_shat'].ravel()
+            if not no_c:
+                axs[row, 0].scatter(time[::downsample], a_c[::downsample], s=pointsize/2, c='black', alpha=0.2, zorder=1000)
+            axs[row, 1].scatter(time[::downsample], a_u[::downsample], s=pointsize/2, c='black', alpha=0.2, zorder=1000)
+            axs[row, 2].scatter(time[::downsample], a_s[::downsample], s=pointsize/2, c='black', alpha=0.2, zorder=1000)
 
         axs[row, 0].set_title(f'{gene} chromatin' if by == 'expression' else f'{gene} chromatin velocity')
         axs[row, 0].set_xlabel('t')
@@ -777,6 +804,8 @@ def scatter_plot(adata,
                  genes,
                  key='vae',
                  by='us',
+                 modalities=None,
+                 modalities_pred=None,
                  color_by=None,
                  n_cols=5,
                  axis_on=True,
@@ -832,18 +861,33 @@ def scatter_plot(adata,
     count = 0
     for gene in genes:
         if show_pred_only:
-            u = adata[:, gene].layers[f'{key}_uhat'].copy()
-            s = adata[:, gene].layers[f'{key}_shat'].copy()
+            if modalities_pred is not None:
+                u = adata[:, gene].layers[modalities_pred[-2]].copy()
+                s = adata[:, gene].layers[modalities_pred[-1]].copy()
+            else:
+                u = adata[:, gene].layers[f'{key}_uhat'].copy()
+                s = adata[:, gene].layers[f'{key}_shat'].copy()
         else:
-            u = adata[:, gene].layers['Mu'].copy() if 'Mu' in adata.layers else adata[:, gene].layers['unspliced'].copy()
-            s = adata[:, gene].layers['Ms'].copy() if 'Ms' in adata.layers else adata[:, gene].layers['spliced'].copy()
+            if modalities is not None:
+                u = adata[:, gene].layers[modalities[-2]].copy()
+                s = adata[:, gene].layers[modalities[-1]].copy()
+            else:
+                u = adata[:, gene].layers['Mu'].copy() if 'Mu' in adata.layers else adata[:, gene].layers['unspliced'].copy()
+                s = adata[:, gene].layers['Ms'].copy() if 'Ms' in adata.layers else adata[:, gene].layers['spliced'].copy()
         u = u.A if sparse.issparse(u) else u
         s = s.A if sparse.issparse(s) else s
         u, s = np.ravel(u), np.ravel(s)
         if not no_c:
             if show_pred_only:
-                c = adata[:, gene].layers[f'{key}_chat'].copy()
-            c = adata_atac[:, gene].layers['Mc'].copy()
+                if modalities_pred is not None:
+                    c = adata[:, gene].layers[modalities_pred[0]].copy()
+                else:
+                    c = adata[:, gene].layers[f'{key}_chat'].copy()
+            else:
+                if modalities is not None:
+                    c = adata[:, gene].layers[modalities[0]].copy()
+                else:
+                    c = adata_atac[:, gene].layers['Mc'].copy()
             c = c.A if sparse.issparse(c) else c
             c = np.ravel(c)
 
@@ -930,9 +974,16 @@ def scatter_plot(adata,
 
         if show_pred:
             if not no_c:
-                a_c = adata[:, gene].layers[f'{key}_chat'].ravel()
-            a_u = adata[:, gene].layers[f'{key}_uhat'].ravel()
-            a_s = adata[:, gene].layers[f'{key}_shat'].ravel()
+                if modalities_pred is not None:
+                    a_c = adata[:, gene].layers[modalities_pred[0]].ravel()
+                else:
+                    a_c = adata[:, gene].layers[f'{key}_chat'].ravel()
+            if modalities_pred is not None:
+                a_u = adata[:, gene].layers[modalities_pred[-2]].ravel()
+                a_s = adata[:, gene].layers[modalities_pred[-1]].ravel()
+            else:
+                a_u = adata[:, gene].layers[f'{key}_uhat'].ravel()
+                a_s = adata[:, gene].layers[f'{key}_shat'].ravel()
             if velocity_arrows:
                 if not no_c:
                     a_c /= max_c
@@ -995,6 +1046,20 @@ def scatter_plot(adata,
     for i in range(col+1, n_cols):
         fig.delaxes(axs[row, i])
     fig.tight_layout()
+
+
+def velocity_embedding_stream(adata, key='vae', show=True, **kwargs):
+    vkey = f'{key}_velocity'
+    if vkey+'_norm' not in adata.layers.keys():
+        adata.layers[vkey+'_norm'] = adata.layers[vkey] / np.sum(np.abs(adata.layers[vkey]), 0)
+        adata.uns[vkey+'_norm_params'] = adata.uns[vkey+'_params']
+    if vkey+'_norm_genes' not in adata.var.columns:
+        adata.var[vkey+'_norm_genes'] = adata.var[vkey+'_genes']
+    if vkey+'_norm_graph' not in adata.uns.keys():
+        velocity_graph(adata, key=key, batch_corrected='s_leveled' in adata.layers.keys())
+    out = scv.pl.velocity_embedding_stream(adata, vkey=vkey+'_norm', show=show, **kwargs)
+    if not show:
+        return out
 
 
 def plot_train_loss_log(loss, iters, save=None):

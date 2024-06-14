@@ -5,6 +5,7 @@ import scanpy as sc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import scvelo as scv
 from .scvelo_util import mRNA, tau_inv, test_bimodality
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
@@ -111,6 +112,21 @@ def pred_exp_numpy(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
     spred += (rho*alpha*kc/beta-u0-(kc-c0)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
     spred += (kc-c0)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
     return np.clip(cpred, a_min=0, a_max=1), np.clip(upred, a_min=0, a_max=None), np.clip(spred, a_min=0, a_max=None)
+
+
+def pred_exp_numpy_backward(tau, c, u, s, kc, alpha_c, rho, alpha, beta, gamma):
+    expac, expb, expg = np.exp(alpha_c*tau), np.exp(beta*tau), np.exp(gamma*tau)
+    eps = 1e-6
+
+    c0pred = c*expac + kc*(1-expac)
+    c0pred = np.clip(c0pred, a_min=0, a_max=1)
+    u0pred = u*expb + rho*alpha*kc/beta*(1-expb) + (kc-c)*rho*alpha/(beta-alpha_c+eps)*(np.exp((beta-alpha_c)*tau)-1)
+    u0pred = np.clip(u0pred, a_min=0, a_max=None)
+    s0pred = s*expg + rho*alpha*kc/gamma*(1-expg)
+    s0pred += (rho*alpha*kc/beta-u-(kc-c)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(np.exp((gamma-beta)*tau)-1)
+    s0pred += (kc-c)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(np.exp((gamma-alpha_c)*tau)-1)
+    s0pred = np.clip(s0pred, a_min=0, a_max=None)
+    return c0pred, u0pred, s0pred
 
 
 def linreg(u, s):
@@ -589,6 +605,7 @@ def knnx0_index(t,
                 z_query,
                 dt,
                 k,
+                bins=20,
                 adaptive=0.0,
                 std_t=None,
                 forward=False,
@@ -601,7 +618,7 @@ def knnx0_index(t,
     len_avg = 0
     if hist_eq:
         t, t_query = _hist_equal(t, t_query)
-    k_global = np.clip(len(t)//20, 10, 1000)
+    k_global = np.clip(len(t)//bins, 10, 1000)
     print(f'Using {k_global} latent neighbors to select ancestors.')
     knn_z = NearestNeighbors(n_neighbors=k_global)
     knn_z.fit(z)
@@ -685,12 +702,34 @@ def get_x0(c,
     return c0, u0, s0, t0
 
 
+# Modified from DeepVelo (Cui et al. 2024)
+def pearson(x, y, mask=None):
+    if mask is None:
+        x = x - torch.mean(x, dim=0)
+        y = y - torch.mean(y, dim=0)
+        x = x / (torch.std(x, dim=0) + 1e-9)
+        y = y / (torch.std(y, dim=0) + 1e-9)
+        return torch.mean(x * y, dim=1)  # (N,)
+    else:
+        num_valid_data = torch.sum(mask, dim=0)  # (D,)
+
+        y = y * mask
+        x = x * mask
+        x = x - torch.sum(x, dim=0) / (num_valid_data + 1e-9)
+        y = y - torch.sum(y, dim=0) / (num_valid_data + 1e-9)
+        y = y * mask
+        x = x * mask
+        x = x / torch.sqrt(torch.sum(torch.pow(x, 2), dim=0) + 1e-9)
+        y = y / torch.sqrt(torch.sum(torch.pow(y, 2), dim=0) + 1e-9)
+        return torch.sum(x * y, dim=1)  # (N,)
+
+
 def loss_vel(c0, chat, vc, u0, uhat, vu, s0, shat, vs, rna_only=False, rna_only_idx=None, condition=None, w_hvg=None):
     if rna_only:
         delta_x = torch.cat([uhat-u0, shat-s0], 1)
         v = torch.cat([vu, vs], 1)
         if w_hvg is not None:
-            w_hvg_ = w_hvg.repeat((2, 1))
+            w_hvg_ = w_hvg.repeat((1, 2))
             delta_x = w_hvg_ * delta_x
             v = w_hvg_ * v
     else:
@@ -703,11 +742,12 @@ def loss_vel(c0, chat, vc, u0, uhat, vu, s0, shat, vs, rna_only=False, rna_only_
         delta_x = torch.cat([chat-c0, uhat-u0, shat-s0], 1)
         v = torch.cat([vc, vu, vs], 1)
         if w_hvg is not None:
-            w_hvg_ = w_hvg.repeat((3, 1))
+            w_hvg_ = w_hvg.repeat((1, 3))
             delta_x = w_hvg_ * delta_x
             v = w_hvg_ * v
     cos_sim = nn.CosineSimilarity(dim=1, eps=1e-6)
-    return cos_sim(delta_x, v)
+    loss_cos = cos_sim(delta_x, v)
+    return loss_cos
 
 
 def cosine_similarity(u, s, beta, gamma, s_knn, w_hvg=None):
@@ -934,6 +974,7 @@ def assign_gene_mode(adata,
         return dirichlet.rvs(alpha_rep, size=adata.n_vars)[:, 0]
 
 
+# Modified from MultiVelo
 def aggregate_peaks_10x(adata_atac, peak_annot_file, linkage_file, peak_dist=10000, min_corr=0.5, gene_body=False, return_dict=False, verbose=False):
     """Peak to gene aggregation.
 
@@ -1150,6 +1191,29 @@ def aggregate_peaks_10x(adata_atac, peak_annot_file, linkage_file, peak_dist=100
         return gene_mat, promoter_dict, enhancer_dict
     else:
         return gene_mat
+
+
+# Modified from MultiVelo
+def velocity_graph(adata, key='vae', xkey=None, batch_corrected=False, velocity_offset=False, t_perc=1, **kwargs):
+    vkey = f'{key}_velocity'
+    if vkey+'_norm' not in adata.layers.keys():
+        t = adata.obs[f"{key}_time"].to_numpy()
+        v = adata.layers[vkey]
+        if velocity_offset:
+            v = v - np.mean(v[(t <= np.percentile(t, t_perc))], 0)
+        adata.layers[vkey+'_norm'] = v / np.sum(np.abs(v), 0)
+        adata.uns[vkey+'_norm_params'] = adata.uns[vkey+'_params']
+    if vkey+'_norm_genes' not in adata.var.columns:
+        adata.var[vkey+'_norm_genes'] = adata.var[vkey+'_genes']
+    if xkey is None:
+        if batch_corrected:
+            xkey = 's_leveled'
+        else:
+            xkey = 'Ms'
+    if xkey == 's_leveled' and 's_leveled' not in adata.layers.keys():
+        logger.warn('Batch corrected s_leveled matrix not found in layers. Using Ms instead.')
+        xkey = 'Ms'
+    scv.tl.velocity_graph(adata, vkey=vkey+'_norm', xkey=xkey, **kwargs)
 
 
 # Modified from https://www.sc-best-practices.org/preprocessing_visualization/quality_control.html

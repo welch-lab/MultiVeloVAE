@@ -26,6 +26,7 @@ from .plotting_chrom import (plot_sig_,
                              ellipse_fit,
                              dynamic_plot,
                              scatter_plot,
+                             velocity_embedding_stream,
                              plot_train_loss_log,
                              plot_test_loss_log)
 from .preprocessing import preprocess
