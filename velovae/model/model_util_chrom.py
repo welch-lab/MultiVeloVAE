@@ -116,16 +116,19 @@ def pred_exp_numpy(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma):
 
 def pred_exp_numpy_backward(tau, c, u, s, kc, alpha_c, rho, alpha, beta, gamma):
     expac, expb, expg = np.exp(alpha_c*tau), np.exp(beta*tau), np.exp(gamma*tau)
+    expac = np.clip(expac, a_min=None, a_max=1e3)
+    expb = np.clip(expb, a_min=None, a_max=1e3)
+    expg = np.clip(expg, a_min=None, a_max=1e3)
     eps = 1e-6
 
     c0pred = c*expac + kc*(1-expac)
     c0pred = np.clip(c0pred, a_min=0, a_max=1)
     u0pred = u*expb + rho*alpha*kc/beta*(1-expb) + (kc-c)*rho*alpha/(beta-alpha_c+eps)*(np.exp((beta-alpha_c)*tau)-1)
-    u0pred = np.clip(u0pred, a_min=0, a_max=None)
+    u0pred = np.clip(u0pred, a_min=0, a_max=1e3)
     s0pred = s*expg + rho*alpha*kc/gamma*(1-expg)
     s0pred += (rho*alpha*kc/beta-u-(kc-c)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(np.exp((gamma-beta)*tau)-1)
     s0pred += (kc-c)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(np.exp((gamma-alpha_c)*tau)-1)
-    s0pred = np.clip(s0pred, a_min=0, a_max=None)
+    s0pred = np.clip(s0pred, a_min=0, a_max=1e3)
     return c0pred, u0pred, s0pred
 
 

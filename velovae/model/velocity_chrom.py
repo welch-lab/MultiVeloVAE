@@ -108,7 +108,7 @@ def rna_velocity_vae(adata,
             u = (u-offset_u)/scaling_u
             s = (s-offset_s)/scaling_s
     else:
-        if batch_correction:
+        if batch_correction or batch_key is None or batch_key not in adata.obs:
             c = (adata.layers[f"{key}_chat"]-offset_c)/scaling_c
             u = (adata.layers[f"{key}_uhat"]-offset_u)/scaling_u
             s = (adata.layers[f"{key}_shat"]-offset_s)/scaling_s

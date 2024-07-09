@@ -152,7 +152,12 @@ def plot_sig_(t,
     ax[1].set_title('Unspliced, VAE')
     ax[2].set_title('Spliced, VAE')
 
-    lgd = fig.legend(handles, labels, fontsize=15, markerscale=5, bbox_to_anchor=(1.0, 1.0), loc='upper left')
+    lgd = fig.legend(handles,
+                     labels,
+                     fontsize=15,
+                     markerscale=5,
+                     bbox_to_anchor=(1.0, 1.0),
+                     loc='upper left')
     fig.suptitle(title, y=0.99, fontsize=20)
     plt.tight_layout()
 
@@ -171,7 +176,7 @@ def plot_sig(t,
     tscv = kwargs['tscv'] if 'tscv' in kwargs else t
     tdemo = kwargs["tdemo"] if "tdemo" in kwargs else t
     if cell_labels is None:
-        fig, ax = plt.subplots(3, 1, figsize=(15, 20), facecolor='white')
+        fig, ax = plt.subplots(3, 1, figsize=(15, 24), facecolor='white')
         ax[0].plot(t[::D], c[::D], 'b.', label="raw")
         ax[1].plot(t[::D], u[::D], 'b.', label="raw")
         ax[2].plot(t[::D], s[::D], 'b.', label="raw")
@@ -306,7 +311,7 @@ def plot_sig(t,
 
             ax[j, 2].set_xlabel("Time")
             ax[j, 2].set_ylabel("S", fontsize=18)
-            handles, labels = ax[1, 0].get_legend_handles_labels()
+        handles, labels = ax[1, 0].get_legend_handles_labels()
 
         if 'subtitles' in kwargs:
             ax[0, 0].set_title(f"Chromatin, {kwargs['subtitles'][0]}")
@@ -339,17 +344,37 @@ def plot_sig(t,
 def plot_vel(t,
              chat, uhat, shat,
              vc, vu, vs,
-             t0,
-             c0, u0, s0,
+             t0=None,
+             c0=None,
+             u0=None,
+             s0=None,
              dt=0.2,
-             n_sample=20,
+             n_sample=50,
+             cell_labels=None,
+             cell_type_colors=None,
              title="Gene",
              save=None):
     fig, ax = plt.subplots(1, 3, figsize=(28, 6), facecolor='white')
 
-    ax[0].plot(t, chat, '.', color='grey', alpha=0.1)
-    ax[1].plot(t, uhat, '.', color='grey', alpha=0.1)
-    ax[2].plot(t, shat, '.', color='grey', alpha=0.1)
+    if cell_labels is None:
+        ax[0].scatter(t, chat, color='grey', s=8.0, alpha=0.2)
+        ax[1].scatter(t, uhat, color='grey', s=8.0, alpha=0.2)
+        ax[2].scatter(t, shat, color='grey', s=8.0, alpha=0.2)
+        handles, labels = ax[1].get_legend_handles_labels()
+    else:
+        if cell_type_colors is None:
+            cell_types = np.unique(cell_labels)
+            colors = get_colors(len(cell_types), None)
+        else:
+            cell_types = np.array(list(cell_type_colors.keys()))
+            colors = np.array([cell_type_colors[type_] for type_ in cell_types])
+        for i, type_ in enumerate(cell_types):
+            mask_type = cell_labels == type_
+            ax[0].scatter(t[mask_type], chat[mask_type], color=colors[i % len(colors)], s=8.0, alpha=0.2, label=type_, edgecolors='none')
+            ax[1].scatter(t[mask_type], uhat[mask_type], color=colors[i % len(colors)], s=8.0, alpha=0.2, label=type_, edgecolors='none')
+            ax[2].scatter(t[mask_type], shat[mask_type], color=colors[i % len(colors)], s=8.0, alpha=0.2, label=type_, edgecolors='none')
+            handles, labels = ax[1].get_legend_handles_labels()
+
     plot_indices = np.random.choice(len(t), n_sample, replace=False)
     if dt > 0:
         ax[0].quiver(t[plot_indices],
@@ -367,22 +392,30 @@ def plot_vel(t,
                      dt*np.ones((len(plot_indices),)),
                      vs[plot_indices]*dt,
                      angles='xy')
-    for i, k in enumerate(plot_indices):
-        if i == 0:
-            ax[0].plot([t0[k], t[k]], [c0[k], chat[k]], 'r-o', label='Prediction')
-        else:
-            ax[0].plot([t0[k], t[k]], [c0[k], chat[k]], 'r-o')
-        ax[1].plot([t0[k], t[k]], [u0[k], uhat[k]], 'r-o')
-        ax[2].plot([t0[k], t[k]], [s0[k], shat[k]], 'r-o')
+    if t0 is not None and c0 is not None and u0 is not None and s0 is not None:
+        for i, k in enumerate(plot_indices):
+            if i == 0:
+                ax[0].plot([t0[k], t[k]], [c0[k], chat[k]], 'r-o', label='Prediction')
+            else:
+                ax[0].plot([t0[k], t[k]], [c0[k], chat[k]], 'r-o')
+            ax[1].plot([t0[k], t[k]], [u0[k], uhat[k]], 'r-o')
+            ax[2].plot([t0[k], t[k]], [s0[k], shat[k]], 'r-o')
 
     ax[0].set_ylabel("C", fontsize=16)
     ax[1].set_ylabel("U", fontsize=16)
     ax[2].set_ylabel("S", fontsize=16)
+
+    lgd = fig.legend(handles,
+                     labels,
+                     fontsize=15,
+                     markerscale=5,
+                     ncol=4,
+                     bbox_to_anchor=(0.0, 1.0, 1.0, 0.25),
+                     loc='center')
     fig.suptitle(title, fontsize=28)
-    fig.legend(loc=1, fontsize=18)
     plt.tight_layout()
 
-    save_fig(fig, save)
+    save_fig(fig, save, (lgd,))
 
 
 def plot_phase(c, u, s,
@@ -1048,6 +1081,7 @@ def scatter_plot(adata,
     fig.tight_layout()
 
 
+# Modified from MultiVelo
 def velocity_embedding_stream(adata, key='vae', show=True, **kwargs):
     vkey = f'{key}_velocity'
     if vkey+'_norm' not in adata.layers.keys():
