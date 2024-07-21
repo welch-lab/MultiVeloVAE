@@ -91,16 +91,17 @@ class Decoder(nn.Module):
                  ref_batch=None,
                  N1=256,
                  parallel_arch=True,
-                 t_network=False,
+                 t_network=True,
                  full_vb=False,
-                 global_std=False,
+                 global_std=True,
                  log_params=False,
                  rna_only=False,
                  rna_only_idx=[],
                  p=98,
                  tmax=1,
                  reinit=False,
-                 init_ton_zero=False,
+                 train_x0=False,
+                 init_ton_zero=True,
                  init_method='steady',
                  init_key=None,
                  checkpoint=None):
@@ -123,6 +124,7 @@ class Decoder(nn.Module):
         self.rna_only = rna_only
         self.rna_only_idx = np.array(rna_only_idx)
         self.reinit = reinit
+        self.train_x0 = train_x0
         self.init_ton_zero = init_ton_zero
         self.init_method = init_method
         self.init_key = init_key
@@ -255,19 +257,20 @@ class Decoder(nn.Module):
 
         if self.init_method == 'tprior':
             w = assign_gene_mode_tprior(self.adata, self.init_key, self.train_idx)
+            perc_good = 1
         else:
             dyn_mask = (t > self.tmax*0.01) & (np.abs(t-toff) > self.tmax*0.01)
             w = np.sum(((t < toff) & dyn_mask), 0) / (np.sum(dyn_mask, 0) + 1e-10)
-            w = assign_gene_mode(self.adata, w, 'auto', 0.05, 0.1, 7)
+            w, perc_good = assign_gene_mode(self.adata, w, 'auto', 0.05, 0.1, 7)
             sigma_c = np.clip(sigma_c, 1e-3, None)
             sigma_u = np.clip(sigma_u, 1e-3, None)
             sigma_s = np.clip(sigma_s, 1e-3, None)
             sigma_c[np.isnan(sigma_c)] = 1
             sigma_u[np.isnan(sigma_u)] = 1
             sigma_s[np.isnan(sigma_s)] = 1
-            sigma_c = np.clip(sigma_c, np.min(sigma_c[self.adata.var['quantile_genes']]), np.max(sigma_c[self.adata.var['quantile_genes']]))
-            sigma_u = np.clip(sigma_u, np.min(sigma_u[self.adata.var['quantile_genes']]), np.max(sigma_u[self.adata.var['quantile_genes']]))
-            sigma_s = np.clip(sigma_s, np.min(sigma_s[self.adata.var['quantile_genes']]), np.max(sigma_s[self.adata.var['quantile_genes']]))
+            sigma_c = np.clip(sigma_c, np.min(sigma_c[self.adata.var['quantile_genes']]), None)
+            sigma_u = np.clip(sigma_u, np.min(sigma_u[self.adata.var['quantile_genes']]), None)
+            sigma_s = np.clip(sigma_s, np.min(sigma_s[self.adata.var['quantile_genes']]), None)
             mu_c[np.isnan(mu_c)] = 0
             mu_u[np.isnan(mu_u)] = 0
             mu_s[np.isnan(mu_s)] = 0
@@ -276,6 +279,7 @@ class Decoder(nn.Module):
             mu_s = np.clip(mu_s, np.min(mu_s[self.adata.var['quantile_genes']]), np.max(mu_s[self.adata.var['quantile_genes']]))
         print(f"Initial induction: {np.sum(w >= 0.5)}, repression: {np.sum(w < 0.5)} out of {G}.")
         self.adata.var["w_init"] = w
+        self.perc_good = perc_good
         logit_pw = 0.5*(np.log(w+1e-10) - np.log(1-w-1e-10))
         logit_pw = np.stack([logit_pw, -0.5*logit_pw, 0.5*logit_pw, -logit_pw], 1)
         self.logit_pw = nn.Parameter(torch.tensor(logit_pw))
@@ -400,12 +404,17 @@ class Decoder(nn.Module):
         self.offset_u = nn.Parameter(torch.tensor(offset_u))
         self.offset_s = nn.Parameter(torch.tensor(offset_s))
 
-        self.c0_ = nn.Parameter(torch.tensor(np.log(c0+1e-10) if self.log_params else softplusinv(c0)))
-        self.u0_ = nn.Parameter(torch.tensor(np.log(u0+1e-10) if self.log_params else softplusinv(u0)))
-        self.s0_ = nn.Parameter(torch.tensor(np.log(s0+1e-10) if self.log_params else softplusinv(s0)))
-        self.c0 = nn.Parameter(torch.zeros_like(self.u0_))
-        self.u0 = nn.Parameter(torch.zeros_like(self.u0_))
-        self.s0 = nn.Parameter(torch.zeros_like(self.u0_))
+        self.c0_ = nn.Parameter(torch.tensor(np.log(c0+1e-10) if self.log_params else softplusinv(c0+1e-6)))
+        self.u0_ = nn.Parameter(torch.tensor(np.log(u0+1e-10) if self.log_params else softplusinv(u0+1e-6)))
+        self.s0_ = nn.Parameter(torch.tensor(np.log(s0+1e-10) if self.log_params else softplusinv(s0+1e-6)))
+        if self.train_x0:
+            self.c0 = nn.Parameter(torch.tensor(np.log(np.full_like(c0, 1e-6)) if self.log_params else softplusinv(np.full_like(c0, 1e-3))))
+            self.u0 = nn.Parameter(torch.tensor(np.log(np.full_like(u0, 1e-6)) if self.log_params else softplusinv(np.full_like(u0, 1e-3))))
+            self.s0 = nn.Parameter(torch.tensor(np.log(np.full_like(s0, 1e-6)) if self.log_params else softplusinv(np.full_like(s0, 1e-3))))
+        else:
+            self.c0 = nn.Parameter(torch.tensor(np.zeros_like(c0)))
+            self.u0 = nn.Parameter(torch.tensor(np.zeros_like(u0)))
+            self.s0 = nn.Parameter(torch.tensor(np.zeros_like(s0)))
 
         if self.init_ton_zero or (not self.reinit):
             self.ton = nn.Parameter(torch.zeros(G))
@@ -524,8 +533,45 @@ class Decoder(nn.Module):
         offset_c = self._get_param('offset_c', condition, four_basis, mask_idx=np.append(self.rna_only_idx, self.ref_batch), mask_to=0, enforce_positive=False)
         offset_u = self._get_param('offset_u', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
         offset_s = self._get_param('offset_s', condition, four_basis, mask_idx=self.ref_batch, mask_to=0, enforce_positive=False)
-
         return alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s, offset_c, offset_u, offset_s
+
+    def _get_param_special(self, kc, rho, t_, condition=None, four_basis=False):
+        if four_basis:
+            zero_mat = torch.zeros_like(rho)
+            kc_ = torch.stack([kc, kc, zero_mat, zero_mat], 1) if not self.rna_only else torch.stack([kc for i in range(4)], 1)
+            rho_ = torch.stack([rho, zero_mat, rho, zero_mat], 1)
+            c0 = torch.stack([self.zero_vec, self.zero_vec, self.c0_.exp() if self.log_params else F.softplus(self.c0_), self.c0_.exp() if self.log_params else F.softplus(self.c0_)])
+            u0 = torch.stack([self.zero_vec, self.u0_.exp() if self.log_params else F.softplus(self.u0_), self.zero_vec, self.u0_.exp() if self.log_params else F.softplus(self.u0_)])
+            s0 = torch.stack([self.zero_vec, self.s0_.exp() if self.log_params else F.softplus(self.s0_), self.zero_vec, self.s0_.exp() if self.log_params else F.softplus(self.s0_)])
+            tau = torch.stack([(t_ - self.ton) for i in range(4)], 1)
+        else:
+            kc_ = kc
+            rho_ = rho
+            if self.train_x0:
+                c0 = self.c0.exp() if self.log_params else F.softplus(self.c0)
+                u0 = self.u0.exp() if self.log_params else F.softplus(self.u0)
+                s0 = self.s0.exp() if self.log_params else F.softplus(self.s0)
+            else:
+                c0 = self.c0
+                u0 = self.u0
+                s0 = self.s0
+            tau = t_ - self.ton
+
+        if self.rna_only:
+            c0 = torch.ones_like(c0)
+        if condition is not None and len(self.rna_only_idx) > 0:
+            mask = torch.zeros_like(condition)
+            mask[:, self.rna_only_idx] = 1
+            mask_flip = (~mask.bool()).int()
+            if four_basis:
+                # kc_ = torch.stack([torch.mm(condition * mask_flip, self.one_mat) for i in range(4)], 1) * kc_ + torch.stack([torch.mm(condition * mask, self.one_mat) for i in range(4)], 1)
+                c0 = c0.reshape((1, 4, -1)).tile((self.dim_cond, 1, 1))
+                c0 = torch.einsum('bi,ijm->bjm', condition * mask_flip, c0) + torch.einsum('bi,ijm->bjm', condition * mask, torch.ones_like(c0))
+            else:
+                # kc_ = torch.mm(condition * mask_flip, self.one_mat) * kc_ + torch.mm(condition * mask, self.one_mat)
+                c0 = c0.reshape((1, -1)).tile((self.dim_cond, 1))
+                c0 = torch.mm(condition * mask_flip, c0) + torch.mm(condition * mask, self.one_mat)
+        return kc_, rho_, c0, u0, s0, tau
 
     def forward(self, t, z, c0=None, u0=None, s0=None, t0=None, condition=None, regressor=None, neg_slope=0.0, sample=True, four_basis=False, return_velocity=False, use_input_time=False):
         alpha_c, alpha, beta, gamma, scaling_c, scaling_u, scaling_s, offset_c, offset_u, offset_s = self.reparameterize(condition, sample, four_basis)
@@ -544,44 +590,15 @@ class Decoder(nn.Module):
         t_in = t
         t_ = self.net_t(t_in) * self.tmax if self.t_network and (not use_input_time) else t
         if (c0 is None) or (u0 is None) or (s0 is None) or (t0 is None):
-            if four_basis:
-                zero_mat = torch.zeros_like(rho)
-                kc_ = torch.stack([kc, kc, zero_mat, zero_mat], 1) if not self.rna_only else torch.stack([kc for i in range(4)], 1)
-                rho_ = torch.stack([rho, zero_mat, rho, zero_mat], 1)
-                c0 = torch.stack([self.zero_vec, self.zero_vec, self.c0_.exp() if self.log_params else F.softplus(self.c0_), self.c0_.exp() if self.log_params else F.softplus(self.c0_)])
-                u0 = torch.stack([self.zero_vec, self.u0_.exp() if self.log_params else F.softplus(self.u0_), self.zero_vec, self.u0_.exp() if self.log_params else F.softplus(self.u0_)])
-                s0 = torch.stack([self.zero_vec, self.s0_.exp() if self.log_params else F.softplus(self.s0_), self.zero_vec, self.s0_.exp() if self.log_params else F.softplus(self.s0_)])
-                tau = torch.stack([F.leaky_relu(t_ - self.ton, neg_slope) for i in range(4)], 1)
-            else:
-                kc_ = kc
-                rho_ = rho
-                c0 = self.c0
-                u0 = self.u0
-                s0 = self.s0
-                tau = F.leaky_relu(t_ - self.ton, neg_slope)
-
-            if self.rna_only:
-                c0 = torch.ones_like(c0)
-            if condition is not None and len(self.rna_only_idx) > 0:
-                mask = torch.zeros_like(condition)
-                mask[:, self.rna_only_idx] = 1
-                mask_flip = (~mask.bool()).int()
-                if four_basis:
-                    kc_ = torch.stack([torch.mm(condition * mask_flip, self.one_mat) for i in range(4)], 1) * kc_ + torch.stack([torch.mm(condition * mask, self.one_mat) for i in range(4)], 1)
-                    c0 = c0.reshape((1, 4, -1)).tile((self.dim_cond, 1, 1))
-                    c0 = torch.einsum('bi,ijm->bjm', condition * mask_flip, c0) + torch.einsum('bi,ijm->bjm', condition * mask, torch.ones_like(c0))
-                else:
-                    kc_ = torch.mm(condition * mask_flip, self.one_mat) * kc_ + torch.mm(condition * mask, self.one_mat)
-                    c0 = c0.reshape((1, -1)).tile((self.dim_cond, 1))
-                    c0 = torch.mm(condition * mask_flip, c0) + torch.mm(condition * mask, self.one_mat)
-
+            kc, rho, c0, u0, s0, tau = self._get_param_special(kc, rho, t_, condition, four_basis)
+            tau = F.leaky_relu(tau, neg_slope)
             chat, uhat, shat = pred_exp(tau,
                                         c0,
                                         u0,
                                         s0,
-                                        kc_,
+                                        kc,
                                         alpha_c,
-                                        rho_,
+                                        rho,
                                         alpha,
                                         beta,
                                         gamma)
@@ -598,21 +615,15 @@ class Decoder(nn.Module):
                                         alpha,
                                         beta,
                                         gamma)
-            if len(self.rna_only_idx) > 0 and condition is not None:
-                mask = np.in1d(np.arange(self.dim_cond), self.rna_only_idx)
-                mask = torch.tensor(mask, device=chat.device).int()
-                chat = chat * ((condition * (~mask.bool()).int()).sum(1, keepdim=True) > 0) + torch.ones_like(chat) * ((condition * mask).sum(1, keepdim=True) > 0)
+
+        # if len(self.rna_only_idx) > 0 and condition is not None:
+        #     mask = np.in1d(np.arange(self.dim_cond), self.rna_only_idx)
+        #     mask = torch.tensor(mask, device=chat.device).int()
+        #     chat = chat * ((condition * (~mask.bool()).int()).sum(1, keepdim=True) > 0) + torch.ones_like(chat) * ((condition * mask).sum(1, keepdim=True) > 0)
 
         if return_velocity:
-            if ((c0 is None) or (u0 is None) or (s0 is None) or (t0 is None)) and four_basis:
-                zero_mat = torch.zeros_like(rho)
-                kc_ = torch.stack([kc, kc, zero_mat, zero_mat], 1)
-                rho_ = torch.stack([rho, zero_mat, rho, zero_mat], 1)
-            else:
-                kc_ = kc
-                rho_ = rho
-            vc = (kc_ * alpha_c - alpha_c * chat) * scaling_c
-            vu = (rho_ * alpha * chat - beta * uhat) * scaling_u
+            vc = (kc * alpha_c - alpha_c * chat) * scaling_c
+            vu = (rho * alpha * chat - beta * uhat) * scaling_u
             vs = (beta * uhat - gamma * shat) * scaling_s
 
             chat = chat * scaling_c + offset_c
@@ -651,6 +662,7 @@ class VAEChrom():
                  init_method='steady',
                  init_key=None,
                  tprior=None,
+                 train_x0=True,
                  init_ton_zero=True,
                  unit_scale=True,
                  deming_std=False,
@@ -685,11 +697,11 @@ class VAEChrom():
         if ('Mc' not in adata_atac.layers) or ('Mu' not in adata.layers) or ('Ms' not in adata.layers):
             raise ValueError('Chromatin/Unspliced/Spliced count matrices not found in the layers! Exiting the program...')
         if issparse(adata_atac.layers['Mc']):
-            adata_atac.layers['Mc'] = adata_atac.layers['Mc'].A
+            adata_atac.layers['Mc'] = adata_atac.layers['Mc'].toarray()
         if issparse(adata.layers['Mu']):
-            adata.layers['Mu'] = adata.layers['Mu'].A
+            adata.layers['Mu'] = adata.layers['Mu'].toarray()
         if issparse(adata.layers['Ms']):
-            adata.layers['Ms'] = adata.layers['Ms'].A
+            adata.layers['Ms'] = adata.layers['Ms'].toarray()
         if np.any(adata_atac.layers['Mc'] < 0):
             logger.warn('Negative expression values detected in layers["Mc"]. Please make sure all values are non-negative.')
         if np.any(adata.layers['Mu'] < 0):
@@ -736,38 +748,41 @@ class VAEChrom():
             "n_refine": 8 if refine_velocity else 1,
             "batch_size": batch_size,
             "learning_rate": None,
-            "learning_rate_x0": None,
             "learning_rate_ode": None,
             "learning_rate_post": None,
-            "lambda": 1e-3,
-            "lambda_post": 1e-3,
+            "lambda": 1e-2,
+            "lambda_post": 1e-2,
             "kl_t": 1.0,
             "kl_z": 1.0,
             "kl_w": 0.01,
             "kl_param": 0.1,
-            "reg_param_batch": 1.0,
+            "reg_param_batch": 0.1,
             "reg_forward": 1.0,
             "reg_corr": 1.0,
             "reg_cos": 0.0,
-            "2_norm": 1e-3,
+            "2_norm": 1e-4,
             "test_iter": None,
-            "save_epoch": 50,
             "n_warmup": 6,
-            "n_warmup2": 15,
+            "n_warmup2": 16,
             "n_warmup_post": 4,
+            "cosineannealing_iter": 20,
+            "cosineannealing_warmup": 10,
             "weight_c": 0.6 if not rna_only else 0.0,
             "weight_soft_batch": 0.0,
             "early_stop": 6,
             "early_stop_thred": early_stop_thred,
+            "x0_change_thred": 0.01,
             "train_test_split": 0.7,
             "neg_slope": 0.0,
             "neg_slope2": 0.01,
             "k_alt": 0,
+            "train_x0": train_x0,
             "train_ton": False,
             "train_scaling": True,
             "train_offset": True,
             "knn_use_pred": True,
             "run_2nd_stage": run_2nd_stage,
+            "save_epoch": 50,
 
             # plotting
             "sparsify": 1}
@@ -834,6 +849,7 @@ class VAEChrom():
                                p=98,
                                tmax=tmax,
                                reinit=reinit_params,
+                               train_x0=train_x0,
                                init_ton_zero=init_ton_zero,
                                init_method=init_method,
                                init_key=init_key,
@@ -861,7 +877,7 @@ class VAEChrom():
         self.loss_idx_start = 0
         self.r = -1
 
-        self.clip_fn = nn.Hardtanh(-1e30, 1e30)
+        self.clip_fn = nn.Hardtanh(-1e16, 1e16)
 
         if full_vb:
             self.p_log_alpha_c = torch.tensor([[2], [0.5]], dtype=torch.float, device=self.device)
@@ -869,6 +885,11 @@ class VAEChrom():
             self.p_log_beta = torch.tensor([[2], [0.5]], dtype=torch.float, device=self.device)
             self.p_log_gamma = torch.tensor([[2], [0.5]], dtype=torch.float, device=self.device)
             self.p_params = [self.p_log_alpha_c, self.p_log_alpha, self.p_log_beta, self.p_log_gamma]
+
+        # self.config["learning_rate"] *= self.decoder.perc_good
+        # self.config["learning_rate_post"] *= self.decoder.perc_good
+        # self.config["learning_rate_ode"] *= self.decoder.perc_good
+        # print(f'New learning rate {self.config["learning_rate"]*10000:.1f}e-4, learning rate ode {self.config["learning_rate_ode"]*10000:.1f}e-4')
 
         if plot_init:
             self.plot_initial(gene_plot, figure_path, embed)
@@ -1012,35 +1033,37 @@ class VAEChrom():
                 for i in range(self.n_batch):
                     idx = self.batch_ == i
                     batch_gene = self.batch_hvg_genes_[i]
-                    if i not in self.config['rna_only_idx']:
-                        p += np.sum(adata_atac.layers['Mc'][np.ix_(idx, batch_gene)] > 0)
-                    p += np.sum(adata.layers['Mu'][np.ix_(idx, batch_gene)] > 0)
-                    p += np.sum(adata.layers['Ms'][np.ix_(idx, batch_gene)] > 0)
+                    pi = np.sum(adata.layers['Mu'][np.ix_(idx, batch_gene)] > 0) + np.sum(adata.layers['Ms'][np.ix_(idx, batch_gene)] > 0)
+                    if i not in self.config['rna_only_idx'] and not self.config['rna_only']:
+                        pi += np.sum(adata_atac.layers['Mc'][np.ix_(idx, batch_gene)] > 0)
+                    pi = pi / (np.sum(idx) * np.sum(batch_gene) * (2 if i in self.config['rna_only_idx'] or self.config['rna_only'] else 3))
+                    print(f'Batch {i} sparsity: {pi:.3f}')
+                    p += pi
+                p = p / self.n_batch
             else:
-                if self.config['rna_only']:
-                    p = np.sum(adata.layers['Mu'] > 0) + (np.sum(adata.layers['Ms'] > 0))
-                else:
-                    p = np.sum(adata_atac.layers['Mc'] > 0) + np.sum(adata.layers['Mu'] > 0) + (np.sum(adata.layers['Ms'] > 0))
-            if self.config['rna_only']:
-                p = p / (adata.n_obs * adata.n_vars * 2)
-            else:
-                p = p / (adata.n_obs * adata.n_vars * 3)
+                p = np.sum(adata.layers['Mu'] > 0) + (np.sum(adata.layers['Ms'] > 0))
+                if not self.config['rna_only']:
+                    p += np.sum(adata_atac.layers['Mc'] > 0)
+                p = p / (adata.n_obs * adata.n_vars * (2 if self.config['rna_only'] else 3))
             self.config["learning_rate"] = 10**(p-4)
             print(f'Learning rate set to {self.config["learning_rate"]*10000:.1f}e-4 based on data sparsity.')
         else:
             self.config["learning_rate"] = learning_rate
         self.config["learning_rate_post"] = self.config["learning_rate"]
-        self.config["learning_rate_ode"] = 10*self.config["learning_rate"]
-        self.config["learning_rate_t0"] = self.config["learning_rate"]
-        if self.config['early_stop_thred'] is None:
+        self.config["learning_rate_ode"] = self.config["learning_rate"] * 8 * (self.config["k_alt"]+1)
+        if self.config["train_x0"] and not self.config["four_basis"]:
+            self.config["learning_rate_ode"] = self.config["learning_rate_ode"] / 2
+        if self.config["early_stop_thred"] is None:
             if self.enable_cvae:
-                if self.config['batch_hvg_key'] is None:
-                    self.config['early_stop_thred'] = 0.4 * self.n_batch
-                else:
-                    self.config['early_stop_thred'] = 0.8 * self.n_batch
+                self.config["early_stop_thred"] = np.sum(self.batch_hvg_genes_) / self.n_batch * 1e-3
             else:
-                self.config['early_stop_thred'] = 0.4
+                self.config["early_stop_thred"] = adata.n_vars / 2 * 1e-3
+            if self.enable_cvae:
+                self.config["early_stop_thred"] = self.config["early_stop_thred"] * self.n_batch
             print(f"Early stop threshold set to {self.config['early_stop_thred']:.1f}.")
+        if self.enable_cvae:
+            self.config["x0_change_thred"] = self.config["x0_change_thred"] + self.n_batch * 0.01
+        print(f"X0 change threshold set to {self.config['x0_change_thred']:.2f}.")
 
     def get_prior(self, adata):
         if self.config['tprior'] is None:
@@ -1304,8 +1327,7 @@ class VAEChrom():
             logp = 0.5*((c.unsqueeze(1) - chat)/sigma_c*self.config['weight_c']).pow(2)
             logp += 0.5*((u.unsqueeze(1) - uhat)/sigma_u).pow(2)
             logp += 0.5*((s.unsqueeze(1) - shat)/sigma_s).pow(2)
-            if not self.config['rna_only']:
-                logp += torch.log(sigma_c/self.config['weight_c'])
+            logp += torch.log(sigma_c)
             logp += torch.log(sigma_u)
             logp += torch.log(sigma_s*2*np.pi)
             logp = self.clip_fn(logp)
@@ -1315,8 +1337,7 @@ class VAEChrom():
             logp = 0.5*((c - chat)/sigma_c*self.config['weight_c']).pow(2)
             logp += 0.5*((u - uhat)/sigma_u).pow(2)
             logp += 0.5*((s - shat)/sigma_s).pow(2)
-            if not self.config['rna_only']:
-                logp += torch.log(sigma_c/self.config['weight_c'])
+            logp += torch.log(sigma_c)
             logp += torch.log(sigma_u)
             logp += torch.log(sigma_s*2*np.pi)
             logp = self.clip_fn(logp)
@@ -1331,7 +1352,7 @@ class VAEChrom():
             w_hvg = torch.mm(condition, self.batch_hvg_genes)
             logp = w_hvg * logp + (~w_hvg.bool()).int() * logp * self.config['weight_soft_batch']
 
-        err_rec_n = logp.mean(1) * self.adata.n_vars
+        err_rec_n = logp.sum(1)
         if condition is not None:
             err_rec_n = err_rec_n / (condition * self.batch_count_balance).sum(1)
         err_rec = err_rec_n.mean()
@@ -1736,7 +1757,7 @@ class VAEChrom():
             self.loss_test.append(loss_test)
             self.loss_test_iter.append(self.counter)
 
-    def train_epoch(self, train_loader, test_set, optimizer, optimizer2=None, optimizer3=None, k=0, net='both'):
+    def train_epoch(self, train_loader, test_set, optimizer, optimizer2=None, optimizer3=None, scheduler=None, scheduler2=None, scheduler3=None, k=0, net='both'):
         B = len(train_loader)
         self.set_mode('train', net)
         stop_training = False
@@ -1818,19 +1839,27 @@ class VAEChrom():
             loss[0].backward()
             torch.nn.utils.clip_grad_value_(self.encoder.parameters(), 1e7)
             torch.nn.utils.clip_grad_value_(self.decoder.parameters(), 1e7)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             if k == 0:
-                optimizer.step()
                 if optimizer2 is not None:
                     optimizer2.step()
+                    if scheduler2 is not None:
+                        scheduler2.step()
                 if optimizer3 is not None:
                     optimizer3.step()
+                    if scheduler3 is not None:
+                        scheduler3.step()
             else:
                 if optimizer2 is not None and ((i+1) % (k+1) == 0 or i == B-1):
                     optimizer2.step()
-                    if optimizer3 is not None:
-                        optimizer3.step()
-                else:
-                    optimizer.step()
+                    if scheduler2 is not None:
+                        scheduler2.step()
+                if optimizer3 is not None and ((i) % (k+1) == 0 or i == B-1):
+                    optimizer3.step()
+                    if scheduler3 is not None:
+                        scheduler3.step()
 
             self.loss_train.append(loss[0].detach().cpu().item())
             self.rec_train.append(loss[1].detach().cpu().item())
@@ -1980,9 +2009,9 @@ class VAEChrom():
         self.global_counter = 0
 
         print("--------------------------- Train a VeloVAE ---------------------------")
-        X = np.concatenate((self.adata_atac.layers['Mc'].A if issparse(self.adata_atac.layers['Mc']) else self.adata_atac.layers['Mc'],
-                            self.adata.layers['Mu'].A if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu'],
-                            self.adata.layers['Ms'].A if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']), 1).astype(float)
+        X = np.concatenate((self.adata_atac.layers['Mc'].toarray() if issparse(self.adata_atac.layers['Mc']) else self.adata_atac.layers['Mc'],
+                            self.adata.layers['Mu'].toarray() if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu'],
+                            self.adata.layers['Ms'].toarray() if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']), 1).astype(float)
 
         try:
             Xembed = self.adata.obsm[f"X_{embed}"]
@@ -2023,15 +2052,19 @@ class VAEChrom():
             param_nn += list(self.decoder.net_kc.parameters())
         if self.config['t_network']:
             param_nn += list(self.decoder.net_t.parameters())
-        param_x0 = [self.decoder.c0,
-                    self.decoder.u0,
-                    self.decoder.s0]
-        param_ode_init = [self.decoder.alpha,
-                          self.decoder.gamma]
         param_ode = [self.decoder.alpha_c,
                      self.decoder.alpha,
                      self.decoder.beta,
                      self.decoder.gamma]
+        if self.config['train_x0'] and not self.config['four_basis']:
+            param_ode.extend([self.decoder.c0,
+                              self.decoder.u0,
+                              self.decoder.s0])
+            param_ode_init = [self.decoder.c0,
+                              self.decoder.u0,
+                              self.decoder.s0,
+                              self.decoder.alpha,
+                              self.decoder.gamma]
         if self.config['train_scaling']:
             param_ode.extend([self.decoder.scaling_c,
                               self.decoder.scaling_u])
@@ -2050,29 +2083,35 @@ class VAEChrom():
             param_ode.append(self.decoder.ton)
 
         optimizer = torch.optim.AdamW(param_nn, lr=self.config["learning_rate"], weight_decay=self.config["lambda"])
-        optimizer_x0 = torch.optim.AdamW(param_x0, lr=self.config["learning_rate_x0"], weight_decay=self.config["lambda"])
-        optimizer_ode_init = torch.optim.AdamW(param_ode_init, lr=self.config["learning_rate_ode"], weight_decay=self.config["lambda"])
         optimizer_ode = torch.optim.AdamW(param_ode, lr=self.config["learning_rate_ode"], weight_decay=self.config["lambda"])
+        if self.config['train_x0'] and not self.config['four_basis']:
+            optimizer_ode_init = torch.optim.AdamW(param_ode_init, lr=self.config["learning_rate_ode"], weight_decay=self.config["lambda"])
 
         for epoch in range(self.config["n_epochs"]):
             if epoch < self.config["n_warmup"]:
                 stop_training = self.train_epoch(data_loader,
                                                  test_set,
-                                                 optimizer,
+                                                 optimizer=optimizer,
                                                  k=self.config["k_alt"])
-            elif epoch <= self.config["n_warmup2"]:
+            elif self.config["train_x0"] and not self.config['four_basis'] and epoch < self.config["n_warmup2"]:
                 stop_training = self.train_epoch(data_loader,
                                                  test_set,
-                                                 optimizer,
-                                                 optimizer_x0,
-                                                 optimizer_ode_init,
+                                                 optimizer=optimizer,
+                                                 optimizer2=optimizer_ode_init,
                                                  k=self.config["k_alt"])
             else:
+                train_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config["cosineannealing_iter"], eta_min=0)
+                warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: float((step+1) / self.config["cosineannealing_warmup"]))
+                scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, [warmup_scheduler, train_scheduler], [self.config["cosineannealing_warmup"]])
+                train_scheduler_ode = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_ode, T_max=self.config["cosineannealing_iter"], eta_min=0)
+                warmup_scheduler_ode = torch.optim.lr_scheduler.LambdaLR(optimizer_ode, lr_lambda=lambda step: float((step+1) / self.config["cosineannealing_warmup"]))
+                scheduler_ode = torch.optim.lr_scheduler.SequentialLR(optimizer_ode, [warmup_scheduler_ode, train_scheduler_ode], [self.config["cosineannealing_warmup"]])
                 stop_training = self.train_epoch(data_loader,
                                                  test_set,
                                                  optimizer,
-                                                 optimizer_x0,
                                                  optimizer_ode,
+                                                 scheduler=scheduler,
+                                                 scheduler2=scheduler_ode,
                                                  k=self.config["k_alt"])
 
             if epoch == 0 or (epoch+1) % self.config["save_epoch"] == 0:
@@ -2122,12 +2161,23 @@ class VAEChrom():
             x0_change = np.inf
             x0_change_prev = np.inf
 
-            if self.enable_cvae:
-                self.config['early_stop'] *= self.n_batch
+            if not self.enable_cvae:
+                std_x = np.sqrt((X[:, :G].var(0) + X[:, G:G*2].var(0) + X[:, G*2:].var(0)).sum())
+            else:
+                std_x = 0
+                for i in range(self.n_batch):
+                    idx = self.batch_ == i
+                    batch_gene = self.batch_hvg_genes_[i]
+                    std_x += (X[:, :G][np.ix_(idx, batch_gene)].var(0) + X[:, G:G*2][np.ix_(idx, batch_gene)].var(0) + X[:, G*2:][np.ix_(idx, batch_gene)].var(0)).sum()
+                std_x = np.sqrt(std_x)
 
             for r in range(self.config['n_refine']):
                 self.r = r
-                stop_training = (x0_change - x0_change_prev >= -0.01 and r > 1) or (x0_change < 0.01)
+                self.config['early_stop_thred'] *= 0.95
+                if r >= 4:
+                    stop_training = ((x0_change < x0_change_prev) and (x0_change - x0_change_prev > -self.config['x0_change_thred']) and r > 1) or (x0_change < 0.01)
+                else:
+                    stop_training = False
                 if self.config['loss_std_type'] == 'deming' and noise_change > 0.001 and r < self.config['n_refine']-1:
                     self.update_std_noise(train_set)
                     stop_training = False
@@ -2200,14 +2250,14 @@ class VAEChrom():
                     if epoch < self.config["n_warmup_post"]:
                         stop_training = self.train_epoch(data_loader,
                                                          test_set,
-                                                         optimizer_post,
+                                                         optimizer=optimizer_post,
                                                          k=self.config["k_alt"],
                                                          net='decoder')
                     else:
                         stop_training = self.train_epoch(data_loader,
                                                          test_set,
-                                                         optimizer_post,
-                                                         optimizer_ode,
+                                                         optimizer=optimizer_post,
+                                                         optimizer2=optimizer_ode,
                                                          k=self.config["k_alt"],
                                                          net='decoder')
 
@@ -2248,8 +2298,18 @@ class VAEChrom():
                     print(f"Change in noise variance: {noise_change:.4f}")
                 if r > 0:
                     x0_change_prev = x0_change
-                    norm_delta_x0 = np.sqrt(((self.c0.detach().cpu().numpy() - c0_prev)**2 + (self.u0.detach().cpu().numpy() - u0_prev)**2 + (self.s0.detach().cpu().numpy() - s0_prev)**2).sum(1).mean())
-                    std_x = np.sqrt((self.c0.detach().cpu().numpy().var(0) + self.u0.detach().cpu().numpy().var(0) + self.s0.detach().cpu().numpy().var(0)).sum())
+                    c0_cur = self.c0.detach().cpu().numpy()
+                    u0_cur = self.u0.detach().cpu().numpy()
+                    s0_cur = self.s0.detach().cpu().numpy()
+                    if not self.enable_cvae:
+                        norm_delta_x0 = np.sqrt(((c0_cur - c0_prev)**2 + (u0_cur - u0_prev)**2 + (s0_cur - s0_prev)**2).sum(1).mean())
+                    else:
+                        norm_delta_x0 = 0
+                        for i in range(self.n_batch):
+                            idx = self.batch_ == i
+                            batch_gene = self.batch_hvg_genes_[i]
+                            norm_delta_x0 += (c0_cur[np.ix_(idx, batch_gene)]**2 + u0_cur[np.ix_(idx, batch_gene)]**2 + s0_cur[np.ix_(idx, batch_gene)]**2).sum(1).mean()
+                        norm_delta_x0 = np.sqrt(norm_delta_x0 / self.n_batch)
                     x0_change = norm_delta_x0/std_x
                     print(f"Change in x0: {x0_change:.4f}")
                 c0_prev = self.c0.detach().cpu().numpy()
@@ -2311,9 +2371,9 @@ class VAEChrom():
         print(f"*********      Finished. Total Time = {convert_time(time.time()-start)}     *********")
 
     def test(self, c, u, s, batch=None, covar=None, k=1, sample=False, seed=0):
-        c = c.A if issparse(c) else c
-        u = u.A if issparse(u) else u
-        s = s.A if issparse(s) else s
+        c = c.toarray() if issparse(c) else c
+        u = u.toarray() if issparse(u) else u
+        s = s.toarray() if issparse(s) else s
         if c.shape != u.shape or c.shape != s.shape:
             raise ValueError("c, u, and s must have the same shape.")
         if c.ndim == 1:
@@ -2540,9 +2600,9 @@ class VAEChrom():
         self.adata.var[f"{key}_ton"] = self.decoder.ton.detach().cpu().numpy()
         self.adata.varm[f"{key}_basis"] = F.softmax(self.decoder.logit_pw, 1).detach().cpu().numpy()
 
-        X = np.concatenate((self.adata_atac.layers['Mc'].A if issparse(self.adata_atac.layers['Mc']) else self.adata_atac.layers['Mc'],
-                            self.adata.layers['Mu'].A if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu'],
-                            self.adata.layers['Ms'].A if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']), 1).astype(float)
+        X = np.concatenate((self.adata_atac.layers['Mc'].toarray() if issparse(self.adata_atac.layers['Mc']) else self.adata_atac.layers['Mc'],
+                            self.adata.layers['Mu'].toarray() if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu'],
+                            self.adata.layers['Ms'].toarray() if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']), 1).astype(float)
         G = X.shape[1]//3
         out, _, _, _, _ = self.pred_all(torch.tensor(X, dtype=torch.float, device=self.device), "both")
         chat, uhat, shat, t, std_t, t_, z, std_z, kc, rho = out["chat"], out["uhat"], out["shat"], out["mu_t"], out["std_t"], out["t"], out["mu_z"], out["std_z"], out["kc"], out["rho"]
@@ -2575,8 +2635,13 @@ class VAEChrom():
             self.adata.obsm[f"{key}_std_z_batch"] = std_z
             self.adata.layers[f"{key}_kc_batch"] = kc
             self.adata.layers[f"{key}_rho_batch"] = rho
-            out = self.test(X[:, :G], X[:, G:G*2], X[:, G*2:], covar=self.var_to_regress.detach().cpu().numpy() if self.var_to_regress is not None else None)
-            chat, uhat, shat, _, _, _, z, std_z, t, std_t, t_, kc, rho = out
+            if self.use_knn:
+                out = self.test(X[:, :G], X[:, G:G*2], X[:, G*2:], covar=self.var_to_regress.detach().cpu().numpy() if self.var_to_regress is not None else None)
+                chat, uhat, shat, _, _, _, z, std_z, t, std_t, t_, kc, rho = out
+            else:
+                batch_ = torch.full((self.adata.n_obs,), self.ref_batch, dtype=int, device=self.device)
+                out, _, _, _, _ = self.pred_all(torch.tensor(X, dtype=torch.float, device=self.device), "both", batch=batch_)
+                chat, uhat, shat, t, std_t, t_, z, std_z, kc, rho = out["chat"], out["uhat"], out["shat"], out["mu_t"], out["std_t"], out["t"], out["mu_z"], out["std_z"], out["kc"], out["rho"]
 
         self.adata.layers[f"{key}_chat"] = chat
         self.adata.layers[f"{key}_uhat"] = uhat

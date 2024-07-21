@@ -124,11 +124,11 @@ def pred_exp_numpy_backward(tau, c, u, s, kc, alpha_c, rho, alpha, beta, gamma):
     c0pred = c*expac + kc*(1-expac)
     c0pred = np.clip(c0pred, a_min=0, a_max=1)
     u0pred = u*expb + rho*alpha*kc/beta*(1-expb) + (kc-c)*rho*alpha/(beta-alpha_c+eps)*(np.exp((beta-alpha_c)*tau)-1)
-    u0pred = np.clip(u0pred, a_min=0, a_max=1e3)
+    u0pred = np.clip(u0pred, a_min=0, a_max=np.max(u)*3)
     s0pred = s*expg + rho*alpha*kc/gamma*(1-expg)
     s0pred += (rho*alpha*kc/beta-u-(kc-c)*rho*alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(np.exp((gamma-beta)*tau)-1)
     s0pred += (kc-c)*rho*alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(np.exp((gamma-alpha_c)*tau)-1)
-    s0pred = np.clip(s0pred, a_min=0, a_max=1e3)
+    s0pred = np.clip(s0pred, a_min=0, a_max=np.max(s)*3)
     return c0pred, u0pred, s0pred
 
 
@@ -563,8 +563,8 @@ def reparameterize(mu, std):
     return std*eps + mu
 
 
-def softplusinv(x, beta=1.0):
-    return (1/beta * np.log(np.exp(beta * np.clip(x, 0, 20)) - 1)) * (x <= 20) + x * (x > 20)
+def softplusinv(x, beta=1.0, threshold=20.0):
+    return (1/beta * np.log(np.exp(beta * np.clip(x, 0, threshold)) - 1)) * (x <= threshold) + x * (x > threshold)
 
 
 def knn_approx(c, u, s, c0, u0, s0, k):
@@ -848,24 +848,25 @@ def compute_quantile_scores(adata, n_pcs=30, n_neighbors=30):
     adata.layers['quantile_scores_1st_bit'] = quantile_scores_2bit[:, :, 0]
     adata.layers['quantile_scores_2nd_bit'] = quantile_scores_2bit[:, :, 1]
 
-    perc_good = np.sum(quantile_gene) / adata.n_vars * 100
-    print(f'{np.sum(quantile_gene)} out of {adata.n_vars} = {perc_good:.3g}% genes have good ellipse fits.')
+    perc_good = np.sum(quantile_gene) / adata.n_vars
+    print(f'{np.sum(quantile_gene)} out of {adata.n_vars} = {perc_good*100:.3g}% genes have good ellipse fits.')
 
     adata.obs['quantile_score_sum'] = np.sum(adata.layers['quantile_scores'][:, quantile_gene], axis=1)
     adata.var['quantile_genes'] = quantile_gene
+    return perc_good
 
 
 def cluster_by_quantile(adata,
                         n_clusters=7,
                         affinity='euclidean',
                         linkage='ward'):
-    compute_quantile_scores(adata)
+    perc_good = compute_quantile_scores(adata)
 
     n_clusters = int(n_clusters)
     cluster = AgglomerativeClustering(n_clusters=n_clusters, affinity=affinity, linkage=linkage)
     cluster = cluster.fit_predict(np.vstack((adata.layers['quantile_scores_1st_bit'],
                                              adata.layers['quantile_scores_2nd_bit'])).transpose())
-    return cluster
+    return cluster, perc_good
 
 
 def sample_dir_mix(w, yw, std_prior):
@@ -890,7 +891,7 @@ def assign_gene_mode_auto(adata,
                           std_prior=0.1,
                           n_clusters=7):
     # Cluster by ellipse fit
-    y = cluster_by_quantile(adata, n_clusters=n_clusters)
+    y, p = cluster_by_quantile(adata, n_clusters=n_clusters)
     adata.var['quantile_cluster'] = y
 
     # Sample weights from Dirichlet(mu=0.5, std=std_prior)
@@ -945,7 +946,7 @@ def assign_gene_mode_auto(adata,
         print(f'Assigning cluster {ymax} to inductive.')
         np.random.seed(42)
         w[y == ymax] = dirichlet.rvs(alpha_ind, size=np.sum(y == ymax))[:, 0]
-    return w
+    return w, p
 
 
 def find_dirichlet_param(mu, std, n_basis=2):
@@ -1177,7 +1178,7 @@ def aggregate_peaks_10x(adata_atac, peak_annot_file, linkage_file, peak_dist=100
                         enhancer_dict[gene].append(peak)
 
     # aggregate to genes
-    adata_atac_X_copy = adata_atac.X.A
+    adata_atac_X_copy = adata_atac.X.toarray()
     gene_mat = np.zeros((adata_atac.shape[0], len(promoter_genes)))
     var_names_dict = {x: i for i, x in enumerate(adata_atac.var_names.to_numpy())}
     for i, gene in tqdm_notebook(enumerate(promoter_genes), total=len(promoter_genes)):

@@ -349,7 +349,7 @@ def plot_vel(t,
              u0=None,
              s0=None,
              dt=0.2,
-             n_sample=50,
+             n_sample=100,
              cell_labels=None,
              cell_type_colors=None,
              title="Gene",
@@ -370,12 +370,12 @@ def plot_vel(t,
             colors = np.array([cell_type_colors[type_] for type_ in cell_types])
         for i, type_ in enumerate(cell_types):
             mask_type = cell_labels == type_
-            ax[0].scatter(t[mask_type], chat[mask_type], color=colors[i % len(colors)], s=8.0, alpha=0.2, label=type_, edgecolors='none')
-            ax[1].scatter(t[mask_type], uhat[mask_type], color=colors[i % len(colors)], s=8.0, alpha=0.2, label=type_, edgecolors='none')
-            ax[2].scatter(t[mask_type], shat[mask_type], color=colors[i % len(colors)], s=8.0, alpha=0.2, label=type_, edgecolors='none')
+            ax[0].scatter(t[mask_type], chat[mask_type], color=colors[i % len(colors)], s=8.0, alpha=0.3, label=type_, edgecolors='none')
+            ax[1].scatter(t[mask_type], uhat[mask_type], color=colors[i % len(colors)], s=8.0, alpha=0.3, label=type_, edgecolors='none')
+            ax[2].scatter(t[mask_type], shat[mask_type], color=colors[i % len(colors)], s=8.0, alpha=0.3, label=type_, edgecolors='none')
             handles, labels = ax[1].get_legend_handles_labels()
 
-    plot_indices = np.random.choice(len(t), n_sample, replace=False)
+    plot_indices = np.random.choice(len(t), min(n_sample, len(t)), replace=False)
     if dt > 0:
         ax[0].quiver(t[plot_indices],
                      chat[plot_indices],
@@ -771,9 +771,9 @@ def dynamic_plot(adata,
                     c = adata[:, gene].layers[f'{key}_chat'].copy()
             else:
                 c = adata_atac[:, gene].layers['Mc'].copy()
-        c = c.A if sparse.issparse(c) else c
-        u = u.A if sparse.issparse(u) else u
-        s = s.A if sparse.issparse(s) else s
+        c = c.toarray() if sparse.issparse(c) else c
+        u = u.toarray() if sparse.issparse(u) else u
+        s = s.toarray() if sparse.issparse(s) else s
         c, u, s = np.ravel(c), np.ravel(u), np.ravel(s)
         time = np.array(adata.obs[f'{key}_time']).copy()
         if types is not None:
@@ -907,8 +907,8 @@ def scatter_plot(adata,
             else:
                 u = adata[:, gene].layers['Mu'].copy() if 'Mu' in adata.layers else adata[:, gene].layers['unspliced'].copy()
                 s = adata[:, gene].layers['Ms'].copy() if 'Ms' in adata.layers else adata[:, gene].layers['spliced'].copy()
-        u = u.A if sparse.issparse(u) else u
-        s = s.A if sparse.issparse(s) else s
+        u = u.toarray() if sparse.issparse(u) else u
+        s = s.toarray() if sparse.issparse(s) else s
         u, s = np.ravel(u), np.ravel(s)
         if not no_c:
             if show_pred_only:
@@ -921,7 +921,7 @@ def scatter_plot(adata,
                     c = adata[:, gene].layers[modalities[0]].copy()
                 else:
                     c = adata_atac[:, gene].layers['Mc'].copy()
-            c = c.A if sparse.issparse(c) else c
+            c = c.toarray() if sparse.issparse(c) else c
             c = np.ravel(c)
 
         if velocity_arrows:

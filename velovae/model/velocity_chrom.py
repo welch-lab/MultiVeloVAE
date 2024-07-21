@@ -96,9 +96,9 @@ def rna_velocity_vae(adata,
 
     if use_raw:
         c, u, s = adata_atac.layers['Mc'], adata.layers['Mu'], adata.layers['Ms']
-        c = c.A if issparse(c) else c
-        u = u.A if issparse(u) else u
-        s = s.A if issparse(s) else s
+        c = c.toarray() if issparse(c) else c
+        u = u.toarray() if issparse(u) else u
+        s = s.toarray() if issparse(s) else s
         if batch_key is not None and batch_key in adata.obs:
             c = (c-offset_c_batch)/scaling_c_batch
             u = (u-offset_u_batch)/scaling_u_batch
