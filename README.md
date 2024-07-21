@@ -1,1 +1,1 @@
-# MultiVeloVAE - Multi-omic extension of VeloVAE
+# MultiVeloVAE - Multi-omic and multi-sample extension of VeloVAE
