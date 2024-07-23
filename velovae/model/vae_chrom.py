@@ -564,11 +564,11 @@ class Decoder(nn.Module):
             mask[:, self.rna_only_idx] = 1
             mask_flip = (~mask.bool()).int()
             if four_basis:
-                # kc_ = torch.stack([torch.mm(condition * mask_flip, self.one_mat) for i in range(4)], 1) * kc_ + torch.stack([torch.mm(condition * mask, self.one_mat) for i in range(4)], 1)
+                kc_ = torch.stack([torch.mm(condition * mask_flip, self.one_mat) for i in range(4)], 1) * kc_ + torch.stack([torch.mm(condition * mask, self.one_mat) for i in range(4)], 1)
                 c0 = c0.reshape((1, 4, -1)).tile((self.dim_cond, 1, 1))
                 c0 = torch.einsum('bi,ijm->bjm', condition * mask_flip, c0) + torch.einsum('bi,ijm->bjm', condition * mask, torch.ones_like(c0))
             else:
-                # kc_ = torch.mm(condition * mask_flip, self.one_mat) * kc_ + torch.mm(condition * mask, self.one_mat)
+                kc_ = torch.mm(condition * mask_flip, self.one_mat) * kc_ + torch.mm(condition * mask, self.one_mat)
                 c0 = c0.reshape((1, -1)).tile((self.dim_cond, 1))
                 c0 = torch.mm(condition * mask_flip, c0) + torch.mm(condition * mask, self.one_mat)
         return kc_, rho_, c0, u0, s0, tau
@@ -615,11 +615,10 @@ class Decoder(nn.Module):
                                         alpha,
                                         beta,
                                         gamma)
-
-        # if len(self.rna_only_idx) > 0 and condition is not None:
-        #     mask = np.in1d(np.arange(self.dim_cond), self.rna_only_idx)
-        #     mask = torch.tensor(mask, device=chat.device).int()
-        #     chat = chat * ((condition * (~mask.bool()).int()).sum(1, keepdim=True) > 0) + torch.ones_like(chat) * ((condition * mask).sum(1, keepdim=True) > 0)
+            if len(self.rna_only_idx) > 0 and condition is not None:
+                mask = np.in1d(np.arange(self.dim_cond), self.rna_only_idx)
+                mask = torch.tensor(mask, device=chat.device).int()
+                chat = chat * ((condition * (~mask.bool()).int()).sum(1, keepdim=True) > 0) + torch.ones_like(chat) * ((condition * mask).sum(1, keepdim=True) > 0)
 
         if return_velocity:
             vc = (kc * alpha_c - alpha_c * chat) * scaling_c
@@ -771,7 +770,7 @@ class VAEChrom():
             "weight_soft_batch": 0.0,
             "early_stop": 6,
             "early_stop_thred": early_stop_thred,
-            "x0_change_thred": 0.01,
+            "x0_change_thred": None,
             "train_test_split": 0.7,
             "neg_slope": 0.0,
             "neg_slope2": 0.01,
@@ -789,7 +788,7 @@ class VAEChrom():
 
         self.set_device(device)
         self.split_train_test(adata.n_obs)
-        self.encode_batch(adata, batch_key, ref_batch, batch_hvg_key)
+        self.encode_batch(adata, adata_atac, batch_key, ref_batch, batch_hvg_key)
         self.init_regressor(adata, var_to_regress)
         self.set_lr(adata, adata_atac, learning_rate)
         self.get_prior(adata)
@@ -886,11 +885,6 @@ class VAEChrom():
             self.p_log_gamma = torch.tensor([[2], [0.5]], dtype=torch.float, device=self.device)
             self.p_params = [self.p_log_alpha_c, self.p_log_alpha, self.p_log_beta, self.p_log_gamma]
 
-        # self.config["learning_rate"] *= self.decoder.perc_good
-        # self.config["learning_rate_post"] *= self.decoder.perc_good
-        # self.config["learning_rate_ode"] *= self.decoder.perc_good
-        # print(f'New learning rate {self.config["learning_rate"]*10000:.1f}e-4, learning rate ode {self.config["learning_rate_ode"]*10000:.1f}e-4')
-
         if plot_init:
             self.plot_initial(gene_plot, figure_path, embed)
 
@@ -930,7 +924,7 @@ class VAEChrom():
         self.train_idx = rand_perm[:n_train]
         self.test_idx = rand_perm[n_train:]
 
-    def encode_batch(self, adata, batch_key, ref_batch, batch_hvg_key=None):
+    def encode_batch(self, adata, adata_atac, batch_key, ref_batch, batch_hvg_key=None):
         self.n_batch = 0
         self.batch = None
         self.batch_ = None
@@ -991,14 +985,21 @@ class VAEChrom():
                 else:
                     logger.warn(f'Highly variable genes for batch {batch} not found in var:batch_{batch_hvg_key}. All genes will be used for batch {batch}.')
                     self.batch_hvg_genes_[self.batch_dic[batch]] = True
+        elif self.enable_cvae:
+            for i in range(self.n_batch):
+                ci = adata_atac.layers['Mc'][self.batch_ == i]
+                ui = adata.layers['Mu'][self.batch_ == i]
+                si = adata.layers['Ms'][self.batch_ == i]
+                filt = (si > 0) * (ui > 0) * (ci > 0)
+                self.batch_hvg_genes_[i] = np.sum(filt, axis=0) > ci.shape[0] * 0.01
         self.batch_hvg_genes = torch.tensor(self.batch_hvg_genes_, dtype=torch.float, device=self.device)
         self.batch_count_balance = None
         if batch_count is not None:
             self.batch_count_balance = torch.tensor(batch_count / batch_count[self.ref_batch], dtype=torch.float, device=self.device)
         if self.enable_cvae:
-            self.config['kl_t'] = self.config['kl_t'] * 2
-            self.config['kl_z'] = self.config['kl_z'] * (2**(self.n_batch-1))
-            print(f"KL weights set to {self.config['kl_t']} {self.config['kl_z']}.")
+            self.config['kl_t'] = self.config['kl_t'] * 2 * (self.n_batch-1)
+            self.config['kl_z'] = self.config['kl_z'] * 2 * (self.n_batch-1)
+            print(f"KL weights set to {self.config['kl_t']:.2f} {self.config['kl_z']:.2f}.")
 
     def init_regressor(self, adata, var_to_regress):
         self.var_to_regress = None
@@ -1037,7 +1038,7 @@ class VAEChrom():
                     if i not in self.config['rna_only_idx'] and not self.config['rna_only']:
                         pi += np.sum(adata_atac.layers['Mc'][np.ix_(idx, batch_gene)] > 0)
                     pi = pi / (np.sum(idx) * np.sum(batch_gene) * (2 if i in self.config['rna_only_idx'] or self.config['rna_only'] else 3))
-                    print(f'Batch {i} sparsity: {pi:.3f}')
+                    print(f'Batch {i} sparsity: {1-pi:.3f}')
                     p += pi
                 p = p / self.n_batch
             else:
@@ -1061,9 +1062,11 @@ class VAEChrom():
             if self.enable_cvae:
                 self.config["early_stop_thred"] = self.config["early_stop_thred"] * self.n_batch
             print(f"Early stop threshold set to {self.config['early_stop_thred']:.1f}.")
-        if self.enable_cvae:
-            self.config["x0_change_thred"] = self.config["x0_change_thred"] + self.n_batch * 0.01
-        print(f"X0 change threshold set to {self.config['x0_change_thred']:.2f}.")
+        if self.config["x0_change_thred"] is None:
+            self.config["x0_change_thred"] = adata.n_vars * 1e-5
+            if self.enable_cvae:
+                self.config["x0_change_thred"] = self.config["x0_change_thred"] * np.log2(self.n_batch)
+        print(f"Stage 2 X0 change threshold set to {self.config['x0_change_thred']:.3f}.")
 
     def get_prior(self, adata):
         if self.config['tprior'] is None:
