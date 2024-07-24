@@ -195,7 +195,6 @@ def assign_time(c, u, s, c0_, u0_, s0_, alpha_c, alpha, beta, gamma, std_c_=None
     t_pred_ = tau[ii_]
 
     res = np.array([dd, dd_])
-    # t = np.array([t_pred, t_pred_+np.ones((len(t_pred_)))*t_])
     t = np.array([t_pred, t_pred_+t_])
     o = np.argmin(res, axis=0)
     t_latent = np.array([t[o[i], i] for i in range(len(t_pred))])
@@ -248,7 +247,7 @@ def init_gene_rna(u, s, percent, fit_scaling=True, tmax=1):
     distu, distu_ = (u - ut), (u - ut_)
     dists, dists_ = (s - st), (s - st_)
     res = np.array([distu ** 2 + dists ** 2, distu_ ** 2 + dists_ ** 2])
-    t = np.array([tau, tau_+np.ones((len(tau_)))*t_])
+    t = np.array([tau, tau_+t_])
     o = np.argmin(res, axis=0)
     t_latent = np.array([t[o[i], i] for i in range(len(tau))])
 
@@ -259,27 +258,30 @@ def init_gene_rna(u, s, percent, fit_scaling=True, tmax=1):
     return alpha, beta, gamma, t_latent, u0_, s0_, t_, scaling
 
 
-def init_gene(c, u, s, percent, fit_scaling=True, tmax=1):
+def init_gene(c, u, s, percent, fit_scaling=True, tmax=1, rna_only_idx=None):
+    if rna_only_idx is None:
+        rna_only_idx = np.zeros((len(c)), dtype=bool)
     std_u, std_s = np.std(u), np.std(s)
     scaling = np.clip(std_u / std_s, 1e-6, 1e6) if fit_scaling else 1.0
     if np.isnan(scaling):
         scaling = 1.0
     u = u/scaling
-    scaling_c = np.clip(np.percentile(c, 99.5), 1e-3, None)
-    c = c/scaling_c
-    std_c_ = np.clip(np.std(c), 1e-6, None)
+    scaling_c = np.clip(np.percentile(c[~rna_only_idx], 99.5), 1e-3, None)
+    c = c.copy()
+    c[~rna_only_idx] = c[~rna_only_idx]/scaling_c
+    std_c_ = np.clip(np.std(c[~rna_only_idx]), 1e-6, None)
 
     # initialize beta and gamma from extreme quantiles of s
-    thresh = np.mean(c) + np.std(c)
+    thresh = np.mean(c[~rna_only_idx]) + np.std(c[~rna_only_idx])
     mask_c = c >= thresh
     if np.sum(mask_c) < 5:
-        mask_c = c >= np.mean(c)
+        mask_c = c >= np.mean(c[~rna_only_idx])
     u_, s_ = u[mask_c], s[mask_c]
     mask_s = s >= np.percentile(s_, percent)
     mask_u = u >= np.percentile(u_, percent)
-    mask = mask_s & mask_u & mask_c
+    mask = mask_s & mask_u & mask_c & (~rna_only_idx)
     if np.sum(mask) < 10:
-        mask = mask_s & mask_c
+        mask = mask_s & mask_c & (~rna_only_idx)
     if np.sum(mask) < 10:
         mask = mask_s
 
@@ -319,7 +321,7 @@ def init_gene(c, u, s, percent, fit_scaling=True, tmax=1):
     return alpha_c, alpha, beta, gamma, t_latent, c0_, u0_, s0_, t_, scaling_c, scaling
 
 
-def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rna_only=False):
+def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rna_only=False, rna_only_idx=None):
     ngene = u.shape[1]
     params = np.ones((ngene, 6))  # alpha_c, alpha, beta, gamma, scaling_c, scaling
     params[:, 0] = 0.1
@@ -333,9 +335,11 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
 
     for i in tqdm_notebook(range(ngene)):
         ci, ui, si = c[:, i], u[:, i], s[:, i]
-        cfilt = ci[(si > 0) & (ui > 0) & (ci > 0)]
-        ufilt = ui[(si > 0) & (ui > 0) & (ci > 0)]
-        sfilt = si[(si > 0) & (ui > 0) & (ci > 0)]
+        filt = (si > 0) & (ui > 0) & (ci > 0)
+        cfilt = ci[filt]
+        ufilt = ui[filt]
+        sfilt = si[filt]
+        rna_only_idx_filt = rna_only_idx[filt] if rna_only_idx is not None else None
         if (len(sfilt) >= 5):
             if rna_only:
                 out = init_gene_rna(ufilt, sfilt, percent, fit_scaling, tmax)
@@ -343,10 +347,10 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
                 c0_ = 1
                 params[i, :] = np.array([0, alpha, beta, gamma, 1, scaling])
             else:
-                out = init_gene(cfilt, ufilt, sfilt, percent, fit_scaling, tmax)
+                out = init_gene(cfilt, ufilt, sfilt, percent, fit_scaling, tmax, rna_only_idx_filt)
                 alpha_c, alpha, beta, gamma, t_, c0_, u0_, s0_, ts_, scaling_c, scaling = out
                 params[i, :] = np.array([alpha_c, alpha, beta, gamma, scaling_c, scaling])
-            t[i, (si > 0) & (ui > 0) & (ci > 0)] = t_
+            t[i, filt] = t_
             c0[i] = c0_
             u0[i] = u0_
             s0[i] = s0_
@@ -372,17 +376,17 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
         spred[:, i] = spred_i
 
     if global_std:
-        sigma_c = np.nanstd(c, 0)
+        sigma_c = np.nanstd(c[~rna_only_idx], 0)
         sigma_u = np.nanstd(u, 0)
         sigma_s = np.nanstd(s, 0)
     else:
-        dist_c = c - cpred
+        dist_c = c[~rna_only_idx] - cpred[~rna_only_idx]
         dist_u = u - upred
         dist_s = s - spred
         sigma_c = np.nanstd(dist_c, 0)
         sigma_u = np.nanstd(dist_u, 0)
         sigma_s = np.nanstd(dist_s, 0)
-    mu_c = np.nanmean(c, 0)
+    mu_c = np.nanmean(c[~rna_only_idx], 0)
     mu_u = np.nanmean(u, 0)
     mu_s = np.nanmean(s, 0)
 

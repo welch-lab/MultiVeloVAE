@@ -250,7 +250,11 @@ class Decoder(nn.Module):
     def init_ode(self, c, u, s, p):
         G = self.adata.n_vars
         print("Initializing using the steady-state and dynamical models.")
-        out = init_params(c, u, s, p, fit_scaling=True, global_std=self.global_std, tmax=self.tmax, rna_only=self.rna_only)
+        if len(self.rna_only_idx) > 0:
+            rna_only_idx = np.isin(self.batch[self.train_idx], np.array(self.rna_only_idx))
+        else:
+            rna_only_idx = None
+        out = init_params(c, u, s, p, fit_scaling=True, global_std=self.global_std, tmax=self.tmax, rna_only=self.rna_only, rna_only_idx=rna_only_idx)
         alpha_c, alpha, beta, gamma, scaling_c, scaling_u, toff, c0, u0, s0, sigma_c, sigma_u, sigma_s, mu_c, mu_u, mu_s, t, cpred, upred, spred = out
         scaling_s = np.ones_like(scaling_u)
         offset_c, offset_u, offset_s = np.zeros_like(scaling_u), np.zeros_like(scaling_u), np.zeros_like(scaling_u)
@@ -563,12 +567,13 @@ class Decoder(nn.Module):
             mask = torch.zeros_like(condition)
             mask[:, self.rna_only_idx] = 1
             mask_flip = (~mask.bool()).int()
+            kc_copy = kc_.detach().clone()
             if four_basis:
-                kc_ = torch.stack([torch.mm(condition * mask_flip, self.one_mat) for i in range(4)], 1) * kc_ + torch.stack([torch.mm(condition * mask, self.one_mat) for i in range(4)], 1)
+                kc_ = torch.stack([torch.mm(condition * mask_flip, self.one_mat) for i in range(4)], 1) * kc_ + torch.stack([torch.mm(condition * mask, self.one_mat) for i in range(4)], 1) * kc_copy
                 c0 = c0.reshape((1, 4, -1)).tile((self.dim_cond, 1, 1))
                 c0 = torch.einsum('bi,ijm->bjm', condition * mask_flip, c0) + torch.einsum('bi,ijm->bjm', condition * mask, torch.ones_like(c0))
             else:
-                kc_ = torch.mm(condition * mask_flip, self.one_mat) * kc_ + torch.mm(condition * mask, self.one_mat)
+                kc_ = torch.mm(condition * mask_flip, self.one_mat) * kc_ + torch.mm(condition * mask, self.one_mat) * kc_copy
                 c0 = c0.reshape((1, -1)).tile((self.dim_cond, 1))
                 c0 = torch.mm(condition * mask_flip, c0) + torch.mm(condition * mask, self.one_mat)
         return kc_, rho_, c0, u0, s0, tau
