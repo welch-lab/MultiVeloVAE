@@ -376,17 +376,17 @@ def init_params(c, u, s, percent, fit_scaling=True, global_std=False, tmax=1, rn
         spred[:, i] = spred_i
 
     if global_std:
-        sigma_c = np.nanstd(c[~rna_only_idx], 0)
+        sigma_c = np.nanstd(c[~rna_only_idx] if rna_only_idx is not None else c, 0)
         sigma_u = np.nanstd(u, 0)
         sigma_s = np.nanstd(s, 0)
     else:
-        dist_c = c[~rna_only_idx] - cpred[~rna_only_idx]
+        dist_c = c[~rna_only_idx] if rna_only_idx is not None else c - cpred[~rna_only_idx] if rna_only_idx is not None else cpred
         dist_u = u - upred
         dist_s = s - spred
         sigma_c = np.nanstd(dist_c, 0)
         sigma_u = np.nanstd(dist_u, 0)
         sigma_s = np.nanstd(dist_s, 0)
-    mu_c = np.nanmean(c[~rna_only_idx], 0)
+    mu_c = np.nanmean(c[~rna_only_idx] if rna_only_idx is not None else c, 0)
     mu_u = np.nanmean(u, 0)
     mu_s = np.nanmean(s, 0)
 

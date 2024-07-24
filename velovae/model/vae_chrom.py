@@ -1069,8 +1069,6 @@ class VAEChrom():
             print(f"Early stop threshold set to {self.config['early_stop_thred']:.1f}.")
         if self.config["x0_change_thred"] is None:
             self.config["x0_change_thred"] = adata.n_vars * 1e-5
-            if self.enable_cvae:
-                self.config["x0_change_thred"] = self.config["x0_change_thred"] * np.log2(self.n_batch)
         print(f"Stage 2 X0 change threshold set to {self.config['x0_change_thred']:.3f}.")
 
     def get_prior(self, adata):
