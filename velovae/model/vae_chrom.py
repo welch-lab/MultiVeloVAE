@@ -681,7 +681,7 @@ class VAEChrom():
                  cluster_key='clusters',
                  figure_path='figures',
                  embed=None):
-        if adata_atac is None:
+        if adata_atac is None or rna_only:
             rna_only = True
             adata_atac = ad.AnnData(X=np.ones((adata.n_obs, adata.n_vars)))
             adata_atac.layers['Mc'] = adata_atac.X
@@ -694,7 +694,7 @@ class VAEChrom():
             rna_only_idx = []
         else:
             raise ValueError('rna_only_idx is invalid.')
-        if len(rna_only_idx) > 0:
+        if batch_key is not None and len(rna_only_idx) > 0 and not rna_only:
             print('Running in mixed RNA-only mode.')
             if ref_batch is not None and ref_batch in rna_only_idx:
                 raise ValueError('Error: reference batch cannot be RNA only when inferring chromatin. Exiting the program...')
@@ -750,6 +750,7 @@ class VAEChrom():
             "n_epochs": 2000,
             "n_epochs_post": 500,
             "n_refine": 8 if refine_velocity else 1,
+            "n_refine_min": 4,
             "batch_size": batch_size,
             "learning_rate": None,
             "learning_rate_ode": None,
@@ -794,6 +795,15 @@ class VAEChrom():
         self.set_device(device)
         self.split_train_test(adata.n_obs)
         self.encode_batch(adata, adata_atac, batch_key, ref_batch, batch_hvg_key)
+        if self.enable_cvae and self.config['rna_only']:
+            self.config['rna_only_idx'] = np.arange(self.n_batch)
+        self.rna_only_idx = np.array(self.config['rna_only_idx'])
+        if self.enable_cvae and np.array_equal(np.array(set(self.rna_only_idx)), np.arange(self.n_batch)):
+            self.config['rna_only'] = True
+        if not self.enable_cvae and len(self.rna_only_idx) == 1 and self.rna_only_idx[0] == 0:
+            self.config['rna_only'] = True
+        if self.enable_cvae and np.any(np.array(self.rna_only_idx) > self.n_batch):
+            raise ValueError('RNA-only index out of range.')
         self.init_regressor(adata, var_to_regress)
         self.set_lr(adata, adata_atac, learning_rate)
         self.get_prior(adata)
@@ -816,12 +826,6 @@ class VAEChrom():
         else:
             self.cell_labels_raw = np.full(adata.n_obs, '')
             self.cell_labels = np.full(adata.n_obs, '')
-
-        self.rna_only_idx = np.array(self.config['rna_only_idx'])
-        if not self.enable_cvae and len(self.rna_only_idx) == 1 and self.rna_only_idx[0] == 0:
-            self.config['rna_only'] = True
-        if self.enable_cvae and np.any(np.array(self.rna_only_idx) > self.n_batch):
-            raise ValueError('RNA-only index out of range.')
 
         self.adata = adata
         self.adata_atac = adata_atac
@@ -1040,9 +1044,9 @@ class VAEChrom():
                     idx = self.batch_ == i
                     batch_gene = self.batch_hvg_genes_[i]
                     pi = np.sum(adata.layers['Mu'][np.ix_(idx, batch_gene)] > 0) + np.sum(adata.layers['Ms'][np.ix_(idx, batch_gene)] > 0)
-                    if i not in self.config['rna_only_idx'] and not self.config['rna_only']:
+                    if i not in self.rna_only_idx and not self.config['rna_only']:
                         pi += np.sum(adata_atac.layers['Mc'][np.ix_(idx, batch_gene)] > 0)
-                    pi = pi / (np.sum(idx) * np.sum(batch_gene) * (2 if i in self.config['rna_only_idx'] or self.config['rna_only'] else 3))
+                    pi = pi / (np.sum(idx) * np.sum(batch_gene) * (2 if i in self.rna_only_idx or self.config['rna_only'] else 3))
                     print(f'Batch {i} sparsity: {1-pi:.3f}')
                     p += pi
                 p = p / self.n_batch
@@ -1068,8 +1072,11 @@ class VAEChrom():
                 self.config["early_stop_thred"] = self.config["early_stop_thred"] * self.n_batch
             print(f"Early stop threshold set to {self.config['early_stop_thred']:.1f}.")
         if self.config["x0_change_thred"] is None:
-            self.config["x0_change_thred"] = adata.n_vars * 1e-5
-        print(f"Stage 2 X0 change threshold set to {self.config['x0_change_thred']:.3f}.")
+            if self.enable_cvae:
+                self.config["x0_change_thred"] = 0.1 * np.log2(self.n_batch)
+            else:
+                self.config["x0_change_thred"] = 0.1
+        print(f"Stage 2 X0 change threshold set to {self.config['x0_change_thred']:.2f}.")
 
     def get_prior(self, adata):
         if self.config['tprior'] is None:
@@ -1931,7 +1938,7 @@ class VAEChrom():
         u0_init = np.mean(u0_init * scaling_u + offset_u, 0)
         s0_init = np.mean(s0_init * scaling_s + offset_s, 0)
 
-        if len(self.rna_only_idx) > 0:
+        if self.enable_cvae and not self.config['rna_only'] and len(self.rna_only_idx) > 0:
             use_index = train_idx[~np.isin(self.batch_[train_idx], self.rna_only_idx)]
         else:
             use_index = train_idx
@@ -2029,8 +2036,6 @@ class VAEChrom():
             Xembed_train = Xembed[self.train_idx]
             Xembed_test = Xembed[self.test_idx]
             plot = False
-
-        G = X.shape[1]//3
 
         print("*********      Creating Training and Validation Datasets      *********")
         train_set = SCData(X[self.train_idx], device=self.device)
@@ -2165,25 +2170,32 @@ class VAEChrom():
             c0_prev, u0_prev, s0_prev = None, None, None
             noise_change = np.inf
             x0_change = np.inf
-            x0_change_prev = np.inf
+
+            train_idx = self.train_idx.detach().cpu().numpy()
+            G = X.shape[1]//3
+            if self.enable_cvae:
+                HVG = np.sum(self.batch_hvg_genes_) / self.n_batch
 
             if not self.enable_cvae:
-                std_x = np.sqrt((X[:, :G].var(0) + X[:, G:G*2].var(0) + X[:, G*2:].var(0)).sum())
+                if self.config['rna_only']:
+                    var_x = X[train_idx, G:G*2].var(0) + X[train_idx, G*2:].var(0)
+                else:
+                    var_x = X[train_idx, :G].var(0) + X[train_idx, G:G*2].var(0) + X[train_idx, G*2:].var(0)
             else:
-                std_x = 0
+                var_x = np.ones((self.n_batch, G))
                 for i in range(self.n_batch):
-                    idx = self.batch_ == i
+                    idx = self.batch_[train_idx] == i
                     batch_gene = self.batch_hvg_genes_[i]
-                    std_x += (X[:, :G][np.ix_(idx, batch_gene)].var(0) + X[:, G:G*2][np.ix_(idx, batch_gene)].var(0) + X[:, G*2:][np.ix_(idx, batch_gene)].var(0)).sum()
-                std_x = np.sqrt(std_x)
+                    ix = np.ix_(idx, batch_gene)
+                    if i in self.rna_only_idx:
+                        var_x[i, batch_gene] = X[train_idx, G:G*2][ix].var(0) + X[train_idx, G*2:][ix].var(0)
+                    else:
+                        var_x[i, batch_gene] = X[train_idx, :G][ix].var(0) + X[train_idx, G:G*2][ix].var(0) + X[train_idx, G*2:][ix].var(0)
 
             for r in range(self.config['n_refine']):
                 self.r = r
                 self.config['early_stop_thred'] *= 0.95
-                if r >= 4:
-                    stop_training = ((x0_change < x0_change_prev) and (x0_change - x0_change_prev > -self.config['x0_change_thred']) and r > 1) or (x0_change < 0.01)
-                else:
-                    stop_training = False
+                stop_training = ((x0_change < self.config['x0_change_thred']) and r >= self.config['n_refine_min']) or (x0_change < 0.01)
                 if self.config['loss_std_type'] == 'deming' and noise_change > 0.001 and r < self.config['n_refine']-1:
                     self.update_std_noise(train_set)
                     stop_training = False
@@ -2200,7 +2212,6 @@ class VAEChrom():
                     if r == 0:
                         plot_time(self.t0.squeeze(), Xembed, save=f"{figure_path}/timet0-train-test.png")
                         plot_time(t, Xembed, save=f"{figure_path}/time-train-test.png")
-                    train_idx = self.train_idx.detach().cpu().numpy()
                     t0_plot = self.t0[train_idx].squeeze()
                     for i in range(len(gind)):
                         idx = gind[i]
@@ -2302,25 +2313,32 @@ class VAEChrom():
                     sigma_s_prev = self.decoder.sigma_s.detach().cpu().numpy()
                     noise_change = norm_delta_sigma/norm_sigma
                     print(f"Change in noise variance: {noise_change:.4f}")
+
                 if r > 0:
-                    x0_change_prev = x0_change
-                    c0_cur = self.c0.detach().cpu().numpy()
-                    u0_cur = self.u0.detach().cpu().numpy()
-                    s0_cur = self.s0.detach().cpu().numpy()
+                    c0_cur = self.c0.detach().cpu().numpy()[train_idx]
+                    u0_cur = self.u0.detach().cpu().numpy()[train_idx]
+                    s0_cur = self.s0.detach().cpu().numpy()[train_idx]
                     if not self.enable_cvae:
-                        norm_delta_x0 = np.sqrt(((c0_cur - c0_prev)**2 + (u0_cur - u0_prev)**2 + (s0_cur - s0_prev)**2).sum(1).mean())
+                        if self.config['rna_only']:
+                            norm_delta_x0 = ((u0_cur - u0_prev)**2 + (s0_cur - s0_prev)**2).mean(0)
+                        else:
+                            norm_delta_x0 = ((c0_cur - c0_prev)**2 + (u0_cur - u0_prev)**2 + (s0_cur - s0_prev)**2).mean(0)
+                        x0_change = np.sum(np.sqrt(norm_delta_x0 / var_x)) / G
                     else:
-                        norm_delta_x0 = 0
+                        norm_delta_x0 = np.zeros((self.n_batch, G))
                         for i in range(self.n_batch):
-                            idx = self.batch_ == i
+                            idx = self.batch_[train_idx] == i
                             batch_gene = self.batch_hvg_genes_[i]
-                            norm_delta_x0 += (c0_cur[np.ix_(idx, batch_gene)]**2 + u0_cur[np.ix_(idx, batch_gene)]**2 + s0_cur[np.ix_(idx, batch_gene)]**2).sum(1).mean()
-                        norm_delta_x0 = np.sqrt(norm_delta_x0 / self.n_batch)
-                    x0_change = norm_delta_x0/std_x
-                    print(f"Change in x0: {x0_change:.4f}")
-                c0_prev = self.c0.detach().cpu().numpy()
-                u0_prev = self.u0.detach().cpu().numpy()
-                s0_prev = self.s0.detach().cpu().numpy()
+                            ix = np.ix_(idx, batch_gene)
+                            if i in self.rna_only_idx:
+                                norm_delta_x0[i, batch_gene] = ((u0_cur[ix]-u0_prev[ix])**2 + (s0_cur[ix]-s0_prev[ix])**2).mean(0)
+                            else:
+                                norm_delta_x0[i, batch_gene] = ((c0_cur[ix]-c0_prev[ix])**2 + (u0_cur[ix]-u0_prev[ix])**2 + (s0_cur[ix]-s0_prev[ix])**2).mean(0)
+                        x0_change = np.sum(np.sqrt(norm_delta_x0 / var_x)) / self.n_batch / HVG
+                    print(f"Change in x0: {x0_change:.3f}")
+                c0_prev = self.c0.detach().cpu().numpy()[train_idx]
+                u0_prev = self.u0.detach().cpu().numpy()[train_idx]
+                s0_prev = self.s0.detach().cpu().numpy()[train_idx]
 
             if plot and self.config['n_refine'] > 1:
                 t0_plot = self.t0[self.train_idx].detach().cpu().numpy().squeeze()
