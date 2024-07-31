@@ -116,7 +116,7 @@ def differential_dynamics(adata,
     if signed_velocity:
         mean_vs1 = np.mean(vs1, 0)
         mean_vs2 = np.mean(vs2, 0)
-        ld_vs = np.log2(np.abs(vs1 - vs2) + eps) * np.sign(vs1 - vs2)
+        ld_vs = np.log2(np.abs(vs1 - vs2) / mean_s2 + eps) * np.sign(vs1 - vs2)
     else:
         vs1 = np.abs(vs1)
         vs2 = np.abs(vs2)
