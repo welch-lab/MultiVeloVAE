@@ -28,25 +28,25 @@ class Encoder(nn.Module):
                  dim_z,
                  dim_cond=0,
                  dim_reg=0,
-                 N1=256,
+                 hidden_size=256,
                  t_network=False,
                  checkpoint=None):
         super(Encoder, self).__init__()
         self.t_network = t_network
 
-        self.fc1 = nn.Linear(Cin+dim_cond+dim_reg, N1)
-        self.bn1 = nn.BatchNorm1d(N1)
+        self.fc1 = nn.Linear(Cin+dim_cond+dim_reg, hidden_size)
+        self.bn1 = nn.BatchNorm1d(hidden_size)
         self.dpt1 = nn.Dropout(p=0.2)
         self.net = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1)
 
-        self.fc_mu_t = nn.Linear(N1, dim_z if t_network else 1)
-        self.fc_std_t = nn.Linear(N1, dim_z if t_network else 1)
+        self.fc_mu_t = nn.Linear(hidden_size, dim_z if t_network else 1)
+        self.fc_std_t = nn.Linear(hidden_size, dim_z if t_network else 1)
         self.spt = nn.Softplus()
-        self.spt1 = nn.Softplus()
+        self.sp1 = nn.Softplus()
 
-        self.fc_mu_z = nn.Linear(N1, dim_z)
-        self.fc_std_z = nn.Linear(N1, dim_z)
-        self.spt2 = nn.Softplus()
+        self.fc_mu_z = nn.Linear(hidden_size, dim_z)
+        self.fc_std_z = nn.Linear(hidden_size, dim_z)
+        self.sp2 = nn.Softplus()
 
         if checkpoint is not None:
             self.load_state_dict(torch.load(checkpoint))
@@ -73,9 +73,9 @@ class Encoder(nn.Module):
             data_in = torch.cat((data_in, regressor), 1)
         h = self.net(data_in)
         mu_tx = self.fc_mu_t(h) if self.t_network else self.spt(self.fc_mu_t(h))
-        std_tx = self.spt1(self.fc_std_t(h))
+        std_tx = self.sp1(self.fc_std_t(h))
         mu_zx = self.fc_mu_z(h)
-        std_zx = self.spt2(self.fc_std_z(h))
+        std_zx = self.sp2(self.fc_std_z(h))
         return mu_tx, std_tx, mu_zx, std_zx
 
 
@@ -89,7 +89,7 @@ class Decoder(nn.Module):
                  dim_reg=0,
                  batch_idx=None,
                  ref_batch=None,
-                 N1=256,
+                 hidden_size=256,
                  parallel_arch=True,
                  t_network=True,
                  full_vb=False,
@@ -130,23 +130,23 @@ class Decoder(nn.Module):
         self.init_key = init_key
         self.checkpoint = checkpoint
         self.tmax = tmax
-        self.construct_nn(dim_z, dim_cond, dim_reg, N1, p)
+        self.construct_nn(dim_z, dim_cond, dim_reg, hidden_size, p)
 
-    def construct_nn(self, dim_z, dim_cond, dim_reg, N1, p):
+    def construct_nn(self, dim_z, dim_cond, dim_reg, hidden_size, p):
         G = self.adata.n_vars
         self.set_shape(G, dim_cond)
 
-        self.fc1 = nn.Linear(dim_z+dim_cond+dim_reg, N1)
-        self.bn1 = nn.BatchNorm1d(N1)
+        self.fc1 = nn.Linear(dim_z+dim_cond+dim_reg, hidden_size)
+        self.bn1 = nn.BatchNorm1d(hidden_size)
         self.dpt1 = nn.Dropout(p=0.2)
-        self.fc_out1 = nn.Linear(N1, G)
+        self.fc_out1 = nn.Linear(hidden_size, G)
         self.net_rho = nn.Sequential(self.fc1, self.bn1, nn.LeakyReLU(), self.dpt1,
                                      self.fc_out1, nn.Sigmoid())
 
-        self.fc2 = nn.Linear(dim_z+dim_cond+dim_reg if self.parallel_arch else G, N1)
-        self.bn2 = nn.BatchNorm1d(N1)
+        self.fc2 = nn.Linear(dim_z+dim_cond+dim_reg if self.parallel_arch else G, hidden_size)
+        self.bn2 = nn.BatchNorm1d(hidden_size)
         self.dpt2 = nn.Dropout(p=0.2)
-        self.fc_out2 = nn.Linear(N1, G)
+        self.fc_out2 = nn.Linear(hidden_size, G)
         self.net_kc = nn.Sequential(self.fc2, self.bn2, nn.LeakyReLU(), self.dpt2,
                                     self.fc_out2, nn.Sigmoid())
 
@@ -834,7 +834,7 @@ class VAEChrom():
                                self.config['dim_z'],
                                dim_cond=self.n_batch,
                                dim_reg=(0 if self.var_to_regress is None else self.var_to_regress.shape[1]),
-                               N1=hidden_size,
+                               hidden_size=hidden_size,
                                t_network=t_network,
                                checkpoint=checkpoints[0]).float().to(self.device)
 
@@ -846,7 +846,7 @@ class VAEChrom():
                                dim_reg=(0 if self.var_to_regress is None else self.var_to_regress.shape[1]),
                                batch_idx=self.batch_,
                                ref_batch=self.ref_batch,
-                               N1=hidden_size,
+                               hidden_size=hidden_size,
                                parallel_arch=parallel_arch,
                                t_network=t_network,
                                full_vb=full_vb,
