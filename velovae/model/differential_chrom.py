@@ -2,7 +2,18 @@ import logging
 import numpy as np
 from scipy.sparse import issparse
 import pandas as pd
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import ConstantKernel, RBF, ExpSineSquared, WhiteKernel
+import matplotlib.pyplot as plt
 logger = logging.getLogger(__name__)
+
+
+def log2_difference(v1, v2, s2, eps=1e-8):
+    return np.log2(np.abs(v1 - v2) / s2 + eps) * np.sign(v1 - v2)
+
+
+def log2_fold_change(v1, v2, eps=1e-8):
+    return np.log2(v1 + eps) - np.log2(v2 + eps)
 
 
 def differential_dynamics(adata,
@@ -18,6 +29,7 @@ def differential_dynamics(adata,
                           weight_batch_uniform=False,
                           mode='vanilla',
                           signed_velocity=False,
+                          output_raw=False,
                           n_samples=5000,
                           delta=1,
                           seed=0):
@@ -31,98 +43,109 @@ def differential_dynamics(adata,
         elif batch_key is not None and group1 in adata.obs[batch_key].unique():
             idx1 = adata.obs[batch_key] == group1
         else:
-            raise ValueError("group1 not found in cell types or batch labels, try specifying idx1 directly")
+            raise ValueError("group1 not found in cell types or batch labels, try specifying idx1 directly.")
     else:
         if idx1 is None:
-            raise ValueError("Need to specify either group1 or idx1")
+            raise ValueError("Need to specify either group1 or idx1.")
     if (len(idx1) == adata.n_obs) and np.array_equal(idx1, idx1.astype(bool)):
+        idx1_bin = idx1
         idx1 = np.where(idx1)[0]
+    else:
+        idx1_bin = np.zeros(adata.n_obs, dtype=bool)
+        idx1_bin[idx1] = True
     if group2 is not None:
         if group2 in adata.obs[group_key].unique():
             idx2 = adata.obs[group_key] == group2
         elif batch_key is not None and group2 in adata.obs[batch_key].unique():
             idx2 = adata.obs[batch_key] == group2
         else:
-            raise ValueError("group2 not found in cell types or batch labels, try specifying idx2 directly")
+            raise ValueError("group2 not found in cell types or batch labels, try specifying idx2 directly.")
     else:
         if idx2 is None:
             print("Using the rest of cells as reference (control).")
             idx2 = np.setdiff1d(np.arange(adata.n_obs), np.where(idx1)[0])
     if (len(idx2) == adata.n_obs) and np.array_equal(idx2, idx2.astype(bool)):
+        idx2_bin = idx2
         idx2 = np.where(idx2)[0]
+    else:
+        idx2_bin = np.zeros(adata.n_obs, dtype=bool)
+        idx2_bin[idx2] = True
     c = adata_atac.layers['Mc']
     c = c.A if issparse(c) else c
     u = adata.layers['Mu']
     u = u.A if issparse(u) else u
     s = adata.layers['Ms']
     s = s.A if issparse(s) else s
-    g1_corrected = model.test(c[idx1], u[idx1], s[idx1], batch=(None if batch_correction else adata.obs[batch_key][idx1]), sample=True, seed=seed)
-    g2_corrected = model.test(c[idx2], u[idx2], s[idx2], batch=(None if batch_correction else adata.obs[batch_key][idx2]), sample=True, seed=seed)
+
     rng = np.random.default_rng(seed=seed)
     if batch_key is None:
         if model.enable_cvae:
             logger.warn("Batch correction was enabled during training. It's recommended to use the same batch_key to sample pairs.")
-        g1_sample_idx = rng.choice(np.arange(len(idx1)), n_samples)
-        g2_sample_idx = rng.choice(np.arange(len(idx2)), n_samples)
+        g1_sample_idx = rng.choice(idx1, n_samples)
+        g2_sample_idx = rng.choice(idx2, n_samples)
     else:
-        group1_batches = np.sort(adata.obs[batch_key][idx1].unique())
-        group2_batches = np.sort(adata.obs[batch_key][idx2].unique())
+        batch_array = adata.obs[batch_key].values
+        group1_batches = np.sort(batch_array[idx1].unique())
+        group2_batches = np.sort(batch_array[idx2].unique())
         if np.array_equal(group1_batches, group2_batches):
             g1_sample_idx = []
             g2_sample_idx = []
-            total_cells = np.sum([len(np.where(adata.obs[batch_key] == batch)[0]) for batch in group1_batches])
+            total_cells = np.sum([len(np.where(batch_array == batch)[0]) for batch in group1_batches])
             for batch in group1_batches:
                 if weight_batch_uniform:
-                    n_samples_per_batch = n_samples // len(group1_batches)
+                    n_samples_cur_batch = n_samples // len(group1_batches)
                 else:
-                    n_samples_per_batch = len(np.where(adata.obs[batch_key] == batch)[0]) * n_samples // total_cells
-                idx_batch1 = np.where(adata.obs[batch_key][idx1] == batch)[0]
+                    n_samples_cur_batch = len(np.where(batch_array == batch)[0]) * n_samples // total_cells
+                idx_batch1 = np.where((batch_array == batch) & idx1_bin)[0]
+                idx_batch2 = np.where((batch_array == batch) & idx2_bin)[0]
                 if len(idx_batch1) < 10:
                     logger.warn(f"Group1 in batch {batch} has less than 10 cells. Skipping this batch.")
                     continue
-                idx_batch2 = np.where(adata.obs[batch_key][idx2] == batch)[0]
                 if len(idx_batch2) < 10:
                     logger.warn(f"Group2 in batch {batch} has less than 10 cells. Skipping this batch.")
                     continue
-                g1_sample_idx.append(rng.choice(idx_batch1, n_samples_per_batch))
-                g2_sample_idx.append(rng.choice(idx_batch2, n_samples_per_batch))
+                g1_sample_idx.append(rng.choice(idx_batch1, n_samples_cur_batch))
+                g2_sample_idx.append(rng.choice(idx_batch2, n_samples_cur_batch))
             g1_sample_idx = np.concatenate(g1_sample_idx)
             g2_sample_idx = np.concatenate(g2_sample_idx)
         else:
             print("Different batches found in group1 and group2. Sampling pairs regardless of batch conditions.")
-            g1_sample_idx = rng.choice(np.arange(len(idx1)), n_samples)
-            g2_sample_idx = rng.choice(np.arange(len(idx2)), n_samples)
+            g1_sample_idx = rng.choice(idx1, n_samples)
+            g2_sample_idx = rng.choice(idx2, n_samples)
 
-    kc1 = g1_corrected[11][g1_sample_idx]
-    kc2 = g2_corrected[11][g2_sample_idx]
+    g1_corrected = model.test(c[g1_sample_idx], u[g1_sample_idx], s[g1_sample_idx], batch=(None if batch_correction else batch_array[g1_sample_idx]), sample=True, seed=seed)
+    g2_corrected = model.test(c[g2_sample_idx], u[g2_sample_idx], s[g2_sample_idx], batch=(None if batch_correction else batch_array[g2_sample_idx]), sample=True, seed=seed)
+
+    kc1 = g1_corrected[11]
+    kc2 = g2_corrected[11]
     mean_kc1 = np.mean(kc1, 0)
     mean_kc2 = np.mean(kc2, 0)
-    lfc_kc = np.log2(kc1 + eps) - np.log2(kc2 + eps)
+    lfc_kc = log2_fold_change(kc1, kc2)
 
-    rho1 = g1_corrected[12][g1_sample_idx]
-    rho2 = g2_corrected[12][g2_sample_idx]
+    rho1 = g1_corrected[12]
+    rho2 = g2_corrected[12]
     mean_rho1 = np.mean(rho1, 0)
     mean_rho2 = np.mean(rho2, 0)
-    lfc_rho = np.log2(rho1 + eps) - np.log2(rho2 + eps)
+    lfc_rho = log2_fold_change(rho1, rho2)
 
-    s1 = g1_corrected[2][g1_sample_idx]
-    s2 = g2_corrected[2][g2_sample_idx]
+    s1 = g1_corrected[2]
+    s2 = g2_corrected[2]
     mean_s1 = np.mean(s1, 0)
     mean_s2 = np.mean(s2, 0)
-    lfc_s = np.log2(s1 + eps) - np.log2(s2 + eps)
+    lfc_s = log2_fold_change(s1, s2)
 
-    vs1 = g1_corrected[5][g1_sample_idx]
-    vs2 = g2_corrected[5][g2_sample_idx]
+    vs1 = g1_corrected[5]
+    vs2 = g2_corrected[5]
     if signed_velocity:
         mean_vs1 = np.mean(vs1, 0)
         mean_vs2 = np.mean(vs2, 0)
-        ld_vs = np.log2(np.abs(vs1 - vs2) / mean_s2 + eps) * np.sign(vs1 - vs2)
+        ld_vs = log2_difference(vs1, vs2, mean_s2)
     else:
         vs1 = np.abs(vs1)
         vs2 = np.abs(vs2)
         mean_vs1 = np.mean(vs1, 0)
         mean_vs2 = np.mean(vs2, 0)
-        lfc_vs = np.log2(vs1 + eps) - np.log2(vs2 + eps)
+        lfc_vs = log2_fold_change(vs1, vs2)
 
     if mode not in ['vanilla', 'change']:
         logging.warn(f"Mode {mode} not recognized. Using vanilla mode.")
@@ -231,4 +254,82 @@ def differential_dynamics(adata,
             df_vs['log2_fc_v'] = np.mean(lfc_vs, 0)
         df_vs = df_vs.sort_values('bayes_factor_v', ascending=False)
 
-    return df_kc, df_rho, df_s, df_vs
+    if output_raw:
+        return df_kc, df_rho, df_s, df_vs, (kc1, kc2), (rho1, rho2), (s1, s2), (vs1, vs2), (g1_corrected[10], g2_corrected[10])
+    else:
+        return df_kc, df_rho, df_s, df_vs
+
+
+def differential_dynamics_bin(adata,
+                              var1,
+                              var2,
+                              gene,
+                              t1,
+                              t2,
+                              s2=None,
+                              func='lfc',
+                              n_bins=50,
+                              n_samples=100,
+                              seed=0):
+    if not isinstance(gene, str):
+        raise ValueError("Please input only a single gene.")
+    t_both = np.concatenate([t1, t2])
+    steps = np.quantile(t_both, np.linspace(0, 1, n_bins + 1))
+    steps[0] = steps[0] - 1
+    steps[-1] = steps[-1] + 1
+    t_bins = np.digitize(t_both, steps)
+    t1_bins = np.digitize(t1, steps)
+    t2_bins = np.digitize(t2, steps)
+    gene_idx = adata.var_names == gene
+    var1_gene = var1[:, gene_idx]
+    var2_gene = var2[:, gene_idx]
+    if func == 'ld':
+        if s2 is None:
+            raise ValueError("Need to provide spliced counts for computing velocity log difference.")
+        mean_s2_gene = np.mean(s2[:, gene_idx])
+
+    rng = np.random.default_rng(seed=seed)
+    time_array, dd_array = [], []
+    for i in range(n_bins):
+        var1_bin = var1_gene[t1_bins == i]
+        var2_bin = var2_gene[t2_bins == i]
+        if len(var1_bin) < 10 or len(var2_bin) < 10:
+            continue
+        var1_bin_perm = rng.choice(var1_bin, n_samples)
+        var2_bin_perm = rng.choice(var2_bin, n_samples)
+        time_bin = np.mean(t_both[t_bins == i])
+        time_array.append(time_bin)
+        if func == 'lfc':
+            lfc_bin = log2_fold_change(np.abs(var1_bin_perm), np.abs(var2_bin_perm))
+            dd_array.append(np.mean(lfc_bin))
+        elif func == 'ld':
+            diff_bin = log2_difference(var1_bin_perm, var2_bin_perm, mean_s2_gene)
+            dd_array.append(np.mean(diff_bin))
+        else:
+            raise ValueError(f"Mode {func} not recognized. Must be either 'lfc' or 'ld'.")
+    time_array = np.array(time_array)
+    dd_array = np.array(dd_array)
+    bounds = np.quantile(t_both, [0.005, 0.995])
+    t_both_sorted = np.sort(t_both)
+    t_both_sorted = t_both_sorted[(t_both_sorted >= bounds[0]) & (t_both_sorted <= bounds[1])]
+
+    kernel = 1.0 * ExpSineSquared(1.0, 1.0, periodicity_bounds=(1e-2, 1e1)) + WhiteKernel(1e-1)
+    gaussian_process = GaussianProcessRegressor(kernel=kernel, random_state=seed, n_restarts_optimizer=10)
+    gaussian_process.fit(time_array.reshape(-1, 1), dd_array.reshape(-1, 1))
+    print(gaussian_process.kernel_)
+    mean_prediction, std_prediction = gaussian_process.predict(t_both_sorted.reshape(-1, 1), return_std=True)
+
+    plt.scatter(time_array, dd_array, label=f"Binned {'Log difference' if func == 'ld' else 'Log fold change'}")
+    plt.plot(t_both_sorted, mean_prediction, label="Mean prediction")
+    plt.plot(t_both_sorted, np.full_like(t_both_sorted, 0.0), label="Zero line", linestyle='--', color='black', alpha=0.5)
+    plt.fill_between(
+        t_both_sorted,
+        mean_prediction - 1.96 * std_prediction,
+        mean_prediction + 1.96 * std_prediction,
+        alpha=0.5,
+        label=r"Credible interval",
+    )
+    plt.legend()
+    plt.xlabel("Time")
+    plt.ylabel(f"{'Log difference' if func == 'ld' else 'Log fold change'}")
+    plt.title("Gaussian process regression on differential dynamics")
