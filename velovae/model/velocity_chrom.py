@@ -16,6 +16,7 @@ def rna_velocity_vae(adata,
                      batch_correction=False,
                      use_raw=False,
                      rna_only=False,
+                     likelihood_thred=None,
                      sigma=None,
                      approx=False):
     n_batch = 0
@@ -133,13 +134,7 @@ def rna_velocity_vae(adata,
             adata.layers["c_leveled"] = (adata_atac.layers['Mc']-offset_c_batch)/scaling_c_batch * scaling_c + offset_c
             adata.layers["u_leveled"] = (adata.layers['Mu']-offset_u_batch)/scaling_u_batch * scaling_u + offset_u
             adata.layers["s_leveled"] = (adata.layers['Ms']-offset_s_batch)/scaling_s_batch * scaling_s + offset_s
-            # adata.layers["c_leveled"] = np.clip(adata.layers["c_leveled"], 0, None)
-            # adata.layers["u_leveled"] = np.clip(adata.layers["u_leveled"], 0, None)
-            # adata.layers["s_leveled"] = np.clip(adata.layers["s_leveled"], 0, None)
 
-    # c = np.clip(c, 0, None)
-    # u = np.clip(u, 0, None)
-    # s = np.clip(s, 0, None)
     if approx:
         v = (s - s0)/((t - t0).reshape(-1, 1))
         vu = (u - u0)/((t - t0).reshape(-1, 1))
@@ -169,7 +164,14 @@ def rna_velocity_vae(adata,
     adata.layers[f"{key}_velocity_u"] = vu
     adata.layers[f"{key}_velocity_c"] = vc
 
-    adata.var[f'{key}_velocity_genes'] = adata.var['quantile_genes'] & (adata.var[f"{key}_likelihood"] > (0.025 if not rna_only else 0.05))
+    if likelihood_thred is None:
+        if rna_only:
+            likelihood_thred = 0.05
+        elif batch_correction:
+            likelihood_thred = 0.01 + 0.01 * np.log2(n_batch)
+        else:
+            likelihood_thred = 0.025
+    adata.var[f'{key}_velocity_genes'] = adata.var['quantile_genes'] & (adata.var[f"{key}_likelihood"] > likelihood_thred)
     if ref_batch is not None and f"{batch_hvg_key}-{batch_dic_rev[ref_batch]}" in adata.var:
         adata.var[f'{key}_velocity_genes'] = adata.var[f'{key}_velocity_genes'] & adata.var[f"{batch_hvg_key}-{batch_dic_rev[ref_batch]}"]
     print(f"Selected {np.sum(adata.var[f'{key}_velocity_genes'])} velocity genes.")

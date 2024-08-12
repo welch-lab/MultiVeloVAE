@@ -749,8 +749,8 @@ class VAEChrom():
             # training parameters
             "n_epochs": 2000,
             "n_epochs_post": 500,
-            "n_refine": 8 if refine_velocity else 1,
-            "n_refine_min": 4,
+            "n_refine": 6 if refine_velocity else 1,
+            "n_refine_min": 3,
             "batch_size": batch_size,
             "learning_rate": None,
             "learning_rate_ode": None,

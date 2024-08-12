@@ -5,6 +5,8 @@ import scvelo as scv
 import matplotlib
 import matplotlib.pyplot as plt
 from .model.model_util_chrom import velocity_graph
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import ExpSineSquared, WhiteKernel
 logger = logging.getLogger(__name__)
 
 #######################################################################################
@@ -58,11 +60,6 @@ def save_fig(fig, save, bbox_extra_artists=None):
         except FileNotFoundError:
             logger.warn("Saving failed. File path doesn't exist!")
         plt.close(fig)
-
-
-############################################################
-# Functions used in debugging.
-############################################################
 
 
 def plot_sig_(t,
@@ -205,7 +202,6 @@ def plot_sig(t,
             cell_types = np.array(list(cell_type_colors.keys()))
             colors = np.array([cell_type_colors[type_] for type_ in cell_types])
 
-        # Plot the input data in the true labels
         for i, type_ in enumerate(cell_types):
             mask_type = cell_labels == type_
             ax[0, 0].scatter(tscv[mask_type][::D],
@@ -706,6 +702,7 @@ def dynamic_plot(adata,
                  frame_on=True,
                  show_pred=True,
                  show_pred_only=False,
+                 batch_correction=False,
                  downsample=1,
                  figsize=None,
                  pointsize=2,
@@ -757,8 +754,12 @@ def dynamic_plot(adata,
                 u = adata[:, gene].layers[f'{key}_uhat'].copy()
                 s = adata[:, gene].layers[f'{key}_shat'].copy()
         else:
-            u = adata[:, gene].layers['Mu'].copy()
-            s = adata[:, gene].layers['Ms'].copy()
+            if batch_correction:
+                u = adata[:, gene].layers['u_leveled'].copy()
+                s = adata[:, gene].layers['s_leveled'].copy()
+            else:
+                u = adata[:, gene].layers['Mu'].copy()
+                s = adata[:, gene].layers['Ms'].copy()
         if not no_c:
             if modalities is not None:
                 c = adata[:, gene].layers[modalities[0]].copy()
@@ -770,7 +771,10 @@ def dynamic_plot(adata,
                 else:
                     c = adata[:, gene].layers[f'{key}_chat'].copy()
             else:
-                c = adata_atac[:, gene].layers['Mc'].copy()
+                if batch_correction:
+                    c = adata[:, gene].layers['c_leveled'].copy()
+                else:
+                    c = adata_atac[:, gene].layers['Mc'].copy()
         c = c.toarray() if sparse.issparse(c) else c
         u = u.toarray() if sparse.issparse(u) else u
         s = s.toarray() if sparse.issparse(s) else s
@@ -845,6 +849,7 @@ def scatter_plot(adata,
                  frame_on=True,
                  show_pred=True,
                  show_pred_only=False,
+                 batch_correction=False,
                  title_more_info=False,
                  velocity_arrows=False,
                  downsample=1,
@@ -905,8 +910,12 @@ def scatter_plot(adata,
                 u = adata[:, gene].layers[modalities[-2]].copy()
                 s = adata[:, gene].layers[modalities[-1]].copy()
             else:
-                u = adata[:, gene].layers['Mu'].copy() if 'Mu' in adata.layers else adata[:, gene].layers['unspliced'].copy()
-                s = adata[:, gene].layers['Ms'].copy() if 'Ms' in adata.layers else adata[:, gene].layers['spliced'].copy()
+                if batch_correction:
+                    u = adata[:, gene].layers['u_leveled'].copy()
+                    s = adata[:, gene].layers['s_leveled'].copy()
+                else:
+                    u = adata[:, gene].layers['Mu'].copy() if 'Mu' in adata.layers else adata[:, gene].layers['unspliced'].copy()
+                    s = adata[:, gene].layers['Ms'].copy() if 'Ms' in adata.layers else adata[:, gene].layers['spliced'].copy()
         u = u.toarray() if sparse.issparse(u) else u
         s = s.toarray() if sparse.issparse(s) else s
         u, s = np.ravel(u), np.ravel(s)
@@ -920,7 +929,10 @@ def scatter_plot(adata,
                 if modalities is not None:
                     c = adata[:, gene].layers[modalities[0]].copy()
                 else:
-                    c = adata_atac[:, gene].layers['Mc'].copy()
+                    if batch_correction:
+                        c = adata[:, gene].layers['c_leveled'].copy()
+                    else:
+                        c = adata_atac[:, gene].layers['Mc'].copy()
             c = c.toarray() if sparse.issparse(c) else c
             c = np.ravel(c)
 
@@ -1037,16 +1049,18 @@ def scatter_plot(adata,
             if f'{key}_likelihood' in adata.var and not np.all(adata.var[f'{key}_likelihood'].values == -1):
                 title += f" {adata[:,gene].var[f'{key}_likelihood'].values[0]:.3g}"
         ax.set_title(f'{title}', fontsize=11)
+        if batch_correction:
+            prefix = 'leveled '
         if by == 'us':
-            ax.set_xlabel('spliced' if full_name else 's')
-            ax.set_ylabel('unspliced' if full_name else 'u')
+            ax.set_xlabel(prefix + 'spliced' if full_name else 's')
+            ax.set_ylabel(prefix + 'unspliced' if full_name else 'u')
         elif by == 'cu':
-            ax.set_xlabel('unspliced' if full_name else 'u')
-            ax.set_ylabel('chromatin' if full_name else 'c')
+            ax.set_xlabel(prefix + 'unspliced' if full_name else 'u')
+            ax.set_ylabel(prefix + 'chromatin' if full_name else 'c')
         elif by == 'cus':
-            ax.set_xlabel('spliced' if full_name else 's')
-            ax.set_ylabel('unspliced' if full_name else 'u')
-            ax.set_zlabel('chromatin' if full_name else 'c')
+            ax.set_xlabel(prefix + 'spliced' if full_name else 's')
+            ax.set_ylabel(prefix + 'unspliced' if full_name else 'u')
+            ax.set_zlabel(prefix + 'chromatin' if full_name else 'c')
         if by in ['us', 'cu']:
             if not axis_on:
                 ax.xaxis.set_ticks_position('none')
@@ -1078,6 +1092,155 @@ def scatter_plot(adata,
         count += 1
     for i in range(col+1, n_cols):
         fig.delaxes(axs[row, i])
+    fig.tight_layout()
+
+
+def difference(v1, v2, norm=0.1, eps=1e-8):
+    return (v1 - v2) / (norm + eps)
+
+
+def fold_change(v1, v2, eps=1e-8):
+    return v1 / (v2 + eps)
+
+
+def differential_dynamics_plot(adata,
+                               genes,
+                               group1=None,
+                               group2=None,
+                               var='v',
+                               func='ld',
+                               color_by=None,
+                               color_include=None,
+                               key='vae',
+                               n_bins=50,
+                               n_samples=100,
+                               seed=0,
+                               n_cols=5,
+                               figsize=None,
+                               pointsize=70):
+    eps = 1e-8
+    if isinstance(genes, str) or isinstance(genes, int):
+        genes = [genes]
+    if group1 is None:
+        group1 = '1'
+    if group2 is None:
+        group2 = '2'
+    if var not in ['kc', 'rho', 'c', 'u', 's', 'v']:
+        raise ValueError(f"Variable {var} not recognized. Must be one of ['kc', 'rho', 'c', 'u', 's', 'v'].")
+    if f'{var}_{group1}' not in adata.uns['differential_dynamics'].keys():
+        raise ValueError(f"{var}_{group1} not found in adata.varm. Was differential_dynamics run with save_raw?")
+    if f'{var}_{group2}' not in adata.uns['differential_dynamics'].keys():
+        raise ValueError(f"{var}_{group2} not found in adata.varm. Was differential_dynamics run with save_raw?")
+    var1 = adata.uns['differential_dynamics'][f'{var}_{group1}']
+    var2 = adata.uns['differential_dynamics'][f'{var}_{group2}']
+    t1 = adata.uns['differential_dynamics'][f't_{group1}']
+    t2 = adata.uns['differential_dynamics'][f't_{group2}']
+    t_both = np.concatenate([t1, t2])
+    steps = np.quantile(t_both, np.linspace(0, 1, n_bins + 1))
+    steps[0] = steps[0] - 1
+    steps[-1] = steps[-1] + 1
+    t_bins = np.digitize(t_both, steps)
+    t1_bins = np.digitize(t1, steps)
+    t2_bins = np.digitize(t2, steps)
+    if func == 'ld':
+        if var == 'v':
+            mean_norm = np.mean(adata.uns['differential_dynamics'][f's_{group2}'], 0)
+        elif var == 'c':
+            mean_norm = np.mean(adata.uns['differential_dynamics'][f'c_{group2}'], 0)
+        else:
+            mean_norm = None
+    if func not in ['lfc', 'ld']:
+        raise ValueError(f"Mode {func} not recognized. Must be either 'lfc' or 'ld'.")
+
+    if color_by is not None:
+        from pandas.api.types import is_categorical_dtype
+
+        if color_by not in adata.obs:
+            raise ValueError(f"Color key {color_by} not found in adata.obs.")
+        elif not is_categorical_dtype(adata.obs[color_by]) or not color_by+'_colors' in adata.uns.keys():
+            raise ValueError(f"Color key {color_by} must be a categorical variable with colors stored in adata.uns.")
+        else:
+            types = adata.obs[color_by].cat.categories
+            colors = adata.uns[f'{color_by}_colors']
+            colors_dict = dict(zip(types, colors))
+            cell_time = adata.obs[f'{key}_time'].values[np.isin(adata.obs[color_by].values, color_include)]
+            color_array = np.array([colors_dict[x] for x in adata.obs[color_by].values if x in color_include])
+            color_array = color_array[np.argsort(cell_time)]
+            cell_time = np.sort(cell_time)
+
+    rng = np.random.default_rng(seed=seed)
+    fig, axs = plt.subplots(-(-len(genes) // n_cols), min(n_cols, len(genes)), squeeze=False, figsize=(5*min(n_cols, len(genes)), 4.4*(-(-len(genes) // n_cols))) if figsize is None else figsize)
+    fig.patch.set_facecolor('white')
+    count = 0
+    for gene in genes:
+        gene_idx = adata.var_names == gene
+        var1_gene = var1[:, gene_idx]
+        var2_gene = var2[:, gene_idx]
+        if func == 'ld':
+            mean_norm_gene = mean_norm[gene_idx] if mean_norm is not None else 1
+
+        time_array, dd_array, bf_array = [], [], []
+        for i in range(n_bins):
+            var1_bin = var1_gene[t1_bins == i]
+            var2_bin = var2_gene[t2_bins == i]
+            if len(var1_bin) < 10 or len(var2_bin) < 10:
+                continue
+            var1_bin_perm = rng.choice(var1_bin, n_samples)
+            var2_bin_perm = rng.choice(var2_bin, n_samples)
+            time_bin = np.mean(t_both[t_bins == i])
+            time_array.append(time_bin)
+            if func == 'lfc':
+                fc_bin = fold_change(np.abs(var1_bin_perm), np.abs(var2_bin_perm))
+                dd_array.append(np.mean(fc_bin))
+            else:
+                diff_bin = difference(var1_bin_perm, var2_bin_perm, mean_norm_gene)
+                dd_array.append(np.mean(diff_bin))
+            p1 = np.mean(var1_bin_perm > var2_bin_perm, 0)
+            bf_array.append(np.log(p1 + eps) - np.log(1 - p1 + eps))
+        time_array = np.array(time_array)
+        dd_array = np.array(dd_array)
+        bounds = np.quantile(t_both, [0.005, 0.995])
+        t_both_sorted = np.sort(t_both)
+        t_both_sorted = t_both_sorted[(t_both_sorted >= bounds[0]) & (t_both_sorted <= bounds[1])]
+
+        kernel = 1.0 * ExpSineSquared(1.0, 1.0, periodicity_bounds=(1e-2, 1e1)) + WhiteKernel(1e-1)
+        gaussian_process = GaussianProcessRegressor(kernel=kernel, random_state=seed, n_restarts_optimizer=10)
+        gaussian_process.fit(time_array.reshape(-1, 1), dd_array.reshape(-1, 1))
+        mean_prediction, std_prediction = gaussian_process.predict(t_both_sorted.reshape(-1, 1), return_std=True)
+
+        row = count // n_cols
+        col = count % n_cols
+        ax = axs[row, col]
+        ax.plot(t_both_sorted, mean_prediction, label="Mean prediction", color='black', alpha=0.6)
+        if color_by is None:
+            ax.plot(t_both_sorted, np.full_like(t_both_sorted, 0.0), label="Zero line", linestyle='--', color='black', alpha=0.6)
+        else:
+            ax.scatter(cell_time, np.full_like(cell_time, 0.0), label="Zero line", c=color_array, s=10, marker='_')
+        ax.fill_between(
+            t_both_sorted,
+            mean_prediction - 1.96 * std_prediction,
+            mean_prediction + 1.96 * std_prediction,
+            alpha=0.4,
+            label=r"Credible interval",
+            facecolor='tab:orange'
+        )
+        if np.all(np.isclose(bf_array, bf_array[0])):
+            vmin = np.log(eps) - np.log(1+eps)
+            vmax = np.log(1+eps) - np.log(eps)
+        else:
+            vmin = None
+            vmax = None
+        ax.scatter(time_array, dd_array, c=bf_array, cmap='coolwarm', label=f"Binned {'differences' if func == 'ld' else 'fold changes'}\ncolored by BF", s=pointsize, alpha=0.5, vmin=vmin, vmax=vmax)
+        ax.set_xlabel("Time")
+        ax.set_ylabel(f"{'Difference' if func == 'ld' else 'Fold change'}")
+        ax.set_title(f'{gene}', fontsize=11)
+        count += 1
+    if len(genes) > n_cols:
+        for i in range(col+1, n_cols):
+            fig.delaxes(axs[row, i])
+    plt.suptitle(f"Gaussian process regression on differential dynamics on {var}", fontsize=12+2*min(n_cols, len(genes)), y=1.01)
+    handles, labels = ax.get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(1.6-0.1*min(n_cols, len(genes)), 0.8), fontsize=11)
     fig.tight_layout()
 
 

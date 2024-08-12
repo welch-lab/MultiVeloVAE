@@ -2,14 +2,11 @@ import logging
 import numpy as np
 from scipy.sparse import issparse
 import pandas as pd
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import ConstantKernel, RBF, ExpSineSquared, WhiteKernel
-import matplotlib.pyplot as plt
 logger = logging.getLogger(__name__)
 
 
-def log2_difference(v1, v2, s2, eps=1e-8):
-    return np.log2(np.abs(v1 - v2) / s2 + eps) * np.sign(v1 - v2)
+def log2_difference(v1, v2, norm=0.1):
+    return np.log2(np.abs(v1 - v2) / norm + 1) * np.sign(v1 - v2)
 
 
 def log2_fold_change(v1, v2, eps=1e-8):
@@ -29,7 +26,7 @@ def differential_dynamics(adata,
                           weight_batch_uniform=False,
                           mode='vanilla',
                           signed_velocity=False,
-                          output_raw=False,
+                          save_raw=False,
                           n_samples=5000,
                           delta=1,
                           seed=0):
@@ -120,13 +117,25 @@ def differential_dynamics(adata,
     kc2 = g2_corrected[11]
     mean_kc1 = np.mean(kc1, 0)
     mean_kc2 = np.mean(kc2, 0)
-    lfc_kc = log2_fold_change(kc1, kc2)
+    ld_kc = log2_difference(kc1, kc2)
 
     rho1 = g1_corrected[12]
     rho2 = g2_corrected[12]
     mean_rho1 = np.mean(rho1, 0)
     mean_rho2 = np.mean(rho2, 0)
-    lfc_rho = log2_fold_change(rho1, rho2)
+    ld_rho = log2_difference(rho1, rho2)
+
+    c1 = g1_corrected[0]
+    c2 = g2_corrected[0]
+    mean_c1 = np.mean(c1, 0)
+    mean_c2 = np.mean(c2, 0)
+    ld_c = log2_difference(c1, c2, mean_c2)
+
+    u1 = g1_corrected[1]
+    u2 = g2_corrected[1]
+    mean_u1 = np.mean(u1, 0)
+    mean_u2 = np.mean(u2, 0)
+    lfc_u = log2_fold_change(u1, u2)
 
     s1 = g1_corrected[2]
     s2 = g2_corrected[2]
@@ -159,9 +168,8 @@ def differential_dynamics(adata,
                               'p1_kc': p1_kc,
                               'p2_kc': p2_kc,
                               'bayes_factor_kc': bf_kc,
-                              'log2_fc_kc': np.mean(lfc_kc, 0)},
+                              'log2_diff_kc': np.mean(ld_kc, 0)},
                              index=adata.var_names)
-        df_kc = df_kc.sort_values('bayes_factor_kc', ascending=False)
 
         p1_rho = np.mean(rho1 > rho2, 0)
         p2_rho = 1.0 - p1_rho
@@ -171,9 +179,30 @@ def differential_dynamics(adata,
                                'p1_rho': p1_rho,
                                'p2_rho': p2_rho,
                                'bayes_factor_rho': bf_rho,
-                               'log2_fc_rho': np.mean(lfc_rho, 0)},
+                               'log2_diff_rho': np.mean(ld_rho, 0)},
                               index=adata.var_names)
-        df_rho = df_rho.sort_values('bayes_factor_rho', ascending=False)
+
+        p1_c = np.mean(c1 > c2, 0)
+        p2_c = 1.0 - p1_c
+        bf_c = np.log(p1_c + eps) - np.log(p2_c + eps)
+        df_c = pd.DataFrame({'mean_c1': mean_c1,
+                             'mean_c2': mean_c2,
+                             'p1_c': p1_c,
+                             'p2_c': p2_c,
+                             'bayes_factor_c': bf_c,
+                             'log2_diff_c': np.mean(ld_c, 0)},
+                             index=adata.var_names)
+
+        p1_u = np.mean(u1 > u2, 0)
+        p2_u = 1.0 - p1_u
+        bf_u = np.log(p1_u + eps) - np.log(p2_u + eps)
+        df_u = pd.DataFrame({'mean_u1': mean_u1,
+                             'mean_u2': mean_u2,
+                             'p1_u': p1_u,
+                             'p2_u': p2_u,
+                             'bayes_factor_u': bf_u,
+                             'log2_fc_u': np.mean(lfc_u, 0)},
+                            index=adata.var_names)
 
         p1_s = np.mean(s1 > s2, 0)
         p2_s = 1.0 - p1_s
@@ -185,7 +214,6 @@ def differential_dynamics(adata,
                              'bayes_factor_s': bf_s,
                              'log2_fc_s': np.mean(lfc_s, 0)},
                             index=adata.var_names)
-        df_s = df_s.sort_values('bayes_factor_s', ascending=False)
 
         p1_vs = np.mean(vs1 > vs2, 0)
         p2_vs = 1.0 - p1_vs
@@ -200,10 +228,9 @@ def differential_dynamics(adata,
             df_vs['log2_diff_v'] = np.mean(ld_vs, 0)
         else:
             df_vs['log2_fc_v'] = np.mean(lfc_vs, 0)
-        df_vs = df_vs.sort_values('bayes_factor_v', ascending=False)
 
     elif mode == 'change':
-        p1_kc = np.mean(np.abs(lfc_kc) >= delta, 0)
+        p1_kc = np.mean(np.abs(ld_kc) >= delta, 0)
         p2_kc = 1.0 - p1_kc
         bf_kc = np.log(p1_kc + eps) - np.log(p2_kc + eps)
         df_kc = pd.DataFrame({'mean_kc1': mean_kc1,
@@ -211,11 +238,10 @@ def differential_dynamics(adata,
                               'p_kc_change': p1_kc,
                               'p_kc_no_change': p2_kc,
                               'bayes_factor_kc': bf_kc,
-                              'log2_fc_kc': np.mean(lfc_kc, 0)},
+                              'log2_diff_kc': np.mean(ld_kc, 0)},
                              index=adata.var_names)
-        df_kc = df_kc.sort_values('bayes_factor_kc', ascending=False)
 
-        p1_rho = np.mean(np.abs(lfc_rho) >= delta, 0)
+        p1_rho = np.mean(np.abs(ld_rho) >= delta, 0)
         p2_rho = 1.0 - p1_rho
         bf_rho = np.log(p1_rho + eps) - np.log(p2_rho + eps)
         df_rho = pd.DataFrame({'mean_rho1': mean_rho1,
@@ -223,9 +249,30 @@ def differential_dynamics(adata,
                                'p_rho_change': p1_rho,
                                'p_rho_no_change': p2_rho,
                                'bayes_factor_rho': bf_rho,
-                               'log2_fc_rho': np.mean(lfc_rho, 0)},
+                               'log2_diff_rho': np.mean(ld_rho, 0)},
                               index=adata.var_names)
-        df_rho = df_rho.sort_values('bayes_factor_rho', ascending=False)
+
+        p1_c = np.mean(np.abs(ld_c) >= delta, 0)
+        p2_c = 1.0 - p1_c
+        bf_c = np.log(p1_c + eps) - np.log(p2_c + eps)
+        df_c = pd.DataFrame({'mean_c1': mean_c1,
+                             'mean_c2': mean_c2,
+                             'p_c_change': p1_c,
+                             'p_c_no_change': p2_c,
+                             'bayes_factor_c': bf_c,
+                             'log2_diff_c': np.mean(ld_c, 0)},
+                            index=adata.var_names)
+
+        p1_u = np.mean(np.abs(lfc_u) >= delta, 0)
+        p2_u = 1.0 - p1_u
+        bf_u = np.log(p1_u + eps) - np.log(p2_u + eps)
+        df_u = pd.DataFrame({'mean_u1': mean_u1,
+                             'mean_u2': mean_u2,
+                             'p_u_change': p1_u,
+                             'p_u_no_change': p2_u,
+                             'bayes_factor_u': bf_u,
+                             'log2_fc_u': np.mean(lfc_u, 0)},
+                            index=adata.var_names)
 
         p1_s = np.mean(np.abs(lfc_s) >= delta, 0)
         p2_s = 1.0 - p1_s
@@ -254,82 +301,26 @@ def differential_dynamics(adata,
             df_vs['log2_fc_v'] = np.mean(lfc_vs, 0)
         df_vs = df_vs.sort_values('bayes_factor_v', ascending=False)
 
-    if output_raw:
-        return df_kc, df_rho, df_s, df_vs, (kc1, kc2), (rho1, rho2), (s1, s2), (vs1, vs2), (g1_corrected[10], g2_corrected[10])
-    else:
-        return df_kc, df_rho, df_s, df_vs
+    df_dd = pd.concat([df_kc, df_rho, df_c, df_u, df_s, df_vs], axis=1)
 
-
-def differential_dynamics_bin(adata,
-                              var1,
-                              var2,
-                              gene,
-                              t1,
-                              t2,
-                              s2=None,
-                              func='lfc',
-                              n_bins=50,
-                              n_samples=100,
-                              seed=0):
-    if not isinstance(gene, str):
-        raise ValueError("Please input only a single gene.")
-    t_both = np.concatenate([t1, t2])
-    steps = np.quantile(t_both, np.linspace(0, 1, n_bins + 1))
-    steps[0] = steps[0] - 1
-    steps[-1] = steps[-1] + 1
-    t_bins = np.digitize(t_both, steps)
-    t1_bins = np.digitize(t1, steps)
-    t2_bins = np.digitize(t2, steps)
-    gene_idx = adata.var_names == gene
-    var1_gene = var1[:, gene_idx]
-    var2_gene = var2[:, gene_idx]
-    if func == 'ld':
-        if s2 is None:
-            raise ValueError("Need to provide spliced counts for computing velocity log difference.")
-        mean_s2_gene = np.mean(s2[:, gene_idx])
-
-    rng = np.random.default_rng(seed=seed)
-    time_array, dd_array = [], []
-    for i in range(n_bins):
-        var1_bin = var1_gene[t1_bins == i]
-        var2_bin = var2_gene[t2_bins == i]
-        if len(var1_bin) < 10 or len(var2_bin) < 10:
-            continue
-        var1_bin_perm = rng.choice(var1_bin, n_samples)
-        var2_bin_perm = rng.choice(var2_bin, n_samples)
-        time_bin = np.mean(t_both[t_bins == i])
-        time_array.append(time_bin)
-        if func == 'lfc':
-            lfc_bin = log2_fold_change(np.abs(var1_bin_perm), np.abs(var2_bin_perm))
-            dd_array.append(np.mean(lfc_bin))
-        elif func == 'ld':
-            diff_bin = log2_difference(var1_bin_perm, var2_bin_perm, mean_s2_gene)
-            dd_array.append(np.mean(diff_bin))
-        else:
-            raise ValueError(f"Mode {func} not recognized. Must be either 'lfc' or 'ld'.")
-    time_array = np.array(time_array)
-    dd_array = np.array(dd_array)
-    bounds = np.quantile(t_both, [0.005, 0.995])
-    t_both_sorted = np.sort(t_both)
-    t_both_sorted = t_both_sorted[(t_both_sorted >= bounds[0]) & (t_both_sorted <= bounds[1])]
-
-    kernel = 1.0 * ExpSineSquared(1.0, 1.0, periodicity_bounds=(1e-2, 1e1)) + WhiteKernel(1e-1)
-    gaussian_process = GaussianProcessRegressor(kernel=kernel, random_state=seed, n_restarts_optimizer=10)
-    gaussian_process.fit(time_array.reshape(-1, 1), dd_array.reshape(-1, 1))
-    print(gaussian_process.kernel_)
-    mean_prediction, std_prediction = gaussian_process.predict(t_both_sorted.reshape(-1, 1), return_std=True)
-
-    plt.scatter(time_array, dd_array, label=f"Binned {'Log difference' if func == 'ld' else 'Log fold change'}")
-    plt.plot(t_both_sorted, mean_prediction, label="Mean prediction")
-    plt.plot(t_both_sorted, np.full_like(t_both_sorted, 0.0), label="Zero line", linestyle='--', color='black', alpha=0.5)
-    plt.fill_between(
-        t_both_sorted,
-        mean_prediction - 1.96 * std_prediction,
-        mean_prediction + 1.96 * std_prediction,
-        alpha=0.5,
-        label=r"Credible interval",
-    )
-    plt.legend()
-    plt.xlabel("Time")
-    plt.ylabel(f"{'Log difference' if func == 'ld' else 'Log fold change'}")
-    plt.title("Gaussian process regression on differential dynamics")
+    if group1 is None:
+        group1 = '1'
+    if group2 is None:
+        group2 = '2'
+    if save_raw:
+        adata.uns['differential_dynamics'] = {f'kc_{group1}': kc1,
+                                              f'kc_{group2}': kc2,
+                                              f'rho_{group1}': rho1,
+                                              f'rho_{group2}': rho2,
+                                              f'c_{group1}': c1,
+                                              f'c_{group2}': c2,
+                                              f'u_{group1}': u1,
+                                              f'u_{group2}': u2,
+                                              f's_{group1}': s1,
+                                              f's_{group2}': s2,
+                                              f'v_{group1}': vs1,
+                                              f'v_{group2}': vs2,
+                                              f't_{group1}': g1_corrected[10],
+                                              f't_{group2}': g2_corrected[10]
+                                             }
+    return df_dd
