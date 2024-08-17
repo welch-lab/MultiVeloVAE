@@ -1103,6 +1103,50 @@ def fold_change(v1, v2, eps=1e-8):
     return v1 / (v2 + eps)
 
 
+# Taken from https://matplotlib.org/stable/gallery/lines_bars_and_markers/multicolored_line.html
+def colored_line_between_pts(x, y, c, ax, **lc_kwargs):
+    """
+    Plot a line with a color specified between (x, y) points by a third value.
+
+    It does this by creating a collection of line segments between each pair of
+    neighboring points. The color of each segment is determined by the
+    made up of two straight lines each connecting the current (x, y) point to the
+    midpoints of the lines connecting the current point with its two neighbors.
+    This creates a smooth line with no gaps between the line segments.
+
+    Parameters
+    ----------
+    x, y : array-like
+        The horizontal and vertical coordinates of the data points.
+    c : array-like
+        The color values, which should have a size one less than that of x and y.
+    ax : Axes
+        Axis object on which to plot the colored line.
+    **lc_kwargs
+        Any additional arguments to pass to matplotlib.collections.LineCollection
+        constructor. This should not include the array keyword argument because
+        that is set to the color argument. If provided, it will be overridden.
+
+    Returns
+    -------
+    matplotlib.collections.LineCollection
+        The generated line collection representing the colored line.
+    """
+    # Create a set of line segments so that we can color them individually
+    # This creates the points as an N x 1 x 2 array so that we can stack points
+    # together easily to get the segments. The segments array for line collection
+    # needs to be (numlines) x (points per line) x 2 (for x and y)
+    from matplotlib.collections import LineCollection
+    points = np.array([x, y]).T.reshape(-1, 1, 2)
+    segments = np.concatenate([points[:-1], points[1:]], axis=1)
+    lc = LineCollection(segments, **lc_kwargs)
+
+    # Set the values used for colormapping
+    lc.set_array(c)
+
+    return ax.add_collection(lc)
+
+
 def differential_dynamics_plot(adata,
                                genes,
                                group1=None,
@@ -1117,7 +1161,7 @@ def differential_dynamics_plot(adata,
                                seed=0,
                                n_cols=5,
                                figsize=None,
-                               pointsize=70):
+                               plot_equal=True):
     eps = 1e-8
     if isinstance(genes, str) or isinstance(genes, int):
         genes = [genes]
@@ -1137,8 +1181,7 @@ def differential_dynamics_plot(adata,
     t2 = adata.uns['differential_dynamics'][f't_{group2}']
     t_both = np.concatenate([t1, t2])
     steps = np.quantile(t_both, np.linspace(0, 1, n_bins + 1))
-    steps[0] = steps[0] - 1
-    steps[-1] = steps[-1] + 1
+    steps = steps[1:-1]
     t_bins = np.digitize(t_both, steps)
     t1_bins = np.digitize(t1, steps)
     t2_bins = np.digitize(t2, steps)
@@ -1154,7 +1197,6 @@ def differential_dynamics_plot(adata,
 
     if color_by is not None:
         from pandas.api.types import is_categorical_dtype
-
         if color_by not in adata.obs:
             raise ValueError(f"Color key {color_by} not found in adata.obs.")
         elif not is_categorical_dtype(adata.obs[color_by]) or not color_by+'_colors' in adata.uns.keys():
@@ -1195,7 +1237,7 @@ def differential_dynamics_plot(adata,
             else:
                 diff_bin = difference(var1_bin_perm, var2_bin_perm, mean_norm_gene)
                 dd_array.append(np.mean(diff_bin))
-            p1 = np.mean(var1_bin_perm > var2_bin_perm, 0)
+            p1 = np.mean(var1_bin_perm > var2_bin_perm)
             bf_array.append(np.log(p1 + eps) - np.log(1 - p1 + eps))
         time_array = np.array(time_array)
         dd_array = np.array(dd_array)
@@ -1211,26 +1253,33 @@ def differential_dynamics_plot(adata,
         row = count // n_cols
         col = count % n_cols
         ax = axs[row, col]
-        ax.plot(t_both_sorted, mean_prediction, label="Mean prediction", color='black', alpha=0.6)
-        if color_by is None:
-            ax.plot(t_both_sorted, np.full_like(t_both_sorted, 0.0), label="Zero line", linestyle='--', color='black', alpha=0.6)
+
+        if np.all(np.isclose(bf_array, bf_array[0])):
+            ax.plot(t_both_sorted, mean_prediction, label="Mean prediction", color='black', alpha=0.6)
         else:
-            ax.scatter(cell_time, np.full_like(cell_time, 0.0), label="Zero line", c=color_array, s=10, marker='_')
+            bf_array_mid = (np.array(bf_array)[:-1] + np.array(bf_array)[1:]) / 2
+            bf_array_mid = np.concatenate([[bf_array_mid[0]], bf_array_mid, [bf_array_mid[-1]]])
+            t_sorted_bins = np.digitize(t_both_sorted, time_array)
+            colored_line_between_pts(t_both_sorted, mean_prediction, bf_array_mid[t_sorted_bins], ax, linewidth=5, cmap="viridis", label='Mean prediction\ncolored by BF')
+        if plot_equal:
+            if color_by is None:
+                ax.plot(t_both_sorted,
+                        np.zeros_like(t_both_sorted) if func == 'ld' else np.ones_like(t_both_sorted),
+                        label='Zero line' if func == 'ld' else 'One line',
+                        linestyle='--', color='black', alpha=0.6)
+            else:
+                ax.scatter(cell_time,
+                           np.zeros_like(cell_time) if func == 'ld' else np.ones_like(cell_time),
+                           label=f"Zero line\ncolored by {color_by}" if func == 'ld' else f"One line\ncolored by {color_by}",
+                           c=color_array, s=20, marker='|')
         ax.fill_between(
             t_both_sorted,
             mean_prediction - 1.96 * std_prediction,
             mean_prediction + 1.96 * std_prediction,
             alpha=0.4,
             label=r"Credible interval",
-            facecolor='tab:orange'
+            facecolor='gray'
         )
-        if np.all(np.isclose(bf_array, bf_array[0])):
-            vmin = np.log(eps) - np.log(1+eps)
-            vmax = np.log(1+eps) - np.log(eps)
-        else:
-            vmin = None
-            vmax = None
-        ax.scatter(time_array, dd_array, c=bf_array, cmap='coolwarm', label=f"Binned {'differences' if func == 'ld' else 'fold changes'}\ncolored by BF", s=pointsize, alpha=0.5, vmin=vmin, vmax=vmax)
         ax.set_xlabel("Time")
         ax.set_ylabel(f"{'Difference' if func == 'ld' else 'Fold change'}")
         ax.set_title(f'{gene}', fontsize=11)
