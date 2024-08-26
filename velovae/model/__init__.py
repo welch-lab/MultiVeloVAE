@@ -6,7 +6,7 @@ from .model_util_chrom import ode, ode_numpy, knn_approx, get_x0, cosine_similar
 from .model_util_chrom import aggregate_peaks_10x, velocity_graph, is_outlier, regress_out, filter_genes_dispersion
 from .velocity_chrom import rna_velocity_vae
 from .differential_chrom import log2_difference, log2_fold_change, differential_dynamics
-from .training_data_chrom import SCData
+from .training_data_chrom import SCData, SCDataE
 
 __all__ = [
     "VAE",
@@ -33,5 +33,6 @@ __all__ = [
     "log2_difference",
     "log2_fold_change",
     "differential_dynamics",
-    "SCData"
+    "SCData",
+    "SCDataE"
     ]

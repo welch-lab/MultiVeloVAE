@@ -17,6 +17,7 @@ def rna_velocity_vae(adata,
                      use_raw=False,
                      rna_only=False,
                      likelihood_thred=None,
+                     use_only_ref=True,
                      sigma=None,
                      approx=False):
     n_batch = 0
@@ -113,32 +114,51 @@ def rna_velocity_vae(adata,
             c = (adata.layers[f"{key}_chat"]-offset_c)/scaling_c
             u = (adata.layers[f"{key}_uhat"]-offset_u)/scaling_u
             s = (adata.layers[f"{key}_shat"]-offset_s)/scaling_s
-            adata.layers["c_scaled"] = c
-            adata.layers["u_scaled"] = u
-            adata.layers["s_scaled"] = s
+            adata.layers["chat_scaled"] = c
+            adata.layers["uhat_scaled"] = u
+            adata.layers["shat_scaled"] = s
         elif f"{key}_chat_batch" in adata.layers and f"{key}_uhat_batch" in adata.layers and f"{key}_shat_batch" in adata.layers:
             c = (adata.layers[f"{key}_chat_batch"]-offset_c_batch)/scaling_c_batch
             u = (adata.layers[f"{key}_uhat_batch"]-offset_u_batch)/scaling_u_batch
             s = (adata.layers[f"{key}_shat_batch"]-offset_s_batch)/scaling_s_batch
-            adata.layers["c_scaled"] = c
-            adata.layers["u_scaled"] = u
-            adata.layers["s_scaled"] = s
+            adata.layers["chat_scaled"] = c
+            adata.layers["uhat_scaled"] = u
+            adata.layers["shat_scaled"] = s
         else:
             tau = np.clip(t - t0, 0, None).reshape(-1, 1)
-            c, u, s = pred_exp_numpy(tau, (c0-offset_c)/scaling_c, (u0-offset_u)/scaling_u, (s0-offset_s)/scaling_s, kc, alpha_c, rho, alpha, beta, gamma)
+            c, u, s = pred_exp_numpy(tau, c0, u0, s0, kc, alpha_c, rho, alpha, beta, gamma)
             c, u, s = np.clip(c, 0, 1), np.clip(u, 0, None), np.clip(s, 0, None)
             adata.layers["chat"] = c * scaling_c + offset_c
             adata.layers["uhat"] = u * scaling_u + offset_u
             adata.layers["shat"] = s * scaling_s + offset_s
         if batch_correction:
-            adata.layers["c_leveled"] = (adata_atac.layers['Mc']-offset_c_batch)/scaling_c_batch * scaling_c + offset_c
-            adata.layers["u_leveled"] = (adata.layers['Mu']-offset_u_batch)/scaling_u_batch * scaling_u + offset_u
-            adata.layers["s_leveled"] = (adata.layers['Ms']-offset_s_batch)/scaling_s_batch * scaling_s + offset_s
+            c_mean_adjust = np.zeros((n_batch, adata.n_vars))
+            u_mean_adjust = np.zeros((n_batch, adata.n_vars))
+            s_mean_adjust = np.zeros((n_batch, adata.n_vars))
+            c_std_adjust = np.zeros((n_batch, adata.n_vars))
+            u_std_adjust = np.zeros((n_batch, adata.n_vars))
+            s_std_adjust = np.zeros((n_batch, adata.n_vars))
+            for i in range(n_batch):
+                c_mean_adjust[i] = np.mean(adata.layers[f"{key}_chat_batch"][batch==i], 0) - np.mean(adata.layers[f"{key}_chat"][batch==i], 0)
+                u_mean_adjust[i] = np.mean(adata.layers[f"{key}_uhat_batch"][batch==i], 0) - np.mean(adata.layers[f"{key}_uhat"][batch==i], 0)
+                s_mean_adjust[i] = np.mean(adata.layers[f"{key}_shat_batch"][batch==i], 0) - np.mean(adata.layers[f"{key}_shat"][batch==i], 0)
+                c_std_adjust[i] = np.std(adata.layers[f"{key}_chat_batch"][batch==i], 0) / np.std(adata.layers[f"{key}_chat"][batch==i], 0)
+                u_std_adjust[i] = np.std(adata.layers[f"{key}_uhat_batch"][batch==i], 0) / np.std(adata.layers[f"{key}_uhat"][batch==i], 0)
+                s_std_adjust[i] = np.std(adata.layers[f"{key}_shat_batch"][batch==i], 0) / np.std(adata.layers[f"{key}_shat"][batch==i], 0)
+            c_mean_adjust = np.dot(onehot, c_mean_adjust)
+            u_mean_adjust = np.dot(onehot, u_mean_adjust)
+            s_mean_adjust = np.dot(onehot, s_mean_adjust)
+            c_std_adjust = np.dot(onehot, c_std_adjust)
+            u_std_adjust = np.dot(onehot, u_std_adjust)
+            s_std_adjust = np.dot(onehot, s_std_adjust)
+            adata.layers["c_leveled"] = (adata_atac.layers['Mc'] - c_mean_adjust) / c_std_adjust
+            adata.layers["u_leveled"] = (adata.layers['Mu']- u_mean_adjust) / u_std_adjust
+            adata.layers["s_leveled"] = (adata.layers['Ms']- s_mean_adjust) / s_std_adjust
 
     if approx:
-        v = (s - s0)/((t - t0).reshape(-1, 1))
-        vu = (u - u0)/((t - t0).reshape(-1, 1))
-        vc = (c - c0)/((t - t0).reshape(-1, 1))
+        v = (s - (s0*scaling_s+offset_s)) / ((t - t0).reshape(-1, 1))
+        vu = (u - (u0*scaling_u+offset_u)) / ((t - t0).reshape(-1, 1))
+        vc = (c - (c0*scaling_c+offset_c)) / ((t - t0).reshape(-1, 1))
     elif batch_correction or batch_key is None or batch_key not in adata.obs:
         v = beta * u - gamma * s
         vu = rho * alpha * c - beta * u
@@ -172,7 +192,7 @@ def rna_velocity_vae(adata,
         else:
             likelihood_thred = 0.025
     adata.var[f'{key}_velocity_genes'] = adata.var['quantile_genes'] & (adata.var[f"{key}_likelihood"] > likelihood_thred)
-    if ref_batch is not None and f"{batch_hvg_key}-{batch_dic_rev[ref_batch]}" in adata.var:
+    if ref_batch is not None and use_only_ref and f"{batch_hvg_key}-{batch_dic_rev[ref_batch]}" in adata.var:
         adata.var[f'{key}_velocity_genes'] = adata.var[f'{key}_velocity_genes'] & adata.var[f"{batch_hvg_key}-{batch_dic_rev[ref_batch]}"]
     print(f"Selected {np.sum(adata.var[f'{key}_velocity_genes'])} velocity genes.")
     if np.sum(adata.var[f'{key}_velocity_genes']) < 0.2 * adata.n_vars:

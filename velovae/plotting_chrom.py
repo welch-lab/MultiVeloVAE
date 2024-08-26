@@ -366,9 +366,9 @@ def plot_vel(t,
             colors = np.array([cell_type_colors[type_] for type_ in cell_types])
         for i, type_ in enumerate(cell_types):
             mask_type = cell_labels == type_
-            ax[0].scatter(t[mask_type], chat[mask_type], color=colors[i % len(colors)], s=8.0, alpha=0.3, label=type_, edgecolors='none')
-            ax[1].scatter(t[mask_type], uhat[mask_type], color=colors[i % len(colors)], s=8.0, alpha=0.3, label=type_, edgecolors='none')
-            ax[2].scatter(t[mask_type], shat[mask_type], color=colors[i % len(colors)], s=8.0, alpha=0.3, label=type_, edgecolors='none')
+            ax[0].scatter(t[mask_type], chat[mask_type], color=colors[i % len(colors)], s=10, alpha=0.4, label=type_, edgecolors='none')
+            ax[1].scatter(t[mask_type], uhat[mask_type], color=colors[i % len(colors)], s=10, alpha=0.4, label=type_, edgecolors='none')
+            ax[2].scatter(t[mask_type], shat[mask_type], color=colors[i % len(colors)], s=10, alpha=0.4, label=type_, edgecolors='none')
             handles, labels = ax[1].get_legend_handles_labels()
 
     plot_indices = np.random.choice(len(t), min(n_sample, len(t)), replace=False)
@@ -734,6 +734,8 @@ def dynamic_plot(adata,
     no_c = False
     if adata_atac is None or 'Mc' not in adata_atac.layers.keys():
         no_c = True
+    if batch_correction:
+        show_pred_only = True
     if show_pred_only:
         show_pred = False
 
@@ -754,15 +756,14 @@ def dynamic_plot(adata,
                 u = adata[:, gene].layers[f'{key}_uhat'].copy()
                 s = adata[:, gene].layers[f'{key}_shat'].copy()
         else:
-            if batch_correction:
-                u = adata[:, gene].layers['u_leveled'].copy()
-                s = adata[:, gene].layers['s_leveled'].copy()
-            else:
-                u = adata[:, gene].layers['Mu'].copy()
-                s = adata[:, gene].layers['Ms'].copy()
+            u = adata[:, gene].layers['Mu'].copy()
+            s = adata[:, gene].layers['Ms'].copy()
         if not no_c:
             if modalities is not None:
-                c = adata[:, gene].layers[modalities[0]].copy()
+                if modalities[0] in adata.layers.keys():
+                    c = adata[:, gene].layers[modalities[0]].copy()
+                else:
+                    c = adata_atac[:, gene].layers[modalities[0]].copy()
             elif by == 'velocity':
                 c = adata[:, gene].layers[f'{key}_velocity_c'].copy()
             elif show_pred_only:
@@ -771,10 +772,7 @@ def dynamic_plot(adata,
                 else:
                     c = adata[:, gene].layers[f'{key}_chat'].copy()
             else:
-                if batch_correction:
-                    c = adata[:, gene].layers['c_leveled'].copy()
-                else:
-                    c = adata_atac[:, gene].layers['Mc'].copy()
+                c = adata_atac[:, gene].layers['Mc'].copy()
         c = c.toarray() if sparse.issparse(c) else c
         u = u.toarray() if sparse.issparse(u) else u
         s = s.toarray() if sparse.issparse(s) else s
@@ -889,8 +887,11 @@ def scatter_plot(adata,
     if adata_atac is None or 'Mc' not in adata_atac.layers.keys():
         no_c = True
         by = 'us'
+    if batch_correction:
+        show_pred_only = True
     if show_pred_only:
         show_pred = False
+
     if by == 'cus':
         fig, axs = plt.subplots(-(-gn // n_cols), n_cols, squeeze=False, figsize=(3.2*n_cols, 2.7*(-(-gn // n_cols))) if figsize is None else figsize, subplot_kw={'projection': '3d'})
     else:
@@ -910,12 +911,8 @@ def scatter_plot(adata,
                 u = adata[:, gene].layers[modalities[-2]].copy()
                 s = adata[:, gene].layers[modalities[-1]].copy()
             else:
-                if batch_correction:
-                    u = adata[:, gene].layers['u_leveled'].copy()
-                    s = adata[:, gene].layers['s_leveled'].copy()
-                else:
-                    u = adata[:, gene].layers['Mu'].copy() if 'Mu' in adata.layers else adata[:, gene].layers['unspliced'].copy()
-                    s = adata[:, gene].layers['Ms'].copy() if 'Ms' in adata.layers else adata[:, gene].layers['spliced'].copy()
+                u = adata[:, gene].layers['Mu'].copy() if 'Mu' in adata.layers else adata[:, gene].layers['unspliced'].copy()
+                s = adata[:, gene].layers['Ms'].copy() if 'Ms' in adata.layers else adata[:, gene].layers['spliced'].copy()
         u = u.toarray() if sparse.issparse(u) else u
         s = s.toarray() if sparse.issparse(s) else s
         u, s = np.ravel(u), np.ravel(s)
@@ -927,12 +924,12 @@ def scatter_plot(adata,
                     c = adata[:, gene].layers[f'{key}_chat'].copy()
             else:
                 if modalities is not None:
-                    c = adata[:, gene].layers[modalities[0]].copy()
-                else:
-                    if batch_correction:
-                        c = adata[:, gene].layers['c_leveled'].copy()
+                    if modalities[0] in adata.layers.keys():
+                        c = adata[:, gene].layers[modalities[0]].copy()
                     else:
-                        c = adata_atac[:, gene].layers['Mc'].copy()
+                        c = adata_atac[:, gene].layers[modalities[0]].copy()
+                else:
+                    c = adata_atac[:, gene].layers['Mc'].copy()
             c = c.toarray() if sparse.issparse(c) else c
             c = np.ravel(c)
 
@@ -1049,18 +1046,16 @@ def scatter_plot(adata,
             if f'{key}_likelihood' in adata.var and not np.all(adata.var[f'{key}_likelihood'].values == -1):
                 title += f" {adata[:,gene].var[f'{key}_likelihood'].values[0]:.3g}"
         ax.set_title(f'{title}', fontsize=11)
-        if batch_correction:
-            prefix = 'leveled '
         if by == 'us':
-            ax.set_xlabel(prefix + 'spliced' if full_name else 's')
-            ax.set_ylabel(prefix + 'unspliced' if full_name else 'u')
+            ax.set_xlabel('spliced' if full_name else 's')
+            ax.set_ylabel('unspliced' if full_name else 'u')
         elif by == 'cu':
-            ax.set_xlabel(prefix + 'unspliced' if full_name else 'u')
-            ax.set_ylabel(prefix + 'chromatin' if full_name else 'c')
+            ax.set_xlabel('unspliced' if full_name else 'u')
+            ax.set_ylabel('chromatin' if full_name else 'c')
         elif by == 'cus':
-            ax.set_xlabel(prefix + 'spliced' if full_name else 's')
-            ax.set_ylabel(prefix + 'unspliced' if full_name else 'u')
-            ax.set_zlabel(prefix + 'chromatin' if full_name else 'c')
+            ax.set_xlabel('spliced' if full_name else 's')
+            ax.set_ylabel('unspliced' if full_name else 'u')
+            ax.set_zlabel('chromatin' if full_name else 'c')
         if by in ['us', 'cu']:
             if not axis_on:
                 ax.xaxis.set_ticks_position('none')
@@ -1161,7 +1156,11 @@ def differential_dynamics_plot(adata,
                                seed=0,
                                n_cols=5,
                                figsize=None,
-                               plot_equal=True):
+                               plot_equal=True,
+                               axis_on=True,
+                               frame_on=True,
+                               title=True,
+                               legend=True):
     eps = 1e-8
     if isinstance(genes, str) or isinstance(genes, int):
         genes = [genes]
@@ -1283,13 +1282,24 @@ def differential_dynamics_plot(adata,
         ax.set_xlabel("Time")
         ax.set_ylabel(f"{'Difference' if func == 'ld' else 'Fold change'}")
         ax.set_title(f'{gene}', fontsize=11)
+        if not axis_on:
+            ax.xaxis.set_ticks_position('none')
+            ax.yaxis.set_ticks_position('none')
+            ax.get_xaxis().set_visible(False)
+            ax.get_yaxis().set_visible(False)
+        if not frame_on:
+            ax.xaxis.set_ticks_position('none')
+            ax.yaxis.set_ticks_position('none')
+            ax.set_frame_on(False)
         count += 1
     if len(genes) > n_cols:
         for i in range(col+1, n_cols):
             fig.delaxes(axs[row, i])
-    plt.suptitle(f"Gaussian process regression on differential dynamics on {var}", fontsize=12+2*min(n_cols, len(genes)), y=1.01)
-    handles, labels = ax.get_legend_handles_labels()
-    fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(1.6-0.1*min(n_cols, len(genes)), 0.8), fontsize=11)
+    if title:
+        plt.suptitle(f"Gaussian process regression on differential dynamics on {var}", fontsize=12+2*min(n_cols, len(genes)), y=1.01)
+    if legend:
+        handles, labels = ax.get_legend_handles_labels()
+        fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(1.6-0.1*min(n_cols, len(genes)), 0.8), fontsize=11)
     fig.tight_layout()
 
 

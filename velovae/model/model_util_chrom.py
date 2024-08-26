@@ -1,4 +1,5 @@
 import logging
+import copy
 import numpy as np
 from anndata import AnnData
 import scanpy as sc
@@ -6,12 +7,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import scvelo as scv
+from umap.umap_ import fuzzy_simplicial_set
 from .scvelo_util import mRNA, tau_inv, test_bimodality
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 from sklearn.cluster import AgglomerativeClustering, KMeans
 from scipy.spatial import KDTree
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, coo_matrix, diags
 from scipy.stats import dirichlet, bernoulli, kstest
 from tqdm.notebook import tqdm_notebook
 from .model_util import assign_gene_mode_binary
@@ -681,31 +683,43 @@ def get_x0(c,
            c0_init=None,
            u0_init=None,
            s0_init=None,
-           forward=False):
-    N = len(neighbor_index)  # training + validation
-    c0 = np.zeros((N, c.shape[1])) if c0_init is None else np.tile(c0_init, (N, 1))
-    u0 = np.zeros((N, u.shape[1])) if u0_init is None else np.tile(u0_init, (N, 1))
-    s0 = np.zeros((N, s.shape[1])) if s0_init is None else np.tile(s0_init, (N, 1))
-    t0 = np.ones((N))*(t.min() - dt[0])
-    # Used as the default u/s counts at the final time point
-    t_98 = np.quantile(t, 0.98)
-    p = 0.98
-    while not np.any(t >= t_98) and p > 0.01:
-        p = p - 0.01
-        t_98 = np.quantile(t, p)
-    c_end, u_end, s_end = c[t >= t_98].mean(0), u[t >= t_98].mean(0), s[t >= t_98].mean(0)
+           t0_init=None):
+    N = len(neighbor_index)
+    if c0_init is None:
+        c0 = np.zeros((N, c.shape[1]), dtype=np.float32)
+        u0 = np.zeros((N, u.shape[1]), dtype=np.float32)
+        s0 = np.zeros((N, s.shape[1]), dtype=np.float32)
+        t0 = np.full((N, 1), t.min() - dt[0])
+    else:
+        c0 = np.tile(c0_init, (N, 1))
+        u0 = np.tile(u0_init, (N, 1))
+        s0 = np.tile(s0_init, (N, 1))
+        t0 = np.full((N, 1), t0_init)
 
     for i in range(N):
         if len(neighbor_index[i]) > 0:
-            c0[i] = c[neighbor_index[i]].mean(0)
-            u0[i] = u[neighbor_index[i]].mean(0)
-            s0[i] = s[neighbor_index[i]].mean(0)
-            t0[i] = t[neighbor_index[i]].mean()
-        elif forward:
-            c0[i] = c_end
-            u0[i] = u_end
-            s0[i] = s_end
-            t0[i] = t_98 + (t_98-t.min()) * 0.01
+            c_neigh = c[neighbor_index[i]]
+            u_neigh = u[neighbor_index[i]]
+            s_neigh = s[neighbor_index[i]]
+            t_neigh = t[neighbor_index[i]]
+            c_mean = c_neigh.mean(0)
+            u_mean = u_neigh.mean(0)
+            s_mean = s_neigh.mean(0)
+            t_mean = t_neigh.mean()
+            if len(neighbor_index[i]) >= 2:
+                c_std = c_neigh.std(0)
+                u_std = u_neigh.std(0)
+                s_std = s_neigh.std(0)
+                t_std = t_neigh.std()
+                c0[i] = np.clip(c_mean, c_mean-c_std, c_mean+c_std)
+                u0[i] = np.clip(u_mean, u_mean-u_std, u_mean+u_std)
+                s0[i] = np.clip(s_mean, s_mean-s_std, s_mean+s_std)
+                t0[i] = np.clip(t_mean, t_mean-t_std, t_mean+t_std)
+            else:
+                c0[i] = c_mean
+                u0[i] = u_mean
+                s0[i] = s_mean
+                t0[i] = t_mean
     return c0, u0, s0, t0
 
 
@@ -983,7 +997,7 @@ def assign_gene_mode(adata,
 
 
 # Modified from MultiVelo
-def aggregate_peaks_10x(adata_atac, peak_annot_file, linkage_file, peak_dist=10000, min_corr=0.5, gene_body=False, return_dict=False, verbose=False):
+def aggregate_peaks_10x(adata_atac, peak_annot_file, linkage_file, peak_dist=10000, min_corr=0.5, gene_body=False, return_dict=False, split_enhancer=False, verbose=False):
     """Peak to gene aggregation.
 
     This function aggregates promoter and enhancer peaks to genes based on the 10X linkage file.
@@ -1155,7 +1169,7 @@ def aggregate_peaks_10x(adata_atac, peak_annot_file, linkage_file, peak_dist=100
                             if gene2[1] != "promoter" and (gene2[0] not in gene_body_dict or peak2 not in gene_body_dict[gene2[0]]):
                                 corr_dict[gene] = [[peak2], [corr]]
 
-    gene_dict = promoter_dict
+    gene_dict = copy.deepcopy(promoter_dict)
     enhancer_dict = {}
     promoter_genes = list(promoter_dict.keys())
     if gene_body:
@@ -1184,21 +1198,163 @@ def aggregate_peaks_10x(adata_atac, peak_annot_file, linkage_file, peak_dist=100
     # aggregate to genes
     adata_atac_X_copy = adata_atac.X.toarray()
     gene_mat = np.zeros((adata_atac.shape[0], len(promoter_genes)))
+    if split_enhancer:
+        promoter_mat = np.zeros((adata_atac.shape[0], len(promoter_genes)))
+        promoter_peak_idx = []
     var_names_dict = {x: i for i, x in enumerate(adata_atac.var_names.to_numpy())}
     for i, gene in tqdm_notebook(enumerate(promoter_genes), total=len(promoter_genes)):
         peaks = gene_dict[gene]
         for peak in peaks:
             if peak in var_names_dict:
                 gene_mat[:, i] += adata_atac_X_copy[:, var_names_dict[peak]]
+        if split_enhancer:
+            if gene in promoter_dict:
+                for peak in promoter_dict[gene]:
+                    if peak in var_names_dict:
+                        promoter_mat[:, i] += adata_atac_X_copy[:, var_names_dict[peak]]
+                        promoter_peak_idx.append(var_names_dict[peak])
     gene_mat[gene_mat < 0] = 0
     gene_mat = AnnData(X=csr_matrix(gene_mat))
     gene_mat.obs_names = pd.Index(list(adata_atac.obs_names))
     gene_mat.var_names = pd.Index(promoter_genes)
+    if split_enhancer:
+        promoter_mat[promoter_mat < 0] = 0
+        gene_mat.layers['promoter'] = csr_matrix(promoter_mat)
+        gene_mat.obs['n_counts'] = adata_atac.X.sum(1)
+        filt = ~np.isin(np.arange(adata_atac.n_vars), np.unique(promoter_peak_idx))
+        enhancer_mat = adata_atac_X_copy[:, filt]
+        enhancer_mat[enhancer_mat < 0] = 0
+        non_zero = enhancer_mat.sum(0) > 0
+        gene_mat.obsm['enhancer'] = csr_matrix(enhancer_mat[:, non_zero])
+        gene_mat.uns['enhancer_names'] = adata_atac.var_names.to_numpy()[filt][non_zero]
     gene_mat = gene_mat[:, gene_mat.X.sum(0) > 0]
     if return_dict:
         return gene_mat, promoter_dict, enhancer_dict
     else:
         return gene_mat
+
+
+def tfidf_norm(adata_atac, scale_factor=1e4, copy=False):
+    """TF-IDF normalization.
+
+    This function normalizes counts in an AnnData object with TF-IDF.
+
+    Parameters
+    ----------
+    adata_atac: :class:`~anndata.AnnData`
+        ATAC anndata object.
+    scale_factor: `float` (default: 1e4)
+        Value to be multiplied after normalization.
+    copy: `bool` (default: `False`)
+        Whether to return a copy or modify `.X` directly.
+
+    Returns
+    -------
+    If `copy==True`, a new ATAC anndata object which stores normalized counts in `.X`.
+    """
+    npeaks = adata_atac.X.sum(1)
+    npeaks_inv = csr_matrix(1.0/npeaks)
+    tf = adata_atac.X.multiply(npeaks_inv)
+    idf = diags(np.ravel(adata_atac.X.shape[0] / adata_atac.X.sum(0))).log1p()
+    if copy:
+        adata_atac_copy = adata_atac.copy()
+        adata_atac_copy.X = tf.dot(idf) * scale_factor
+    else:
+        adata_atac.X = tf.dot(idf) * scale_factor
+
+    if 'promoter' in adata_atac.layers.keys():
+        npeaks = np.clip(adata_atac.layers['promoter'].sum(1), 1e-6, None)
+        npeaks_inv = csr_matrix(1.0/npeaks)
+        tf = adata_atac.layers['promoter'].multiply(npeaks_inv)
+        idf = diags(np.ravel(adata_atac.layers['promoter'].shape[0] / adata_atac.layers['promoter'].sum(0))).log1p()
+        if copy:
+            adata_atac_copy.layers['Mp'] = tf.dot(idf) * scale_factor
+        else:
+            adata_atac.layers['Mp'] = tf.dot(idf) * scale_factor
+    if 'enhancer' in adata_atac.obsm.keys():
+        if 'n_counts' in adata_atac.obs.keys():
+            npeaks = np.clip(adata_atac.obs['n_counts'], 1e-6, None)
+        else:
+            npeaks = np.clip(adata_atac.obsm['enhancer'].sum(1), 1e-6, None)
+        npeaks_inv = csr_matrix(1.0/npeaks)
+        tf = adata_atac.obsm['enhancer'].multiply(npeaks_inv)
+        idf = diags(np.ravel(adata_atac.obsm['enhancer'].shape[0] / adata_atac.obsm['enhancer'].sum(0))).log1p()
+        if copy:
+            adata_atac_copy.obsm['Me'] = tf.dot(idf) * scale_factor
+        else:
+            adata_atac.obsm['Me'] = tf.dot(idf) * scale_factor
+    if copy:
+        return adata_atac_copy
+
+
+# From scvelo https://github.com/theislab/scvelo/blob/main/scvelo/preprocessing/neighbors.py
+def select_connectivities(connectivities, n_neighbors=None):
+    C = connectivities.copy()
+    n_counts = (C > 0).sum(1).A1 if issparse(C) else (C > 0).sum(1)
+    n_neighbors = (
+        n_counts.min() if n_neighbors is None else min(n_counts.min(), n_neighbors)
+    )
+    rows = np.where(n_counts > n_neighbors)[0]
+    cumsum_neighs = np.insert(n_counts.cumsum(), 0, 0)
+    dat = C.data
+
+    for row in rows:
+        n0, n1 = cumsum_neighs[row], cumsum_neighs[row + 1]
+        rm_idx = n0 + dat[n0:n1].argsort()[::-1][n_neighbors:]
+        dat[rm_idx] = 0
+    C.eliminate_zeros()
+    return C
+
+
+# Modified from MultiVelo
+def knn_smooth_chrom(adata_atac, nn_idx=None, nn_dist=None, conn=None, n_neighbors=None):
+    """KNN smoothing.
+
+    This function smooth (impute) the count matrix with k nearest neighbors.
+    The inputs can be either KNN index and distance matrices or a pre-computed
+    connectivities matrix (for example in adata_rna object).
+
+    Parameters
+    ----------
+    adata_atac: :class:`~anndata.AnnData`
+        ATAC anndata object.
+    nn_idx: `np.darray` (default: `None`)
+        KNN index matrix of size (cells, k).
+    nn_dist: `np.darray` (default: `None`)
+        KNN distance matrix of size (cells, k).
+    conn: `csr_matrix` (default: `None`)
+        Pre-computed connectivities matrix.
+    n_neighbors: `int` (default: `None`)
+        Top N neighbors to extract for each cell in the connectivities matrix.
+
+    Returns
+    -------
+    `.layers['Mc']` stores imputed values.
+    """
+    if nn_idx is not None and nn_dist is not None:
+        if nn_idx.shape[0] != adata_atac.shape[0]:
+            raise ValueError('Number of rows of KNN indices does not equal to number of observations.')
+        if nn_dist.shape[0] != adata_atac.shape[0]:
+            raise ValueError('Number of rows of KNN distances does not equal to number of observations.')
+        X = coo_matrix(([], ([], [])), shape=(nn_idx.shape[0], 1))
+        conn, sigma, rho, dists = fuzzy_simplicial_set(X, nn_idx.shape[1], None, None, knn_indices=nn_idx-1, knn_dists=nn_dist, return_dists=True)
+    elif conn is not None:
+        pass
+    else:
+        raise ValueError('Please input nearest neighbor indices and distances, or a connectivities matrix of size n x n, with columns being neighbors.' +
+                         ' For example, RNA connectivities can usually be found in adata.obsp.')
+    conn = conn.tocsr().copy()
+    n_counts = (conn > 0).sum(1).A1
+    if n_neighbors is not None and n_neighbors < n_counts.min():
+        conn = select_connectivities(conn, n_neighbors)
+    conn.setdiag(1)
+    conn_norm = conn.multiply(1.0 / conn.sum(1)).tocsr()
+    adata_atac.layers['Mc'] = csr_matrix.dot(conn_norm, adata_atac.X)
+    if 'promoter' in adata_atac.layers.keys():
+        adata_atac.layers['Mp'] = csr_matrix.dot(conn_norm, adata_atac.layers['Mp'])
+    if 'enhancer' in adata_atac.obsm.keys():
+        adata_atac.obsm['Me'] = csr_matrix.dot(conn_norm, adata_atac.obsm['Me'])
+    adata_atac.obsp['connectivities'] = conn
 
 
 # Modified from MultiVelo
@@ -1215,12 +1371,9 @@ def velocity_graph(adata, key='vae', xkey=None, batch_corrected=False, velocity_
         adata.var[vkey+'_norm_genes'] = adata.var[vkey+'_genes']
     if xkey is None:
         if batch_corrected:
-            xkey = 's_leveled'
+            xkey = 'shat'
         else:
             xkey = 'Ms'
-    if xkey == 's_leveled' and 's_leveled' not in adata.layers.keys():
-        logger.warn('Batch corrected s_leveled matrix not found in layers. Using Ms instead.')
-        xkey = 'Ms'
     scv.tl.velocity_graph(adata, vkey=vkey+'_norm', xkey=xkey, **kwargs)
 
 

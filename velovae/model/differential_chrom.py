@@ -2,6 +2,7 @@ import logging
 import numpy as np
 from scipy.sparse import issparse
 import pandas as pd
+from .training_data_chrom import SCData, SCDataE
 logger = logging.getLogger(__name__)
 
 
@@ -68,11 +69,11 @@ def differential_dynamics(adata,
         idx2_bin = np.zeros(adata.n_obs, dtype=bool)
         idx2_bin[idx2] = True
     c = adata_atac.layers['Mc']
-    c = c.A if issparse(c) else c
+    c = c.toarray() if issparse(c) else c
     u = adata.layers['Mu']
-    u = u.A if issparse(u) else u
+    u = u.toarray() if issparse(u) else u
     s = adata.layers['Ms']
-    s = s.A if issparse(s) else s
+    s = s.toarray() if issparse(s) else s
 
     rng = np.random.default_rng(seed=seed)
     if batch_key is None:
@@ -110,8 +111,28 @@ def differential_dynamics(adata,
             g1_sample_idx = rng.choice(idx1, n_samples)
             g2_sample_idx = rng.choice(idx2, n_samples)
 
-    g1_corrected = model.test(c[g1_sample_idx], u[g1_sample_idx], s[g1_sample_idx], batch=(None if batch_correction else batch_array[g1_sample_idx]), sample=True, seed=seed)
-    g2_corrected = model.test(c[g2_sample_idx], u[g2_sample_idx], s[g2_sample_idx], batch=(None if batch_correction else batch_array[g2_sample_idx]), sample=True, seed=seed)
+    if c.shape != u.shape or c.shape != s.shape:
+        raise ValueError("c, u, and s must have the same shape.")
+    if c.ndim == 1:
+        c = c.reshape(1, -1)
+    if u.ndim == 1:
+        u = u.reshape(1, -1)
+    if s.ndim == 1:
+        s = s.reshape(1, -1)
+    x = np.concatenate((c, u, s), 1).astype(float)
+    if not model.config['split_enhancer']:
+        g1_dataset = SCData(x[g1_sample_idx], device=model.device)
+        g2_dataset = SCData(x[g2_sample_idx], device=model.device)
+    else:
+        e = adata_atac.obsm['Me']
+        e = e.toarray() if issparse(e) else e
+        if e.ndim == 1:
+            e = e.reshape(1, -1)
+        g1_dataset = SCDataE(x[g1_sample_idx], e[[g1_sample_idx]], device=model.device)
+        g2_dataset = SCDataE(x[g2_sample_idx], e[[g2_sample_idx]], device=model.device)
+
+    g1_corrected = model.test(g1_dataset, batch=(None if batch_correction else batch_array[g1_sample_idx]), sample=True, seed=seed)
+    g2_corrected = model.test(g2_dataset, batch=(None if batch_correction else batch_array[g2_sample_idx]), sample=True, seed=seed)
 
     kc1 = g1_corrected[11]
     kc2 = g2_corrected[11]
