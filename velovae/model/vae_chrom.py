@@ -363,7 +363,7 @@ class Decoder(nn.Module):
             self.t_init = self.t_init/self.t_init.max()*self.tmax
             if self.reinit:
                 toff = get_ts_global(self.t_init, u/scaling_u, s, 95)
-                alpha_c, alpha, beta, gamma, ton = reinit_params(c/scaling_c, u/scaling_u, s, self.t_init, toff)
+                alpha_c, alpha, beta, gamma, ton = reinit_params(c/scaling_c, u/scaling_u, s, self.t_init, toff, rna_only=self.rna_only, rna_only_idx=rna_only_idx)
 
         else:
             self.alpha_c_ = alpha_c
@@ -390,7 +390,7 @@ class Decoder(nn.Module):
                         t_eq[:, i] = hist_equal(t[:, i], self.tmax, 0.9, n_bin)
                     self.t_init = np.quantile(t_eq, 0.5, 1)
                 toff = get_ts_global(self.t_init, c/scaling_c, u/scaling_u, s, 95)
-                alpha_c, alpha, beta, gamma, ton = reinit_params(c/scaling_c, u/scaling_u, s, self.t_init, toff)
+                alpha_c, alpha, beta, gamma, ton = reinit_params(c/scaling_c, u/scaling_u, s, self.t_init, toff, rna_only=self.rna_only, rna_only_idx=rna_only_idx)
 
         if self.cvae:
             print("Computing scaling factors for each batch class.")
@@ -1334,7 +1334,7 @@ class VAEChrom():
                                        data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]/sigma_u,
                                        data_in[:, data_in.shape[1]//3*2:]/sigma_s), 1)
         else:
-            _, _, _, _, scaling_c, scaling_u, scaling_s, offset_c, offset_u, offset_s = self.decoder.reparameterize(condition, False, False, numpy=True)
+            _, _, _, _, scaling_c, scaling_u, scaling_s, offset_c, offset_u, offset_s = self.decoder.reparameterize(condition, False, False)
             data_in_scale = torch.cat(((data_in[:, :data_in.shape[1]//3]-offset_c)/scaling_c,
                                        (data_in[:, data_in.shape[1]//3:data_in.shape[1]//3*2]-offset_u)/scaling_u,
                                        (data_in[:, data_in.shape[1]//3*2:]-offset_s)/scaling_s), 1)
@@ -1702,11 +1702,11 @@ class VAEChrom():
                     shat_fw_res[i:j] = shat_fw[:, gene_idx].detach().cpu().numpy()
                 if "t" in output:
                     if self.config['t_network']:
-                        mu_t_out[i:j] = mu_tx.detach().cpu().squeeze().numpy()
-                        std_t_out[i:j] = std_tx.detach().cpu().squeeze().numpy()
+                        mu_t_out[i:j] = mu_tx.detach().cpu().numpy()
+                        std_t_out[i:j] = std_tx.detach().cpu().numpy()
                     else:
-                        mu_t_out[i:j] = mu_tx.detach().cpu().squeeze().numpy()[:, None]
-                        std_t_out[i:j] = std_tx.detach().cpu().squeeze().numpy()[:, None]
+                        mu_t_out[i:j] = mu_tx.detach().cpu().numpy()
+                        std_t_out[i:j] = std_tx.detach().cpu().numpy()
                     time_out[i:j] = t_.detach().cpu().squeeze().numpy()
                 if "z" in output:
                     mu_z_out[i:j] = mu_zx.detach().cpu().numpy()
@@ -1715,8 +1715,12 @@ class VAEChrom():
                     mu_e_out[i:j] = mu_ex.detach().cpu().numpy()
                     std_e_out[i:j] = std_ex.detach().cpu().numpy()
                 if "kc" in output:
+                    if kc.ndim == 3:
+                        kc = torch.sum(kc*w_hard, 1)
                     kc_res[i:j] = kc[:, gene_idx].detach().cpu().numpy()
                 if "rho" in output:
+                    if rho.ndim == 3:
+                        rho = torch.sum(rho*w_hard, 1)
                     rho_res[i:j] = rho[:, gene_idx].detach().cpu().numpy()
                 if "v" in output:
                     if vc.ndim == 3:
@@ -2209,9 +2213,7 @@ class VAEChrom():
         G = dataset.data.shape[1]//3
         out, _ = self.pred_all(dataset,
                                mode='train',
-                               output=["chat", "uhat", "shat"],
-                               gene_idx=np.array(range(G)),
-                               batch=dataset.batch)
+                               output=["chat", "uhat", "shat"])
         std_c = np.clip((out["chat"] - dataset.data[:, :G].cpu().numpy()).std(0), 0.01, None)
         std_u = np.clip((out["uhat"] - dataset.data[:, G:G*2].cpu().numpy()).std(0), 0.01, None)
         std_s = np.clip((out["shat"] - dataset.data[:, G*2:].cpu().numpy()).std(0), 0.01, None)

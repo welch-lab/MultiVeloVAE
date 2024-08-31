@@ -414,8 +414,45 @@ def get_ts_global(tgl, c, u, s, perc):
     return tsgl
 
 
-def reinit_gene(c, u, s, t, ts):
-    mask_c = (c >= np.mean(c[c < 1])) & (c < 1)
+def reinit_gene_rna(u, s, t, ts):
+    mask1_u = u >= np.quantile(u, 0.95)
+    mask1_s = s >= np.quantile(s, 0.95)
+    u1, s1 = np.median(u[mask1_u | mask1_s]), np.median(s[mask1_s | mask1_u])
+
+    if u1 == 0 or np.isnan(u1):
+        u1 = np.max(u)
+    if s1 == 0 or np.isnan(s1):
+        s1 = np.max(s)
+
+    t1 = np.median(t[mask1_u | mask1_s])
+    if t1 <= 0:
+        tm = np.max(t[mask1_u | mask1_s])
+        t1 = tm if tm > 0 else 1.0
+
+    mask2_u = (u >= u1*0.49) & (u <= u1*0.51) & (t <= ts)
+    mask2_s = (s >= s1*0.49) & (s <= s1*0.51) & (t <= ts)
+    if np.any(mask2_u) or np.any(mask2_s):
+        t2 = np.median(t[mask2_u | mask2_s])
+        if abs(t1 - t2) < 1e-3:
+            t1 = t2 + 1e-3
+        u2, _ = np.median(u[mask2_u]), np.median(s[mask2_s])
+        t0 = max(0, np.log((u1-u2) / (u1*np.exp(-t2) - u2*np.exp(-t1))))
+    else:
+        t0 = 0
+    beta = 1.0
+    alpha = u1/(1-np.exp(t0-t1)) if u1 > 0 else 0.1*np.random.rand()
+    if alpha <= 0 or np.isnan(alpha) or np.isinf(alpha):
+        alpha = u1
+    gamma = alpha / np.quantile(s, 0.95)
+    if gamma <= 0 or np.isnan(gamma) or np.isinf(gamma):
+        gamma = 2.0
+    return alpha, beta, gamma, t0
+
+
+def reinit_gene(c, u, s, t, ts, rna_only_idx=None):
+    if rna_only_idx is None:
+        rna_only_idx = np.zeros((len(c)), dtype=bool)
+    mask_c = (c >= np.mean(c[c < 1])) & (c < 1) & (~rna_only_idx)
     if np.sum(mask_c) < 5:
         mask_c = c >= np.mean(c)
     mask1_u = u >= np.quantile(u[mask_c], 0.95)
@@ -453,12 +490,16 @@ def reinit_gene(c, u, s, t, ts):
     return alpha_c, alpha, beta, gamma, t0
 
 
-def reinit_params(c, u, s, t, ts):
+def reinit_params(c, u, s, t, ts, rna_only=False, rna_only_idx=None):
     G = u.shape[1]
     alpha_c, alpha, beta, gamma, ton = np.zeros((G)), np.zeros((G)), np.zeros((G)), np.zeros((G)), np.zeros((G))
     for i in range(G):
-        alpha_c_g, alpha_g, beta_g, gamma_g, ton_g = reinit_gene(c[:, i], u[:, i], s[:, i], t, ts[i])
-        alpha_c[i] = alpha_c_g
+        if rna_only:
+            alpha_g, beta_g, gamma_g, ton_g = reinit_gene_rna(u[:, i], s[:, i], t, ts[i])
+            alpha_c[i] = 0
+        else:
+            alpha_c_g, alpha_g, beta_g, gamma_g, ton_g = reinit_gene(c[:, i], u[:, i], s[:, i], t, ts[i], rna_only_idx=rna_only_idx)
+            alpha_c[i] = alpha_c_g
         alpha[i] = alpha_g
         beta[i] = beta_g
         gamma[i] = gamma_g

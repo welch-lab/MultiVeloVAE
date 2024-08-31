@@ -1209,11 +1209,11 @@ def differential_dynamics_plot(adata,
             color_array = color_array[np.argsort(cell_time)]
             cell_time = np.sort(cell_time)
 
-    rng = np.random.default_rng(seed=seed)
     fig, axs = plt.subplots(-(-len(genes) // n_cols), min(n_cols, len(genes)), squeeze=False, figsize=(5*min(n_cols, len(genes)), 4.4*(-(-len(genes) // n_cols))) if figsize is None else figsize)
     fig.patch.set_facecolor('white')
     count = 0
     for gene in genes:
+        rng = np.random.default_rng(seed=seed)
         gene_idx = adata.var_names == gene
         var1_gene = var1[:, gene_idx]
         var2_gene = var2[:, gene_idx]
