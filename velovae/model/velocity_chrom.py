@@ -196,5 +196,5 @@ def rna_velocity_vae(adata,
         adata.var[f'{key}_velocity_genes'] = adata.var[f'{key}_velocity_genes'] & adata.var[f"{batch_hvg_key}-{batch_dic_rev[ref_batch]}"]
     print(f"Selected {np.sum(adata.var[f'{key}_velocity_genes'])} velocity genes.")
     if np.sum(adata.var[f'{key}_velocity_genes']) < 0.2 * adata.n_vars:
-        logger.warn('Less than 1/5 of genes assigned as velocity genes.')
+        logger.warn('Less than 1/5 of genes assigned as velocity genes. Consider reduring the number of rounds in Stage 2: n_refine (default 6).')
     adata.uns[f"{key}_velocity_params"] = {'mode': 'dynamical'}

@@ -267,10 +267,10 @@ def init_gene(c, u, s, percent, fit_scaling=True, tmax=1, rna_only_idx=None):
     scaling = np.clip(std_u / std_s, 1e-6, 1e6) if fit_scaling else 1.0
     if np.isnan(scaling):
         scaling = 1.0
-    u = u/scaling
+    u = u / scaling
     scaling_c = np.clip(np.percentile(c[~rna_only_idx], 99.5), 1e-3, None)
     c = c.copy()
-    c[~rna_only_idx] = c[~rna_only_idx]/scaling_c
+    c[~rna_only_idx] = c[~rna_only_idx] / scaling_c
     std_c_ = np.clip(np.std(c[~rna_only_idx]), 1e-6, None)
 
     # initialize beta and gamma from extreme quantiles of s

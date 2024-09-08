@@ -1,9 +1,23 @@
+import os
 import logging
 import numpy as np
 from scipy.sparse import issparse
 import pandas as pd
 from .training_data_chrom import SCData, SCDataE
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, ExpSineSquared, RationalQuadratic, WhiteKernel, ConstantKernel
+from scipy.stats.distributions import chi2
+from tqdm.auto import tqdm
+from joblib import Parallel, delayed
 logger = logging.getLogger(__name__)
+
+
+def difference(v1, v2, norm=0.1, eps=1e-8):
+    return (v1 - v2) / (norm + eps)
+
+
+def fold_change(v1, v2, eps=1e-8):
+    return v1 / (v2 + eps)
 
 
 def log2_difference(v1, v2, norm=0.1):
@@ -26,7 +40,7 @@ def differential_dynamics(adata,
                           batch_correction=True,
                           weight_batch_uniform=False,
                           mode='vanilla',
-                          signed_velocity=False,
+                          signed_velocity=True,
                           save_raw=False,
                           n_samples=5000,
                           delta=1,
@@ -150,7 +164,7 @@ def differential_dynamics(adata,
     c2 = g2_corrected[0]
     mean_c1 = np.mean(c1, 0)
     mean_c2 = np.mean(c2, 0)
-    ld_c = log2_difference(c1, c2, mean_c2)
+    lfc_c = log2_fold_change(c1, c2)
 
     u1 = g1_corrected[1]
     u2 = g2_corrected[1]
@@ -211,7 +225,7 @@ def differential_dynamics(adata,
                              'p1_c': p1_c,
                              'p2_c': p2_c,
                              'bayes_factor_c': bf_c,
-                             'log2_diff_c': np.mean(ld_c, 0)},
+                             'log2_fc_c': np.mean(lfc_c, 0)},
                              index=adata.var_names)
 
         p1_u = np.mean(u1 > u2, 0)
@@ -273,7 +287,7 @@ def differential_dynamics(adata,
                                'log2_diff_rho': np.mean(ld_rho, 0)},
                               index=adata.var_names)
 
-        p1_c = np.mean(np.abs(ld_c) >= delta, 0)
+        p1_c = np.mean(np.abs(lfc_c) >= delta, 0)
         p2_c = 1.0 - p1_c
         bf_c = np.log(p1_c + eps) - np.log(p2_c + eps)
         df_c = pd.DataFrame({'mean_c1': mean_c1,
@@ -281,7 +295,7 @@ def differential_dynamics(adata,
                              'p_c_change': p1_c,
                              'p_c_no_change': p2_c,
                              'bayes_factor_c': bf_c,
-                             'log2_diff_c': np.mean(ld_c, 0)},
+                             'log2_fc_c': np.mean(lfc_c, 0)},
                             index=adata.var_names)
 
         p1_u = np.mean(np.abs(lfc_u) >= delta, 0)
@@ -345,3 +359,185 @@ def differential_dynamics(adata,
                                               f't_{group2}': g2_corrected[10]
                                              }
     return df_dd
+
+
+def dd_func(var1_g1_gene,
+            var1_g2_gene,
+            var2_g1_gene,
+            var2_g2_gene,
+            mean_norm_gene,
+            t_both,
+            t_bins,
+            t1_bins,
+            t2_bins,
+            func,
+            n_bins,
+            n_samples,
+            seed,
+            kernel,
+            eps):
+    rng = np.random.default_rng(seed=seed)
+    if func == 'ld':
+        mean_norm_gene = mean_norm_gene if mean_norm_gene is not None else 1
+
+    time_array, dd_array = [], []
+    for i in range(n_bins):
+        time_bin = np.mean(t_both[t_bins == i])
+        time_array.append(time_bin)
+        var1_g1_bin = var1_g1_gene[t1_bins == i]
+        var1_g2_bin = var1_g2_gene[t2_bins == i]
+        if len(var1_g1_bin) < 10 or len(var1_g2_bin) < 10:
+            continue
+        var1_g1_bin_perm = rng.choice(var1_g1_bin, n_samples)
+        var1_g2_bin_perm = rng.choice(var1_g2_bin, n_samples)
+        if func == 'lfc':
+            fc_bin = fold_change(np.abs(var1_g1_bin_perm), np.abs(var1_g2_bin_perm))
+            dd_array.append(np.mean(fc_bin))
+        else:
+            diff_bin = difference(var1_g1_bin_perm, var1_g2_bin_perm, mean_norm_gene)
+            dd_array.append(np.mean(diff_bin))
+
+        if var2_g1_gene is not None:
+            var2_g1_bin = var2_g1_gene[t1_bins == i]
+            var2_g2_bin = var2_g2_gene[t2_bins == i]
+            if len(var2_g1_bin) < 10 or len(var2_g2_bin) < 10:
+                continue
+            var2_g1_bin_perm = rng.choice(var2_g1_bin, n_samples)
+            var2_g2_bin_perm = rng.choice(var2_g2_bin, n_samples)
+            if func == 'lfc':
+                fc_bin = fold_change(np.abs(var2_g1_bin_perm), np.abs(var2_g2_bin_perm))
+                dd_array[-1] /= np.mean(fc_bin + eps)
+            else:
+                diff_bin = difference(var2_g1_bin_perm, var2_g2_bin_perm, mean_norm_gene)
+                dd_array[-1] -= np.mean(diff_bin)
+
+    time_array = np.array(time_array)
+    dd_array = np.array(dd_array)
+    bounds = np.quantile(t_both, [0.005, 0.995])
+    t_both_sorted = np.sort(t_both)
+    t_both_sorted = t_both_sorted[(t_both_sorted >= bounds[0]) & (t_both_sorted <= bounds[1])]
+
+    if kernel == 'RBF':
+        kernel_ = 1.0 * RBF(1.0, length_scale_bounds=(0.1, 10.0)) + WhiteKernel(0.1)
+    elif kernel == 'ExpSineSquared':
+        kernel_ = 1.0 * ExpSineSquared(1.0, 1.0, length_scale_bounds=(0.1, 10.0), periodicity_bounds=(0.1, 10.0)) + WhiteKernel(0.1)
+    elif kernel == 'RationalQuadratic':
+        kernel_ = 1.0 * RationalQuadratic(1.0, 1.0, length_scale_bounds=(0.1, 10.0), alpha_bounds=(0.1, 10.0)) + WhiteKernel(0.1)
+    else:
+        raise ValueError(f"Kernel {kernel} not supported. Must be one of ['RBF', 'ExpSineSquared', 'RationalQuadratic'].")
+    gaussian_process = GaussianProcessRegressor(kernel=kernel_, random_state=seed, n_restarts_optimizer=10)
+    gaussian_process.fit(time_array.reshape(-1, 1), dd_array.reshape(-1, 1))
+    ll = gaussian_process.log_marginal_likelihood(gaussian_process.kernel_.theta)
+
+    const = 0.0 if func == 'ld' else 1.0
+    if var2_g1_gene is None:
+        kernel_constant = ConstantKernel(const, constant_value_bounds='fixed') + WhiteKernel(0.1)
+    else:
+        kernel_constant = ConstantKernel(const) + WhiteKernel(0.1)
+    gaussian_process_ = GaussianProcessRegressor(kernel=kernel_constant, random_state=seed, n_restarts_optimizer=10)
+    gaussian_process_.fit(time_array.reshape(-1, 1), dd_array.reshape(-1, 1))
+    ll_null = gaussian_process_.log_marginal_likelihood(gaussian_process_.kernel_.theta)
+    lrt = -2 * (ll_null - ll)
+    pval = chi2.sf(lrt, 1)
+    return pval
+
+
+def differential_decoupling(adata,
+                            genes=None,
+                            group1=None,
+                            group2=None,
+                            var1='kc',
+                            var2='rho',
+                            signed_velocity=True,
+                            n_bins=50,
+                            n_samples=100,
+                            seed=0,
+                            kernel='RBF',
+                            n_jobs=None):
+    eps = 1e-8
+    if isinstance(genes, str) or isinstance(genes, int):
+        genes = [genes]
+    elif genes is None:
+        genes = adata.var_names
+    gn = len(genes)
+    pval_list = np.full(gn, np.nan)
+    var_names_dict = {k: v for v, k in enumerate(adata.var_names)}
+    gene_idx = np.array([var_names_dict[gene] for gene in genes])
+    if group1 is None:
+        group1 = '1'
+    if group2 is None:
+        group2 = '2'
+    if var1 not in ['kc', 'rho', 'c', 'u', 's', 'v']:
+        raise ValueError(f"Variable {var1} not recognized. Must be one of ['kc', 'rho', 'c', 'u', 's', 'v'].")
+    if var1 == 'v':
+        var2 = None
+        print('Testing velocity. Setting var2 to None.')
+    if var2 is not None and var2 not in ['kc', 'rho', 'c', 'u', 's', 'v']:
+        raise ValueError(f"Variable {var2} not recognized. Must be one of ['kc', 'rho', 'c', 'u', 's', 'v'].")
+    default_func = {'kc': 'ld',
+                    'rho': 'ld',
+                    'c': 'lfc',
+                    'u': 'lfc',
+                    's': 'lfc',
+                    'v': 'ld' if signed_velocity else 'lfc'}
+    if var2 is not None and default_func[var1] != default_func[var2]:
+        raise ValueError(f"{var1} and {var2} have different differential functions. Please select variables with simialr distributions, such as (kc, rho) or (c, u, s).")
+    func = default_func[var1]
+    if f'{var1}_{group1}' not in adata.uns['differential_dynamics'].keys():
+        raise ValueError(f"{var1}_{group1} not found in adata.varm. Was differential_dynamics run with save_raw?")
+    if f'{var1}_{group2}' not in adata.uns['differential_dynamics'].keys():
+        raise ValueError(f"{var1}_{group2} not found in adata.varm. Was differential_dynamics run with save_raw?")
+    var1_g1 = adata.uns['differential_dynamics'][f'{var1}_{group1}'][:, gene_idx]
+    var1_g2 = adata.uns['differential_dynamics'][f'{var1}_{group2}'][:, gene_idx]
+    if var2 is not None:
+        if f'{var2}_{group1}' not in adata.uns['differential_dynamics'].keys():
+            raise ValueError(f"{var2}_{group1} not found in adata.varm. Was differential_dynamics run with save_raw?")
+        if f'{var2}_{group2}' not in adata.uns['differential_dynamics'].keys():
+            raise ValueError(f"{var2}_{group2} not found in adata.varm. Was differential_dynamics run with save_raw?")
+        var2_g1 = adata.uns['differential_dynamics'][f'{var2}_{group1}'][:, gene_idx]
+        var2_g2 = adata.uns['differential_dynamics'][f'{var2}_{group2}'][:, gene_idx]
+    t1 = adata.uns['differential_dynamics'][f't_{group1}']
+    t2 = adata.uns['differential_dynamics'][f't_{group2}']
+    t_both = np.concatenate([t1, t2])
+    steps = np.quantile(t_both, np.linspace(0, 1, n_bins + 1))
+    steps = steps[1:-1]
+    t_bins = np.digitize(t_both, steps)
+    t1_bins = np.digitize(t1, steps)
+    t2_bins = np.digitize(t2, steps)
+    if func == 'ld' and var1 == 'v':
+        mean_norm = np.mean(adata.uns['differential_dynamics'][f's_{group2}'], 0)
+    else:
+        mean_norm = None
+
+    if (n_jobs is None or not isinstance(n_jobs, int) or n_jobs < 0 or
+            n_jobs > os.cpu_count()):
+        n_jobs = os.cpu_count()
+    if n_jobs > gn:
+        n_jobs = gn
+    batches = -(-gn // n_jobs)
+
+    pbar = tqdm(total=gn)
+    for group in range(batches):
+        idx = range(group * n_jobs, np.min([gn, (group+1) * n_jobs]))
+        res = Parallel(n_jobs=n_jobs, backend='loky')(
+            delayed(dd_func)(
+                var1_g1[:, i],
+                var1_g2[:, i],
+                var2_g1[:, i] if var2 is not None else None,
+                var2_g2[:, i] if var2 is not None else None,
+                mean_norm[i] if mean_norm is not None else None,
+                t_both,
+                t_bins,
+                t1_bins,
+                t2_bins,
+                func,
+                n_bins,
+                n_samples,
+                seed,
+                kernel,
+                eps)
+            for i in idx)
+        for i, r in zip(idx, res):
+            pval_list[i] = r
+        pbar.update(len(idx))
+    return pval_list

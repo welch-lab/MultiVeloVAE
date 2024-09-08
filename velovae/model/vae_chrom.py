@@ -336,7 +336,10 @@ class Decoder(nn.Module):
         self.adata.var["w_init"] = w
         self.perc_good = perc_good
         logit_pw = 0.5*(np.log(w+1e-10) - np.log(1-w-1e-10))
-        logit_pw = np.stack([logit_pw, -0.5*logit_pw, 0.5*logit_pw, -logit_pw], 1)
+        if not self.rna_only:
+            logit_pw = np.stack([logit_pw, -0.5*logit_pw, 0.5*logit_pw, -logit_pw], 1)
+        else:
+            logit_pw = np.stack([logit_pw, np.zeros_like(logit_pw), np.zeros_like(logit_pw), -logit_pw], 1)
         self.logit_pw = nn.Parameter(torch.tensor(logit_pw))
 
         if self.init_method == "tprior":
@@ -1114,7 +1117,7 @@ class VAEChrom():
                     var_found.append(x)
                 else:
                     var_not_found.append(x)
-            print(f'Found {var_found}. Regressing them out.')
+            print(f'Found {var_found} in obs. Regressing them out.')
             if len(var_not_found) > 0:
                 raise ValueError(f'Warning: Variables {var_not_found} not found. Please check the obs keys and try again.')
         if self.var_to_regress is not None:

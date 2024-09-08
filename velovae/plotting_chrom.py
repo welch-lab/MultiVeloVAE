@@ -6,7 +6,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 from .model.model_util_chrom import velocity_graph
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import ExpSineSquared, WhiteKernel
+from sklearn.gaussian_process.kernels import RBF, ExpSineSquared, RationalQuadratic, WhiteKernel, ConstantKernel
+from scipy.stats.distributions import chi2
 logger = logging.getLogger(__name__)
 
 #######################################################################################
@@ -1147,13 +1148,15 @@ def differential_dynamics_plot(adata,
                                group1=None,
                                group2=None,
                                var='v',
-                               func='ld',
+                               signed_velocity=True,
                                color_by=None,
                                color_include=None,
                                key='vae',
                                n_bins=50,
                                n_samples=100,
                                seed=0,
+                               kernel='RBF',
+                               p_value=True,
                                n_cols=5,
                                figsize=None,
                                plot_equal=True,
@@ -1170,12 +1173,19 @@ def differential_dynamics_plot(adata,
         group2 = '2'
     if var not in ['kc', 'rho', 'c', 'u', 's', 'v']:
         raise ValueError(f"Variable {var} not recognized. Must be one of ['kc', 'rho', 'c', 'u', 's', 'v'].")
+    default_func = {'kc': 'ld',
+                    'rho': 'ld',
+                    'c': 'lfc',
+                    'u': 'lfc',
+                    's': 'lfc',
+                    'v': 'ld' if signed_velocity else 'lfc'}
+    func = default_func[var]
     if f'{var}_{group1}' not in adata.uns['differential_dynamics'].keys():
         raise ValueError(f"{var}_{group1} not found in adata.varm. Was differential_dynamics run with save_raw?")
     if f'{var}_{group2}' not in adata.uns['differential_dynamics'].keys():
         raise ValueError(f"{var}_{group2} not found in adata.varm. Was differential_dynamics run with save_raw?")
-    var1 = adata.uns['differential_dynamics'][f'{var}_{group1}']
-    var2 = adata.uns['differential_dynamics'][f'{var}_{group2}']
+    var_g1 = adata.uns['differential_dynamics'][f'{var}_{group1}']
+    var_g2 = adata.uns['differential_dynamics'][f'{var}_{group2}']
     t1 = adata.uns['differential_dynamics'][f't_{group1}']
     t2 = adata.uns['differential_dynamics'][f't_{group2}']
     t_both = np.concatenate([t1, t2])
@@ -1187,12 +1197,8 @@ def differential_dynamics_plot(adata,
     if func == 'ld':
         if var == 'v':
             mean_norm = np.mean(adata.uns['differential_dynamics'][f's_{group2}'], 0)
-        elif var == 'c':
-            mean_norm = np.mean(adata.uns['differential_dynamics'][f'c_{group2}'], 0)
         else:
             mean_norm = None
-    if func not in ['lfc', 'ld']:
-        raise ValueError(f"Mode {func} not recognized. Must be either 'lfc' or 'ld'.")
 
     if color_by is not None:
         from pandas.api.types import is_categorical_dtype
@@ -1215,28 +1221,28 @@ def differential_dynamics_plot(adata,
     for gene in genes:
         rng = np.random.default_rng(seed=seed)
         gene_idx = adata.var_names == gene
-        var1_gene = var1[:, gene_idx]
-        var2_gene = var2[:, gene_idx]
+        var_g1_gene = var_g1[:, gene_idx]
+        var_g2_gene = var_g2[:, gene_idx]
         if func == 'ld':
             mean_norm_gene = mean_norm[gene_idx] if mean_norm is not None else 1
 
         time_array, dd_array, bf_array = [], [], []
         for i in range(n_bins):
-            var1_bin = var1_gene[t1_bins == i]
-            var2_bin = var2_gene[t2_bins == i]
-            if len(var1_bin) < 10 or len(var2_bin) < 10:
-                continue
-            var1_bin_perm = rng.choice(var1_bin, n_samples)
-            var2_bin_perm = rng.choice(var2_bin, n_samples)
             time_bin = np.mean(t_both[t_bins == i])
             time_array.append(time_bin)
+            var_g1_bin = var_g1_gene[t1_bins == i]
+            var_g2_bin = var_g2_gene[t2_bins == i]
+            if len(var_g1_bin) < 10 or len(var_g2_bin) < 10:
+                continue
+            var_g1_bin_perm = rng.choice(var_g1_bin, n_samples)
+            var_g2_bin_perm = rng.choice(var_g2_bin, n_samples)
             if func == 'lfc':
-                fc_bin = fold_change(np.abs(var1_bin_perm), np.abs(var2_bin_perm))
+                fc_bin = fold_change(np.abs(var_g1_bin_perm), np.abs(var_g2_bin_perm))
                 dd_array.append(np.mean(fc_bin))
             else:
-                diff_bin = difference(var1_bin_perm, var2_bin_perm, mean_norm_gene)
+                diff_bin = difference(var_g1_bin_perm, var_g2_bin_perm, mean_norm_gene)
                 dd_array.append(np.mean(diff_bin))
-            p1 = np.mean(var1_bin_perm > var2_bin_perm)
+            p1 = np.mean(var_g1_bin_perm > var_g2_bin_perm)
             bf_array.append(np.log(p1 + eps) - np.log(1 - p1 + eps))
         time_array = np.array(time_array)
         dd_array = np.array(dd_array)
@@ -1244,10 +1250,27 @@ def differential_dynamics_plot(adata,
         t_both_sorted = np.sort(t_both)
         t_both_sorted = t_both_sorted[(t_both_sorted >= bounds[0]) & (t_both_sorted <= bounds[1])]
 
-        kernel = 1.0 * ExpSineSquared(1.0, 1.0, periodicity_bounds=(1e-2, 1e1)) + WhiteKernel(1e-1)
-        gaussian_process = GaussianProcessRegressor(kernel=kernel, random_state=seed, n_restarts_optimizer=10)
+        if kernel == 'RBF':
+            kernel_ = 1.0 * RBF(1.0, length_scale_bounds=(0.1, 10.0)) + WhiteKernel(0.1)
+        elif kernel == 'ExpSineSquared':
+            kernel_ = 1.0 * ExpSineSquared(1.0, 1.0, length_scale_bounds=(0.1, 10.0), periodicity_bounds=(0.1, 10.0)) + WhiteKernel(0.1)
+        elif kernel == 'RationalQuadratic':
+            kernel_ = 1.0 * RationalQuadratic(1.0, 1.0, length_scale_bounds=(0.1, 10.0), alpha_bounds=(0.1, 10.0)) + WhiteKernel(0.1)
+        else:
+            raise ValueError(f"Kernel {kernel} not supported. Must be one of ['RBF', 'ExpSineSquared', 'RationalQuadratic'].")
+        gaussian_process = GaussianProcessRegressor(kernel=kernel_, random_state=seed, n_restarts_optimizer=10)
         gaussian_process.fit(time_array.reshape(-1, 1), dd_array.reshape(-1, 1))
         mean_prediction, std_prediction = gaussian_process.predict(t_both_sorted.reshape(-1, 1), return_std=True)
+        ll = gaussian_process.log_marginal_likelihood(gaussian_process.kernel_.theta)
+
+        if p_value:
+            const = 0.0 if func == 'ld' else 1.0
+            kernel_constant = ConstantKernel(const, constant_value_bounds='fixed') + WhiteKernel(0.1)
+            gaussian_process_ = GaussianProcessRegressor(kernel=kernel_constant, random_state=seed, n_restarts_optimizer=10)
+            gaussian_process_.fit(time_array.reshape(-1, 1), dd_array.reshape(-1, 1))
+            ll_null = gaussian_process_.log_marginal_likelihood(gaussian_process_.kernel_.theta)
+            lrt = -2 * (ll_null - ll)
+            pval = chi2.sf(lrt, 1)
 
         row = count // n_cols
         col = count % n_cols
@@ -1281,6 +1304,9 @@ def differential_dynamics_plot(adata,
         )
         ax.set_xlabel("Time")
         ax.set_ylabel(f"{'Difference' if func == 'ld' else 'Fold change'}")
+        if p_value:
+            props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+            ax.text(0.75, 1.06, f'Pval={pval:.2e}', transform=ax.transAxes, fontsize=9, verticalalignment='top', bbox=props)
         ax.set_title(f'{gene}', fontsize=11)
         if not axis_on:
             ax.xaxis.set_ticks_position('none')
