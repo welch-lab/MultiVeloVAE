@@ -350,6 +350,9 @@ def plot_vel(t,
              cell_labels=None,
              cell_type_colors=None,
              title="Gene",
+             axis_on=True,
+             frame_on=True,
+             legend=True,
              save=None):
     fig, ax = plt.subplots(1, 3, figsize=(28, 6), facecolor='white')
 
@@ -367,9 +370,9 @@ def plot_vel(t,
             colors = np.array([cell_type_colors[type_] for type_ in cell_types])
         for i, type_ in enumerate(cell_types):
             mask_type = cell_labels == type_
-            ax[0].scatter(t[mask_type], chat[mask_type], color=colors[i % len(colors)], s=10, alpha=0.4, label=type_, edgecolors='none')
-            ax[1].scatter(t[mask_type], uhat[mask_type], color=colors[i % len(colors)], s=10, alpha=0.4, label=type_, edgecolors='none')
-            ax[2].scatter(t[mask_type], shat[mask_type], color=colors[i % len(colors)], s=10, alpha=0.4, label=type_, edgecolors='none')
+            ax[0].scatter(t[mask_type], chat[mask_type], color=colors[i % len(colors)], s=20, alpha=0.5, label=type_, edgecolors='none')
+            ax[1].scatter(t[mask_type], uhat[mask_type], color=colors[i % len(colors)], s=20, alpha=0.5, label=type_, edgecolors='none')
+            ax[2].scatter(t[mask_type], shat[mask_type], color=colors[i % len(colors)], s=20, alpha=0.5, label=type_, edgecolors='none')
             handles, labels = ax[1].get_legend_handles_labels()
 
     plot_indices = np.random.choice(len(t), min(n_sample, len(t)), replace=False)
@@ -402,17 +405,30 @@ def plot_vel(t,
     ax[1].set_ylabel("U", fontsize=16)
     ax[2].set_ylabel("S", fontsize=16)
 
-    lgd = fig.legend(handles,
-                     labels,
-                     fontsize=15,
-                     markerscale=5,
-                     ncol=4,
-                     bbox_to_anchor=(0.0, 1.0, 1.0, 0.25),
-                     loc='center')
+    for j in range(3):
+        axi = ax[j]
+        if not axis_on:
+            axi.xaxis.set_ticks_position('none')
+            axi.yaxis.set_ticks_position('none')
+            axi.get_xaxis().set_visible(False)
+            axi.get_yaxis().set_visible(False)
+        if not frame_on:
+            axi.xaxis.set_ticks_position('none')
+            axi.yaxis.set_ticks_position('none')
+            axi.set_frame_on(False)
+
+    if legend:
+        lgd = fig.legend(handles,
+                         labels,
+                         fontsize=15,
+                         markerscale=5,
+                         ncol=4,
+                         bbox_to_anchor=(0.0, 1.0, 1.0, 0.25),
+                         loc='center')
     fig.suptitle(title, fontsize=28)
     plt.tight_layout()
 
-    save_fig(fig, save, (lgd,))
+    save_fig(fig, save, (lgd,) if legend else None)
 
 
 def plot_phase(c, u, s,
@@ -774,10 +790,13 @@ def dynamic_plot(adata,
                     c = adata[:, gene].layers[f'{key}_chat'].copy()
             else:
                 c = adata_atac[:, gene].layers['Mc'].copy()
-        c = c.toarray() if sparse.issparse(c) else c
+        if not no_c:
+            c = c.toarray() if sparse.issparse(c) else c
         u = u.toarray() if sparse.issparse(u) else u
         s = s.toarray() if sparse.issparse(s) else s
-        c, u, s = np.ravel(c), np.ravel(u), np.ravel(s)
+        if not no_c:
+            c = np.ravel(c)
+        u, s = np.ravel(u), np.ravel(s)
         time = np.array(adata.obs[f'{key}_time']).copy()
         if types is not None:
             for i in range(len(types)):
@@ -854,6 +873,7 @@ def scatter_plot(adata,
                  downsample=1,
                  figsize=None,
                  pointsize=2,
+                 fontsize=11,
                  cmap='coolwarm',
                  view_3d_elev=None,
                  view_3d_azim=None,
@@ -1046,7 +1066,7 @@ def scatter_plot(adata,
         if title_more_info:
             if f'{key}_likelihood' in adata.var and not np.all(adata.var[f'{key}_likelihood'].values == -1):
                 title += f" {adata[:,gene].var[f'{key}_likelihood'].values[0]:.3g}"
-        ax.set_title(f'{title}', fontsize=11)
+        ax.set_title(f'{title}', fontsize=fontsize)
         if by == 'us':
             ax.set_xlabel('spliced' if full_name else 's')
             ax.set_ylabel('unspliced' if full_name else 'u')
@@ -1151,6 +1171,8 @@ def differential_dynamics_plot(adata,
                                signed_velocity=True,
                                color_by=None,
                                color_include=None,
+                               t_min=None,
+                               t_max=None,
                                key='vae',
                                n_bins=50,
                                n_samples=100,
@@ -1204,7 +1226,7 @@ def differential_dynamics_plot(adata,
         from pandas.api.types import is_categorical_dtype
         if color_by not in adata.obs:
             raise ValueError(f"Color key {color_by} not found in adata.obs.")
-        elif not is_categorical_dtype(adata.obs[color_by]) or not color_by+'_colors' in adata.uns.keys():
+        elif not is_categorical_dtype(adata.obs[color_by]) or color_by+'_colors' not in adata.uns.keys():
             raise ValueError(f"Color key {color_by} must be a categorical variable with colors stored in adata.uns.")
         else:
             types = adata.obs[color_by].cat.categories
@@ -1229,11 +1251,11 @@ def differential_dynamics_plot(adata,
         time_array, dd_array, bf_array = [], [], []
         for i in range(n_bins):
             time_bin = np.mean(t_both[t_bins == i])
-            time_array.append(time_bin)
             var_g1_bin = var_g1_gene[t1_bins == i]
             var_g2_bin = var_g2_gene[t2_bins == i]
             if len(var_g1_bin) < 10 or len(var_g2_bin) < 10:
                 continue
+            time_array.append(time_bin)
             var_g1_bin_perm = rng.choice(var_g1_bin, n_samples)
             var_g2_bin_perm = rng.choice(var_g2_bin, n_samples)
             if func == 'lfc':
@@ -1276,13 +1298,26 @@ def differential_dynamics_plot(adata,
         col = count % n_cols
         ax = axs[row, col]
 
+        filt = None
+        if t_min is not None and t_max is not None:
+            filt = (t_both_sorted > t_min) & (t_both_sorted < t_max)
+        elif t_min is not None:
+            filt = t_both_sorted > t_min
+        elif t_max is not None:
+            filt = t_both_sorted < t_max
         if np.all(np.isclose(bf_array, bf_array[0])):
-            ax.plot(t_both_sorted, mean_prediction, label="Mean prediction", color='black', alpha=0.6)
+            if filt is not None:
+                ax.plot(t_both_sorted[filt], mean_prediction[filt], label="Mean prediction", color='black', alpha=0.6)
+            else:
+                ax.plot(t_both_sorted, mean_prediction, label="Mean prediction", color='black', alpha=0.6)
         else:
             bf_array_mid = (np.array(bf_array)[:-1] + np.array(bf_array)[1:]) / 2
             bf_array_mid = np.concatenate([[bf_array_mid[0]], bf_array_mid, [bf_array_mid[-1]]])
             t_sorted_bins = np.digitize(t_both_sorted, time_array)
-            colored_line_between_pts(t_both_sorted, mean_prediction, bf_array_mid[t_sorted_bins], ax, linewidth=5, cmap="viridis", label='Mean prediction\ncolored by BF')
+            if filt is not None:
+                colored_line_between_pts(t_both_sorted[filt], mean_prediction[filt], bf_array_mid[t_sorted_bins][filt], ax, linewidth=5, cmap="viridis", label='Mean prediction\ncolored by BF')
+            else:
+                colored_line_between_pts(t_both_sorted, mean_prediction, bf_array_mid[t_sorted_bins], ax, linewidth=5, cmap="viridis", label='Mean prediction\ncolored by BF')
         if plot_equal:
             if color_by is None:
                 ax.plot(t_both_sorted,
@@ -1294,14 +1329,25 @@ def differential_dynamics_plot(adata,
                            np.zeros_like(cell_time) if func == 'ld' else np.ones_like(cell_time),
                            label=f"Zero line\ncolored by {color_by}" if func == 'ld' else f"One line\ncolored by {color_by}",
                            c=color_array, s=20, marker='|')
-        ax.fill_between(
-            t_both_sorted,
-            mean_prediction - 1.96 * std_prediction,
-            mean_prediction + 1.96 * std_prediction,
-            alpha=0.4,
-            label=r"Credible interval",
-            facecolor='gray'
-        )
+
+        if filt is not None:
+            ax.fill_between(
+                t_both_sorted[filt],
+                mean_prediction[filt] - 1.96 * std_prediction[filt],
+                mean_prediction[filt] + 1.96 * std_prediction[filt],
+                alpha=0.4,
+                label="Credible interval",
+                facecolor='gray'
+            )
+        else:
+            ax.fill_between(
+                t_both_sorted,
+                mean_prediction - 1.96 * std_prediction,
+                mean_prediction + 1.96 * std_prediction,
+                alpha=0.4,
+                label="Credible interval",
+                facecolor='gray'
+            )
         ax.set_xlabel("Time")
         ax.set_ylabel(f"{'Difference' if func == 'ld' else 'Fold change'}")
         if p_value:

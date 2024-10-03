@@ -12,12 +12,11 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from ..plotting_chrom import plot_sig_, plot_sig, plot_vel, plot_phase, plot_time
 from ..plotting_chrom import plot_train_loss_log, plot_test_loss_log
-from .model_util import hist_equal, convert_time, get_gene_index
-from .model_util import elbo_collapsed_categorical, assign_gene_mode_tprior
+from .model_util_chrom import hist_equal, encode_type, get_gene_index, convert_time
+from .model_util_chrom import elbo_collapsed_categorical, find_dirichlet_param, assign_gene_mode_tprior, assign_gene_mode
 from .model_util_chrom import pred_exp, pred_exp_numpy, pred_exp_numpy_backward, init_params, get_ts_global, reinit_params
 from .model_util_chrom import kl_gaussian, reparameterize, softplusinv, knnx0_index, get_x0
-from .model_util_chrom import pearson, loss_vel, cosine_similarity, find_dirichlet_param, assign_gene_mode
-from .transition_graph import encode_type
+from .model_util_chrom import pearson, loss_vel, cosine_similarity
 from .training_data_chrom import SCData, SCDataE
 from .velocity_chrom import rna_velocity_vae
 logger = logging.getLogger(__name__)

@@ -2,8 +2,7 @@ import logging
 import numpy as np
 from scipy.sparse import issparse
 from scipy.ndimage import gaussian_filter1d
-from .model_util_chrom import pred_exp_numpy
-from .transition_graph import encode_type
+from .model_util_chrom import pred_exp_numpy, encode_type
 logger = logging.getLogger(__name__)
 
 
@@ -139,12 +138,12 @@ def rna_velocity_vae(adata,
             u_std_adjust = np.zeros((n_batch, adata.n_vars))
             s_std_adjust = np.zeros((n_batch, adata.n_vars))
             for i in range(n_batch):
-                c_mean_adjust[i] = np.mean(adata.layers[f"{key}_chat_batch"][batch==i], 0) - np.mean(adata.layers[f"{key}_chat"][batch==i], 0)
-                u_mean_adjust[i] = np.mean(adata.layers[f"{key}_uhat_batch"][batch==i], 0) - np.mean(adata.layers[f"{key}_uhat"][batch==i], 0)
-                s_mean_adjust[i] = np.mean(adata.layers[f"{key}_shat_batch"][batch==i], 0) - np.mean(adata.layers[f"{key}_shat"][batch==i], 0)
-                c_std_adjust[i] = np.std(adata.layers[f"{key}_chat_batch"][batch==i], 0) / np.std(adata.layers[f"{key}_chat"][batch==i], 0)
-                u_std_adjust[i] = np.std(adata.layers[f"{key}_uhat_batch"][batch==i], 0) / np.std(adata.layers[f"{key}_uhat"][batch==i], 0)
-                s_std_adjust[i] = np.std(adata.layers[f"{key}_shat_batch"][batch==i], 0) / np.std(adata.layers[f"{key}_shat"][batch==i], 0)
+                c_mean_adjust[i] = np.mean(adata.layers[f"{key}_chat_batch"][batch == i], 0) - np.mean(adata.layers[f"{key}_chat"][batch == i], 0)
+                u_mean_adjust[i] = np.mean(adata.layers[f"{key}_uhat_batch"][batch == i], 0) - np.mean(adata.layers[f"{key}_uhat"][batch == i], 0)
+                s_mean_adjust[i] = np.mean(adata.layers[f"{key}_shat_batch"][batch == i], 0) - np.mean(adata.layers[f"{key}_shat"][batch == i], 0)
+                c_std_adjust[i] = np.std(adata.layers[f"{key}_chat_batch"][batch == i], 0) / np.std(adata.layers[f"{key}_chat"][batch == i], 0)
+                u_std_adjust[i] = np.std(adata.layers[f"{key}_uhat_batch"][batch == i], 0) / np.std(adata.layers[f"{key}_uhat"][batch == i], 0)
+                s_std_adjust[i] = np.std(adata.layers[f"{key}_shat_batch"][batch == i], 0) / np.std(adata.layers[f"{key}_shat"][batch == i], 0)
             c_mean_adjust = np.dot(onehot, c_mean_adjust)
             u_mean_adjust = np.dot(onehot, u_mean_adjust)
             s_mean_adjust = np.dot(onehot, s_mean_adjust)
@@ -152,8 +151,8 @@ def rna_velocity_vae(adata,
             u_std_adjust = np.dot(onehot, u_std_adjust)
             s_std_adjust = np.dot(onehot, s_std_adjust)
             adata.layers["c_leveled"] = (adata_atac.layers['Mc'] - c_mean_adjust) / c_std_adjust
-            adata.layers["u_leveled"] = (adata.layers['Mu']- u_mean_adjust) / u_std_adjust
-            adata.layers["s_leveled"] = (adata.layers['Ms']- s_mean_adjust) / s_std_adjust
+            adata.layers["u_leveled"] = (adata.layers['Mu'] - u_mean_adjust) / u_std_adjust
+            adata.layers["s_leveled"] = (adata.layers['Ms'] - s_mean_adjust) / s_std_adjust
 
     if approx:
         v = (s - (s0*scaling_s+offset_s)) / ((t - t0).reshape(-1, 1))

@@ -1,23 +1,26 @@
 from .model import *
-from .analysis.evaluation import *
-from .plotting import (get_colors,
+from .analysis import *
+from .plotting import (set_dpi,
+                       get_colors,
                        plot_cluster,
+                       cellwise_vel,
+                       cellwise_vel_embedding,
+                       plot_phase_vel,
+                       plot_velocity,
+                       plot_legend,
                        plot_heatmap,
                        plot_time_var,
                        plot_state_var,
-                       plot_train_loss,
-                       plot_test_loss,
-                       plot_test_acc,
-                       cellwise_vel,
-                       cellwise_vel_embedding,
-                       vel_corr_hist,
                        plot_phase_grid,
                        plot_sig_grid,
                        plot_time_grid,
-                       plot_velocity,
-                       plot_umap_transition,
+                       plot_rate_grid,
+                       plot_trajectory_3d,
                        plot_transition_graph,
-                       plot_rate_grid)
+                       plot_rate_hist,
+                       plot_train_loss,
+                       plot_test_loss
+                       )
 from .plotting_chrom import (plot_sig_,
                              plot_sig,
                              plot_vel,
@@ -30,4 +33,3 @@ from .plotting_chrom import (plot_sig_,
                              velocity_embedding_stream,
                              plot_train_loss_log,
                              plot_test_loss_log)
-from .preprocessing import preprocess

@@ -8,15 +8,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import scvelo as scv
 from umap.umap_ import fuzzy_simplicial_set
-from .scvelo_util import mRNA, tau_inv, test_bimodality
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
-from sklearn.cluster import AgglomerativeClustering, KMeans
+from sklearn.cluster import AgglomerativeClustering, SpectralClustering, KMeans
 from scipy.spatial import KDTree
 from scipy.sparse import csr_matrix, coo_matrix, diags
-from scipy.stats import dirichlet, bernoulli, kstest
+from scipy.stats import dirichlet, bernoulli, kstest, linregress
 from tqdm.notebook import tqdm_notebook
-from .model_util import assign_gene_mode_binary
 from scipy.stats import median_abs_deviation
 from scipy.sparse import issparse
 import seaborn as sns
@@ -25,6 +23,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+# From scVelo
 def inv(x):
     x_inv = 1 / x * (x != 0)
     return x_inv
@@ -202,6 +201,75 @@ def assign_time(c, u, s, c0_, u0_, s0_, alpha_c, alpha, beta, gamma, std_c_=None
     t_latent = np.array([t[o[i], i] for i in range(len(t_pred))])
 
     return t_latent, t_
+
+
+# From scVelo #
+def log(x, eps=1e-6):  # to avoid invalid values for log.
+    return np.log(np.clip(x, eps, 1 - eps))
+
+
+def mRNA(tau, u0, s0, alpha, beta, gamma):
+    expu, exps = np.exp(-beta * tau), np.exp(-gamma * tau)
+    expus = (alpha - u0 * beta) * inv(gamma - beta) * (exps - expu)
+    u = u0 * expu + alpha / beta * (1 - expu)
+    s = s0 * exps + alpha / gamma * (1 - exps) + expus
+
+    return u, s
+
+
+def tau_inv(u, s=None, u0=None, s0=None, alpha=None, beta=None, gamma=None):
+
+    inv_u = (gamma >= beta) if gamma is not None else True
+    inv_us = np.invert(inv_u)
+
+    any_invu = np.any(inv_u) or s is None
+    any_invus = np.any(inv_us) and s is not None
+
+    if any_invus:  # tau_inv(u, s)
+        beta_ = beta * inv(gamma - beta)
+        xinf = alpha / gamma - beta_ * (alpha / beta)
+        tau = -1 / gamma * log((s - beta_ * u - xinf) / (s0 - beta_ * u0 - xinf))
+
+    if any_invu:  # tau_inv(u)
+        uinf = alpha / beta
+        tau_u = -1 / beta * log((u - uinf) / (u0 - uinf))
+        tau = tau_u * inv_u + tau * inv_us if any_invus else tau_u
+    return tau
+
+
+def test_bimodality(x, bins=30, kde=True):
+    # Test for bimodal distribution.
+
+    from scipy.stats import gaussian_kde, norm
+
+    lb, ub = np.min(x), np.percentile(x, 99.9)
+    grid = np.linspace(lb, ub if ub <= lb else np.max(x), bins)
+    kde_grid = (
+        gaussian_kde(x)(grid) if kde else np.histogram(x, bins=grid, density=True)[0]
+    )
+
+    idx = int(bins / 2) - 2
+    idx += np.argmin(kde_grid[idx: idx + 4])
+
+    peak_0 = kde_grid[:idx].argmax()
+    peak_1 = kde_grid[idx:].argmax()
+    kde_peak = kde_grid[idx:][
+        peak_1
+    ]  # min(kde_grid[:idx][peak_0], kde_grid[idx:][peak_1])
+    kde_mid = kde_grid[idx:].mean()  # kde_grid[idx]
+
+    t_stat = (kde_peak - kde_mid) / np.clip(np.std(kde_grid) / np.sqrt(bins), 1, None)
+    p_val = norm.sf(t_stat)
+
+    grid_0 = grid[:idx]
+    grid_1 = grid[idx:]
+    means = [
+        (grid_0[peak_0] + grid_0[min(peak_0 + 1, len(grid_0) - 1)]) / 2,
+        (grid_1[peak_1] + grid_1[min(peak_1 + 1, len(grid_1) - 1)]) / 2,
+    ]
+
+    return t_stat, p_val, means  # ~ t_test (reject unimodality if t_stat > 3)
+# from scVelo #
 
 
 def init_gene_rna(u, s, percent, fit_scaling=True, tmax=1):
@@ -828,6 +896,70 @@ def cosine_similarity(u, s, beta, gamma, s_knn, w_hvg=None):
     return res
 
 
+def hist_equal(t, tmax, perc=0.95, n_bin=101):
+    # Perform histogram equalization across all local times.
+    t_ub = np.quantile(t, perc)
+    t_lb = t.min()
+    delta_t = (t_ub - t_lb)/(n_bin-1)
+    bins = [t_lb+i*delta_t for i in range(n_bin)]+[t.max()]
+    pdf_t, edges = np.histogram(t, bins, density=True)
+    pt, edges = np.histogram(t, bins, density=False)
+
+    # Perform histogram equalization
+    cdf_t = np.concatenate(([0], np.cumsum(pt)))
+    cdf_t = cdf_t/cdf_t[-1]
+    t_out = np.zeros((len(t)))
+    for i in range(n_bin):
+        mask = (t >= bins[i]) & (t < bins[i+1])
+        t_out[mask] = (cdf_t[i] + (t[mask]-bins[i])*pdf_t[i])*tmax
+    return t_out
+
+
+def encode_type(cell_types_raw):
+    #######################################################################
+    # Use integer to encode the cell types
+    # Each cell type has one unique integer label.
+    #######################################################################
+
+    # Map cell types to integers
+    label_dic = {}
+    label_dic_rev = {}
+    for i, type_ in enumerate(cell_types_raw):
+        label_dic[type_] = i
+        label_dic_rev[i] = type_
+
+    return label_dic, label_dic_rev
+
+
+def get_gene_index(genes_all, gene_list):
+    gind = []
+    gremove = []
+    for gene in gene_list:
+        matches = np.where(genes_all == gene)[0]
+        if len(matches) == 1:
+            gind.append(matches[0])
+        elif len(matches) == 0:
+            print(f'Warning: Gene {gene} not found! Ignored.')
+            gremove.append(gene)
+        else:
+            gind.append(matches[0])
+            print('Warning: Gene {gene} has multiple matches. Pick the first one.')
+    gene_list = list(gene_list)
+    for gene in gremove:
+        gene_list.remove(gene)
+    return gind, gene_list
+
+
+def convert_time(t):
+    """Convert the time in sec into the format: hour:minute:second
+    """
+    hour = int(t//3600)
+    minute = int((t - hour*3600)//60)
+    second = int(t - hour*3600 - minute*60)
+
+    return f"{hour:3d} h : {minute:2d} m : {second:2d} s"
+
+
 def ellipse_axis(x, y, xc, yc, slope):
     return (y - yc) - (slope * (x - xc))
 
@@ -944,6 +1076,39 @@ def sample_dir_mix(w, yw, std_prior):
     return q
 
 
+def assign_gene_mode_binary(adata, w_noisy, thred=0.05):
+    Cs = np.corrcoef(adata.layers['Ms'].T)
+    Cu = np.corrcoef(adata.layers['Mu'].T)
+    C = 1+Cs*0.5+Cu*0.5
+    C[np.isnan(C)] = 0.0
+    spc = SpectralClustering(2, affinity='precomputed', assign_labels='discretize')
+    y = spc.fit_predict(C)
+    adata.var['init_mode'] = y
+
+    alpha_1, alpha_2 = find_dirichlet_param(0.6, 0.2), find_dirichlet_param(0.4, 0.2)
+    w = dirichlet(alpha_1).rvs(adata.n_vars)
+
+    # Perform Kolmogorov-Smirnov Test
+    w1, w2 = w_noisy[y == 0], w_noisy[y == 1]
+
+    w_neutral = dirichlet.rvs([12, 12], size=adata.n_vars, random_state=42)
+    res, pval = kstest(w1, w2)
+    if pval > 0.05:
+        print('Two modes are indistuiguishable.')
+        return w_neutral
+
+    res_1, pval_1 = kstest(w1, w2, alternative='greater', method='asymp')
+    res_2, pval_2 = kstest(w1, w2, alternative='less', method='asymp')
+    if pval_1 >= thred:  # Take the null hypothesis that values of w1 are greater
+        adata.varm['alpha_w'] = (y.reshape(-1, 1) == 0) * alpha_1 + (y.reshape(-1, 1) == 1) * alpha_2
+        return (y == 0) * w[:, 0] + (y == 1) * w[:, 1]
+    elif pval_2 >= thred:
+        adata.varm['alpha_w'] = (y.reshape(-1, 1) == 1) * alpha_1 + (y.reshape(-1, 1) == 0) * alpha_2
+        return (y == 0) * w[:, 1] + (y == 1) * w[:, 0]
+
+    return w_neutral
+
+
 def assign_gene_mode_auto(adata,
                           w_noisy,
                           thred=0.05,
@@ -1035,6 +1200,54 @@ def assign_gene_mode(adata,
         alpha_rep = find_dirichlet_param(0.2, std_prior)
         np.random.seed(42)
         return dirichlet.rvs(alpha_rep, size=adata.n_vars)[:, 0]
+
+
+def assign_gene_mode_tprior(adata, tkey, train_idx, std_prior=0.05):
+    # Same as assign_gene_mode, but uses the informative time prior
+    # to determine inductive and repressive genes
+    tprior = adata.obs[tkey].to_numpy()[train_idx]
+    alpha_ind, alpha_rep = find_dirichlet_param(0.75, std_prior), find_dirichlet_param(0.25, std_prior)
+    w = np.empty((adata.n_vars))
+    slope = np.empty((adata.n_vars))
+    for i in range(adata.n_vars):
+        slope_u, intercept_u, r_u, p_u, se = linregress(tprior, adata.layers['Mu'][train_idx, i])
+        slope_s, intercept_s, r_s, p_s, se = linregress(tprior, adata.layers['Ms'][train_idx, i])
+        slope[i] = (slope_u*0.5+slope_s*0.5)
+    np.random.seed(42)
+    w[slope >= 0] = dirichlet.rvs(alpha_ind, size=np.sum(slope >= 0))[:, 0]
+    np.random.seed(42)
+    w[slope < 0] = dirichlet.rvs(alpha_rep, size=np.sum(slope < 0))[:, 0]
+    # return 1/(1+np.exp(-slope))
+    return w
+
+
+############################################################
+#  ELBO term related to categorical variables in BasisVAE
+#  Referece:
+#  Märtens, K. &amp; Yau, C.. (2020). BasisVAE: Translation-
+#  invariant feature-level clustering with Variational Autoencoders.
+#  Proceedings of the Twenty Third International Conference on
+#  Artificial Intelligence and Statistics, in Proceedings of
+#  Machine Learning Research</i> 108:2928-2937
+#  Available from https://proceedings.mlr.press/v108/martens20b.html.
+############################################################
+def elbo_collapsed_categorical(logits_phi, alpha, K, N):
+    phi = torch.softmax(logits_phi, dim=1)
+
+    if alpha.ndim == 1:
+        sum_alpha = alpha.sum()
+        pseudocounts = phi.sum(dim=0)  # n basis
+        term1 = torch.lgamma(sum_alpha) - torch.lgamma(sum_alpha + N)
+        term2 = (torch.lgamma(alpha + pseudocounts) - torch.lgamma(alpha)).sum()
+    else:
+        sum_alpha = alpha.sum(axis=-1)  # n vars
+        pseudocounts = phi.sum(dim=0)
+        term1 = (torch.lgamma(sum_alpha) - torch.lgamma(sum_alpha + N)).mean(0)
+        term2 = (torch.lgamma(alpha + pseudocounts) - torch.lgamma(alpha)).mean(0).sum()
+
+    E_q_logq = (phi * torch.log(phi + 1e-16)).sum()
+
+    return -term1 - term2 + E_q_logq
 
 
 # Modified from MultiVelo
@@ -1436,7 +1649,8 @@ def is_outlier(adata, metric, lower_nmads=20, upper_nmads=20):
     return outlier
 
 
-# The following code was modified from https://github.com/scverse/scanpy/pull/2731 to add intercept back to residuals
+# The following code was modified from https://github.com/scverse/scanpy/pull/2731
+# to add intercepts back to residuals after regressing out covariates
 def sanitize_anndata(adata):
     adata._sanitize()
 
@@ -1535,7 +1749,7 @@ def _regress_out_chunk(data):
     return np.vstack(responses_chunk_list)
 
 
-def regress_out(adata, keys, layer=None, n_jobs=12, copy=False, add_intercept=False):
+def regress_out(adata, keys, layer=None, n_jobs=8, copy=False, add_intercept=False):
     """\
     Regress out (mostly) unwanted sources of variation.
 

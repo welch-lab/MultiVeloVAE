@@ -1,13 +1,277 @@
 import numpy as np
+from numpy import exp
 from scipy.stats import spearmanr, poisson, norm, mannwhitneyu
 from scipy.special import loggamma
 from sklearn.metrics.pairwise import pairwise_distances
-from ..model.model_util import pred_su_numpy, ode_numpy, ode_br_numpy, scv_pred, scv_pred_single
 import hnswlib
 from sklearn.decomposition import PCA
 from sklearn.metrics.pairwise import cosine_similarity
 import torch
 import torch.nn.functional as F
+
+
+###################################################################################
+# Dynamical Model
+# Reference:
+# Bergen, V., Lange, M., Peidli, S., Wolf, F. A., & Theis, F. J. (2020).
+# Generalizing RNA velocity to transient cell states through dynamical modeling.
+# Nature biotechnology, 38(12), 1408-1414.
+###################################################################################
+def inv(x):
+    x_inv = 1 / x * (x != 0)
+    return x_inv
+
+
+def log(x, eps=1e-6):  # to avoid invalid values for log.
+    return np.log(np.clip(x, eps, 1 - eps))
+
+
+def unspliced(tau, u0, alpha, beta):
+    expu = exp(-beta * tau)
+    return u0 * expu + alpha / beta * (1 - expu)
+
+
+def spliced(tau, s0, u0, alpha, beta, gamma):
+    c = (alpha - u0 * beta) * inv(gamma - beta)
+    expu, exps = exp(-beta * tau), exp(-gamma * tau)
+
+    return s0 * exps + alpha / gamma * (1 - exps) + c * (exps - expu)
+
+
+def mRNA(tau, u0, s0, alpha, beta, gamma):
+    expu, exps = exp(-beta * tau), exp(-gamma * tau)
+    expus = (alpha - u0 * beta) * inv(gamma - beta) * (exps - expu)
+    u = u0 * expu + alpha / beta * (1 - expu)
+    s = s0 * exps + alpha / gamma * (1 - exps) + expus
+
+    return u, s
+
+
+def vectorize(t, t_, alpha, beta, gamma=None, alpha_=0, u0=0, s0=0, sorted=False):
+    o = np.array(t < t_, dtype=int)
+    tau = t * o + (t - t_) * (1 - o)
+
+    u0_ = unspliced(t_, u0, alpha, beta)
+    s0_ = spliced(t_, s0, u0, alpha, beta, gamma if gamma is not None else beta / 2)
+
+    # vectorize u0, s0 and alpha
+    u0 = u0 * o + u0_ * (1 - o)
+    s0 = s0 * o + s0_ * (1 - o)
+    alpha = alpha * o + alpha_ * (1 - o)
+
+    if sorted:
+        idx = np.argsort(t)
+        tau, alpha, u0, s0 = tau[idx], alpha[idx], u0[idx], s0[idx]
+    return tau, alpha, u0, s0
+
+
+def scv_pred_single(t, alpha, beta, gamma, ts, scaling=1.0, uinit=0, sinit=0):
+    # Predicts u and s using the dynamical model.
+    beta = beta*scaling
+    tau, alpha, u0, s0 = vectorize(t, ts, alpha, beta, gamma, u0=uinit, s0=sinit)
+    tau = np.clip(tau, a_min=0, a_max=None)
+    ut, st = mRNA(tau, u0, s0, alpha, beta, gamma)
+    ut = ut*scaling
+    return ut.squeeze(), st.squeeze()
+
+
+def scv_pred(adata, key, glist=None):
+    # Reproduce the full prediction of scvelo dynamical model
+
+    n_gene = len(glist) if glist is not None else adata.n_vars
+    n_cell = adata.n_obs
+    ut, st = np.ones((n_cell, n_gene))*np.nan, np.ones((n_cell, n_gene))*np.nan
+    if glist is None:
+        glist = adata.var_names.to_numpy()
+
+    for i in range(n_gene):
+        idx = np.where(adata.var_names == glist[i])[0][0]
+        item = adata.var.loc[glist[i]]
+        if len(item) == 0:
+            print('Gene '+glist[i]+' not found!')
+            continue
+
+        alpha, beta, gamma = item[f'{key}_alpha'], item[f'{key}_beta'], item[f'{key}_gamma']
+        scaling = item[f'{key}_scaling']
+        ts = item[f'{key}_t_']
+        t = adata.layers[f'{key}_t'][:, idx]
+        if np.isnan(alpha):
+            continue
+        u_g, s_g = scv_pred_single(t, alpha, beta, gamma, ts, scaling)
+        ut[:, i] = u_g
+        st[:, i] = s_g
+
+    return ut, st
+
+
+def pred_su_numpy(tau, u0, s0, alpha, beta, gamma):
+    ############################################################
+    # (Numpy Version)
+    # Analytical solution of the ODE
+    # tau: [B x 1] or [B x 1 x 1] time duration starting from the switch-on time of each gene.
+    # u0, s0: [G] or [N type x G] initial conditions
+    # alpha, beta, gamma: [G] or [N type x G] generation, splicing and degradation rates
+    ############################################################
+    unstability = (np.abs(beta-gamma) < 1e-6)
+    expb, expg = np.exp(-beta*tau), np.exp(-gamma*tau)
+
+    upred = u0*expb + alpha/beta*(1-expb)
+    spred = s0*expg + alpha/gamma*(1-expg) \
+        + (alpha-beta*u0)/(gamma-beta+1e-6)*(expg-expb)*(1-unstability) \
+        - (alpha-beta*u0)*tau*expg*unstability
+    return np.clip(upred, a_min=0, a_max=None), np.clip(spred, a_min=0, a_max=None)
+
+
+def pred_steady_numpy(ts, alpha, beta, gamma):
+    ############################################################
+    # (Numpy Version)
+    # Predict the steady states.
+    # ts: [G] switching time, when the kinetics enters the repression phase
+    # alpha, beta, gamma: [G] generation, splicing and degradation rates
+    ############################################################
+    eps = 1e-6
+    unstability = np.abs(beta-gamma) < eps
+
+    ts_ = ts.squeeze()
+    expb, expg = np.exp(-beta*ts_), np.exp(-gamma*ts_)
+    u0 = alpha/(beta+eps)*(1.0-expb)
+    s0 = alpha/(gamma+eps)*(1.0-expg)+alpha/(gamma-beta+eps)*(expg-expb)*(1-unstability)-alpha*ts_*expg*unstability
+    return u0, s0
+
+
+def ode_numpy(t, alpha, beta, gamma, to, ts, scaling=None, k=10.0):
+    """(Numpy Version) ODE solution with fixed rates
+
+    Args:
+        t (:class:`numpy.ndarray`): Cell time, (N,1)
+        alpha (:class:`numpy.ndarray`): Transcription rates
+        beta (:class:`numpy.ndarray`): Splicing rates
+        gamma (:class:`numpy.ndarray`): Degradation rates
+        to (:class:`numpy.ndarray`): switch-on time
+        ts (:class:`numpy.ndarray`): switch-off time (induction to repression)
+        scaling (:class:numpy array, optional): Scaling factor (u / s). Defaults to None.
+        k (float, optional): Parameter for a smooth clip of tau. Defaults to 10.0.
+
+    Returns:
+        tuple:
+            returns the unspliced and spliced counts predicted by the ODE
+    """
+    eps = 1e-6
+    unstability = (np.abs(beta - gamma) < eps)
+    o = (t <= ts).astype(int)
+    # Induction
+    tau_on = F.softplus(torch.tensor(t-to), beta=k).numpy()
+    assert np.all(~np.isnan(tau_on))
+    expb, expg = np.exp(-beta*tau_on), np.exp(-gamma*tau_on)
+    uhat_on = alpha/(beta+eps)*(1.0-expb)
+    shat_on = alpha/(gamma+eps)*(1.0-expg) \
+        + alpha/(gamma-beta+eps)*(expg-expb)*(1-unstability) - alpha*tau_on*unstability
+
+    # Repression
+    u0_, s0_ = pred_steady_numpy(np.clip(ts-to, 0, None), alpha, beta, gamma)  # tensor shape: (G)
+    if ts.ndim == 2 and to.ndim == 2:
+        u0_ = u0_.reshape(-1, 1)
+        s0_ = s0_.reshape(-1, 1)
+    # tau_off = np.clip(t-ts,a_min=0,a_max=None)
+    tau_off = F.softplus(torch.tensor(t-ts), beta=k).numpy()
+    assert np.all(~np.isnan(tau_off))
+    expb, expg = np.exp(-beta*tau_off), np.exp(-gamma*tau_off)
+    uhat_off = u0_*expb
+    shat_off = s0_*expg+(-beta*u0_)/(gamma-beta+eps)*(expg-expb)*(1-unstability)
+
+    uhat, shat = (uhat_on*o + uhat_off*(1-o)), (shat_on*o + shat_off*(1-o))
+    if scaling is not None:
+        uhat *= scaling
+    return uhat, shat
+
+
+def get_x0_tree_numpy(par, eps=1e-6, **kwargs):
+    # Compute initial conditions by sequentially traversing the tree
+    # Returns scaled u0
+    alpha, beta, gamma = kwargs['alpha'], kwargs['beta'], kwargs['gamma']  # tensor shape: (N type, G)
+    t_trans = kwargs['t_trans']
+    scaling = kwargs["scaling"]
+
+    n_type, G = alpha.shape
+    u0 = np.empty((n_type, G))
+    s0 = np.empty((n_type, G))
+    self_idx = np.array(range(n_type))
+    roots = np.where(par == self_idx)[0]  # the parent of any root is itself
+    u0_root, s0_root = kwargs['u0_root'], kwargs['s0_root']  # tensor shape: (n roots, G), u0 unscaled
+    u0[roots] = u0_root/scaling
+    s0[roots] = s0_root
+    par[roots] = -1
+    count = len(roots)
+    progenitors = roots
+
+    while count < n_type:
+        cur_level = np.concatenate([np.where(par == x)[0] for x in progenitors])
+        tau0 = np.clip(t_trans[cur_level] - t_trans[par[cur_level]], 0, None).reshape(-1, 1)
+        u0_hat, s0_hat = pred_su_numpy(tau0,
+                                       u0[par[cur_level]],
+                                       s0[par[cur_level]],
+                                       alpha[par[cur_level]],
+                                       beta[par[cur_level]],
+                                       gamma[par[cur_level]])
+        u0[cur_level] = u0_hat
+        s0[cur_level] = s0_hat
+        progenitors = cur_level
+        count += len(cur_level)
+    par[roots] = roots
+    return u0, s0
+
+
+def ode_br_numpy(t, y, par, eps=1e-6, **kwargs):
+    """
+    (Numpy Version)
+    Branching ODE solution.
+
+    Args:
+        t (:class:`numpy.ndarray`):
+            Cell time, (N,1)
+        y (:class:`numpy.ndarray`):
+            Cell type, encoded in integer, (N,)
+        par (:class:`numpy.ndarray`):
+            Parent cell type in the transition graph, (N_type,)
+
+    kwargs:
+        alpha (:class:`numpy.ndarray`):
+            Transcription rates, (cell type by gene ).
+        beta (:class:`numpy.ndarray`):
+            Splicing rates, (cell type by gene ).
+        gamma (:class:`numpy.ndarray`):
+            Degradation rates, (cell type by gene ).
+        t_trans (:class:`numpy.ndarray`):
+            Start time of splicing dynamics of each cell type.
+        scaling (:class:`numpy.ndarray`):
+            Genewise scaling factor between unspliced and spliced counts.
+
+    Returns:
+        tuple containing:
+
+            - :class:`numpy.ndarray`: Predicted u values, (N, G)
+            - :class:`numpy.ndarray`: Predicted s values, (N, G)
+    """
+    alpha, beta, gamma = kwargs['alpha'], kwargs['beta'], kwargs['gamma']  # array shape: (N type, G)
+    t_trans = kwargs['t_trans']
+    scaling = kwargs["scaling"]
+
+    u0, s0 = get_x0_tree_numpy(par, **kwargs)
+    n_type, G = alpha.shape
+    uhat, shat = np.zeros((len(y), G)), np.zeros((len(y), G))
+    for i in range(n_type):
+        mask = (t[y == i] >= t_trans[i])
+        tau = np.clip(t[y == i].reshape(-1, 1) - t_trans[i], 0, None) * mask \
+            + np.clip(t[y == i].reshape(-1, 1) - t_trans[par[i]], 0, None) * (1-mask)
+        uhat_i, shat_i = pred_su_numpy(tau,
+                                       u0[i]*mask+u0[par[i]]*(1-mask),
+                                       s0[i]*mask+s0[par[i]]*(1-mask),
+                                       alpha[i]*mask+alpha[[par[i]]]*(1-mask),
+                                       beta[i]*mask+beta[[par[i]]]*(1-mask),
+                                       gamma[i]*mask+gamma[[par[i]]]*(1-mask))
+        uhat[y == i] = uhat_i
+        shat[y == i] = shat_i
+    return uhat*scaling, shat
 
 
 def get_mse(U, S, Uhat, Shat, axis=None):
@@ -1028,7 +1292,6 @@ def cross_boundary_correctness(
     for u, v in cluster_edges:
         sel = adata.obs[k_cluster] == u
         nbs = adata.uns['neighbors']['indices'][sel]  # [n * 30]
-        nbb = nbs.shape[1]
 
         boundary_nodes = map(lambda nodes: keep_type(adata, nodes, v, k_cluster), nbs)
         x_points = x_emb[sel]
@@ -1036,7 +1299,7 @@ def cross_boundary_correctness(
 
         type_score = []
         for x_pos, x_vel, nodes in zip(x_points, x_velocities, boundary_nodes):
-            if (len(nodes) < 0.2 * nbb) or (len(nodes) > 0.8 * nbb):
+            if len(nodes) == 0:
                 continue
             position_dif = x_emb[nodes] - x_pos
             dir_scores = cosine_similarity(position_dif, x_vel.reshape(1, -1)).flatten()

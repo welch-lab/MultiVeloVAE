@@ -226,7 +226,7 @@ def differential_dynamics(adata,
                              'p2_c': p2_c,
                              'bayes_factor_c': bf_c,
                              'log2_fc_c': np.mean(lfc_c, 0)},
-                             index=adata.var_names)
+                            index=adata.var_names)
 
         p1_u = np.mean(u1 > u2, 0)
         p2_u = 1.0 - p1_u
@@ -356,8 +356,7 @@ def differential_dynamics(adata,
                                               f'v_{group1}': vs1,
                                               f'v_{group2}': vs2,
                                               f't_{group1}': g1_corrected[10],
-                                              f't_{group2}': g2_corrected[10]
-                                             }
+                                              f't_{group2}': g2_corrected[10]}
     return df_dd
 
 
