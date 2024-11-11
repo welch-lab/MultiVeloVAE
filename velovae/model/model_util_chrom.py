@@ -1615,9 +1615,9 @@ def knn_smooth_chrom(adata_atac, nn_idx=None, nn_dist=None, conn=None, n_neighbo
 def velocity_graph(adata, key='vae', xkey=None, batch_corrected=False, velocity_offset=False, t_perc=1, **kwargs):
     vkey = f'{key}_velocity'
     if vkey+'_norm' not in adata.layers.keys():
-        t = adata.obs[f"{key}_time"].to_numpy()
         v = adata.layers[vkey]
         if velocity_offset:
+            t = adata.obs[f"{key}_time"].to_numpy()
             v = v - np.mean(v[(t <= np.percentile(t, t_perc))], 0)
         adata.layers[vkey+'_norm'] = v / np.sum(np.abs(v), 0)
         adata.uns[vkey+'_norm_params'] = adata.uns[vkey+'_params']
@@ -1838,7 +1838,7 @@ def regress_out(adata, keys, layer=None, n_jobs=8, copy=False, add_intercept=Fal
     return adata if copy else None
 
 
-# The following code was modified from https://github.com/theislab/scvelo/blob/main/scvelo
+# The following code was modified from scVelo https://github.com/theislab/scvelo/blob/main/scvelo
 def get_modality(adata, modality):
     if modality in ["X", None]:
         return adata.X

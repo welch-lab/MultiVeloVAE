@@ -713,26 +713,16 @@ class VAEChrom():
                  var_to_regress=None,
                  device='cpu',
                  hidden_size=256,
-                 batch_size=256,
                  full_vb=False,
-                 split_enhancer=False,
                  parallel_arch=True,
                  t_network=True,
-                 velocity_continuity=False,
-                 velocity_correlation=False,
                  four_basis=False,
                  run_2nd_stage=True,
-                 refine_velocity=True,
                  tmax=1,
-                 reinit_params=False,
                  init_method='steady',
                  init_key=None,
                  tprior=None,
-                 train_x0=True,
-                 init_ton_zero=True,
-                 unit_scale=True,
                  deming_std=False,
-                 log_params=False,
                  rna_only=False,
                  rna_only_idx=[],
                  learning_rate=None,
@@ -743,6 +733,66 @@ class VAEChrom():
                  cluster_key='clusters',
                  figure_path='figures',
                  embed=None):
+        """MultiVeloVAE Model
+
+        Args:
+            adata ((:class:`anndata.AnnData`)):
+                Input AnnData object for RNA data.
+            adata ((:class:`anndata.AnnData`)):
+                Input AnnData object for chromatin data. Defaults to None for RNA-only.
+            dim_z (int, optional):
+                Latent cell state dimension. Defaults to None.
+            batch_key (str, optional):
+                Key of batch labels in adata.obs. Defaults to None.
+            ref_batch (int, optional):
+                Index to use as the reference batch. Defaults to None.
+            batch_hvg_key (str, optional):
+                Prefix of key for batch highly-variable genes in adata.var. Defaults to None.
+            var_to_regress (str or list, optional):
+                Continuous variable(s) to be regressed out. Defaults to None.
+            device (torch.device, optional):
+                Device used for training. Defaults to 'cpu'.
+            hidden_size (int, optional):
+                The width of the hidden layers of the encoder and decoder. Defaults to 256.
+            full_vb (bool, optional):
+                Whether to use the full variational Bayes feature to estimate rate parameter uncertainty.
+                Defaults to False.
+            parallel_arch (bool, optional):
+                Whether to use parallel architecture for the indicator functions. Defaults to True.
+            t_network (bool, optional):
+                Whether to use a neural network to estimate the time distribution. Defaults to True.
+            tmax (float):
+                Maximum time, specifies the time range for initialization.
+            init_method (str, optional):
+                {'steady', 'tprior'}, initialization method. Defaults to 'steady'.
+            init_key (str, optional):
+                Key in adata.obs storing the capture time or any prior time information.
+                This is used in initialization. Defaults to None.
+            tprior (str, optional):
+                Key in adata.obs containing the informative time prior.
+                This is used in model training. Defaults to None.
+            deming_std (bool, optional):
+                Whether to use Deming residual for the standard deviation of the loss function. Defaults to False.
+            rna_only (bool, optional):
+                Whether to run in RNA-only mode. Defaults to False.
+            rna_only_idx (list, optional):
+                List of indices of RNA-only samples. Defaults to [].
+            learning_rate (float, optional):
+                Learning rate for training. Defaults to None.
+            early_stop_thred (float, optional):
+                Early stopping threshold for training. Defaults to None.
+            checkpoints (list, optional):
+                Contains a list of two .pt files containing pretrained or saved model parameters.
+                Defaults to [None, None].
+            plot_init (bool, optional):
+                Whether to plot the initialization results. Defaults to False.
+            gene_plot (list, optional):
+                List of gene names to plot. Defaults to [].
+            cluster_key (str, optional):
+                Key in adata.obs containing the cluster labels for plot colors. Defaults to 'clusters'.
+            figure_path (str, optional):
+                Path to save the figures. Defaults to 'figures'.
+        """
         if adata_atac is None or rna_only:
             rna_only = True
             adata_atac = ad.AnnData(X=np.ones((adata.n_obs, adata.n_vars)))
@@ -755,42 +805,26 @@ class VAEChrom():
         elif len(rna_only_idx) == 0:
             rna_only_idx = []
         else:
-            raise ValueError('rna_only_idx is invalid.')
+            if not isinstance(rna_only_idx, (list, np.ndarray)):
+                raise ValueError('rna_only_idx is invalid.')
         if batch_key is not None and len(rna_only_idx) > 0 and not rna_only:
             print('Running in mixed RNA-only mode.')
             if ref_batch is not None and ref_batch in rna_only_idx:
                 raise ValueError('Error: reference batch cannot be RNA only when inferring chromatin. Exiting the program...')
         if ('Mc' not in adata_atac.layers) or ('Mu' not in adata.layers) or ('Ms' not in adata.layers):
             raise ValueError('Chromatin/Unspliced/Spliced count matrices not found in the layers! Exiting the program...')
-        if split_enhancer:
-            if ('Me' not in adata_atac.obsm) or ('Mp' not in adata_atac.layers):
-                raise ValueError('Enhancer/Promoter count matrices not found! Did you forget to split enhancers during preprocessing?')
-            if batch_key is not None:
-                raise ValueError('Batch correction is currently not supported in split enhancer mode.')
-            if rna_only:
-                raise ValueError('RNA-only mode is currently not supported in split enhancer mode.')
         if issparse(adata_atac.layers['Mc']):
             adata_atac.layers['Mc'] = adata_atac.layers['Mc'].toarray()
         if issparse(adata.layers['Mu']):
             adata.layers['Mu'] = adata.layers['Mu'].toarray()
         if issparse(adata.layers['Ms']):
             adata.layers['Ms'] = adata.layers['Ms'].toarray()
-        if split_enhancer:
-            if issparse(adata_atac.obsm['Me']):
-                adata_atac.obsm['Me'] = adata_atac.obsm['Me'].toarray()
-            if issparse(adata_atac.layers['Mp']):
-                adata_atac.layers['Mp'] = adata_atac.layers['Mp'].toarray()
         if np.any(adata_atac.layers['Mc'] < 0):
             logger.warn('Negative expression values detected in layers["Mc"]. Please make sure all values are non-negative.')
         if np.any(adata.layers['Mu'] < 0):
             logger.warn('Negative expression values detected in layers["Mu"]. Please make sure all values are non-negative.')
         if np.any(adata.layers['Ms'] < 0):
             logger.warn('Negative expression values detected in layers["Ms"]. Please make sure all values are non-negative.')
-        if split_enhancer:
-            if np.any(adata_atac.obsm['Me'] < 0):
-                logger.warn('Negative expression values detected in obsm["Me"]. Please make sure all values are non-negative.')
-            if np.any(adata_atac.layers['Mp'] < 0):
-                logger.warn('Negative expression values detected in layers["Mp"]. Please make sure all values are non-negative.')
 
         self.config = {
             # model parameters
@@ -798,21 +832,21 @@ class VAEChrom():
             "hidden_size": hidden_size,
             "key": 'vae',
             "is_full_vb": full_vb,
-            "split_enhancer": split_enhancer,
+            "split_enhancer": False,
             "indicator_arch": 'parallel' if parallel_arch else 'series',
             "t_network": t_network if tprior is None else False,
-            "velocity_continuity": velocity_continuity,
-            "velocity_correlation": velocity_correlation,
+            "velocity_continuity": False,
+            "velocity_correlation": False,
             "four_basis": four_basis,
             "batch_key": batch_key,
             "ref_batch": ref_batch,
             "batch_hvg_key": batch_hvg_key,
             "var_to_regress": var_to_regress,
-            "reinit_params": reinit_params,
-            "init_ton_zero": init_ton_zero,
-            "unit_scale": unit_scale,
+            "reinit_params": False,
+            "init_ton_zero": True,
+            "unit_scale": True,
             'loss_std_type': 'deming' if deming_std else 'global',
-            "log_params": log_params,
+            "log_params": False,
             "rna_only": rna_only,
             "rna_only_idx": rna_only_idx,
             "tmax": tmax,
@@ -829,9 +863,9 @@ class VAEChrom():
             # training parameters
             "n_epochs": 2000,
             "n_epochs_post": 500,
-            "n_refine": 6 if refine_velocity else 1,
+            "n_refine": 6,
             "n_refine_min": 3,
-            "batch_size": batch_size,
+            "batch_size": 256,
             "learning_rate": None,
             "learning_rate_ode": None,
             "learning_rate_post": None,
@@ -861,7 +895,7 @@ class VAEChrom():
             "neg_slope": 0.0,
             "neg_slope2": 1e-2,
             "k_alt": 0,
-            "train_x0": train_x0,
+            "train_x0": True,
             "train_ton": False,
             "train_scaling": True,
             "train_offset": True,
@@ -916,8 +950,8 @@ class VAEChrom():
                                dim_reg=(0 if self.var_to_regress is None else self.var_to_regress.shape[1]),
                                hidden_size=hidden_size,
                                t_network=t_network,
-                               split_enhancer=split_enhancer,
-                               Cin_e=self.adata_atac.obsm['Me'].shape[1] if split_enhancer else None,
+                               split_enhancer=self.config['split_enhancer'],
+                               Cin_e=self.adata_atac.obsm['Me'].shape[1] if self.config['split_enhancer'] else None,
                                checkpoint=checkpoints[0]).float().to(self.device)
 
         self.decoder = Decoder(self.adata,
@@ -929,19 +963,19 @@ class VAEChrom():
                                batch_idx=self.batch_,
                                ref_batch=self.ref_batch,
                                hidden_size=hidden_size,
-                               split_enhancer=split_enhancer,
+                               split_enhancer=self.config['split_enhancer'],
                                parallel_arch=parallel_arch,
                                t_network=t_network,
                                full_vb=full_vb,
                                global_std=(not deming_std),
-                               log_params=log_params,
+                               log_params=self.config["log_params"],
                                rna_only=rna_only,
                                rna_only_idx=rna_only_idx,
                                perc=98,
                                tmax=tmax,
-                               reinit=reinit_params,
-                               train_x0=train_x0,
-                               init_ton_zero=init_ton_zero,
+                               reinit=self.config["reinit_params"],
+                               train_x0=self.config["train_x0"],
+                               init_ton_zero=self.config["init_ton_zero"],
                                init_method=init_method,
                                init_key=init_key,
                                checkpoint=checkpoints[1]).float().to(self.device)
@@ -960,7 +994,7 @@ class VAEChrom():
         self.loss_test_iter, self.loss_test_color = [], []
         self.rec_train, self.klt_train, self.klz_train = [], [], []
         self.rec_test, self.klt_test, self.klz_test = [], [], []
-        if split_enhancer:
+        if self.config['split_enhancer']:
             self.rec_e_train, self.kle_train = [], []
             self.rec_e_test, self.kle_test = [], []
         self.counter = 0
@@ -1077,7 +1111,7 @@ class VAEChrom():
                 if f"{batch_hvg_key}-{batch}" in adata.var.keys():
                     self.batch_hvg_genes_[self.batch_dic[batch]] = adata.var[f"{batch_hvg_key}-{batch}"].to_numpy()
                 else:
-                    logger.warn(f'Highly variable genes for batch {batch} not found in var:batch_{batch_hvg_key}. All genes will be used for batch {batch}.')
+                    logger.warn(f'Highly variable genes for batch {batch} not found in var: {batch_hvg_key}-batch. All genes will be used for batch {batch}.')
                     self.batch_hvg_genes_[self.batch_dic[batch]] = True
         elif self.enable_cvae:
             for i in range(self.n_batch):
@@ -1300,11 +1334,15 @@ class VAEChrom():
                        self.cell_type_colors,
                        save=f"{figure_path}/phasescaled-{gene_plot[i].replace('.', '-')}-init-us.png")
 
-    def prepare_dataset(self, only_full=False):
-        chrom = 'Mc' if not self.config['split_enhancer'] else 'Mp'
-        X = np.concatenate((self.adata_atac.layers[chrom].toarray() if issparse(self.adata_atac.layers[chrom]) else self.adata_atac.layers[chrom],
-                            self.adata.layers['Mu'].toarray() if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu'],
-                            self.adata.layers['Ms'].toarray() if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']), 1).astype(float)
+    def prepare_dataset(self, c=None, u=None, s=None, only_full=False):
+        chrom_key = 'Mc' if not self.config['split_enhancer'] else 'Mp'
+        if c is None:
+            c = self.adata_atac.layers[chrom_key].toarray() if issparse(self.adata_atac.layers[chrom_key]) else self.adata_atac.layers[chrom_key]
+        if u is None:
+            u = self.adata.layers['Mu'].toarray() if issparse(self.adata.layers['Mu']) else self.adata.layers['Mu']
+        if s is None:
+            s = self.adata.layers['Ms'].toarray() if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']
+        X = np.concatenate((c, u, s), 1).astype(float)
         if self.config['split_enhancer']:
             E = self.adata_atac.obsm['Me'].toarray() if issparse(self.adata_atac.obsm['Me']) else self.adata_atac.obsm['Me']
             E = E.astype(float)
