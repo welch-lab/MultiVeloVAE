@@ -1612,6 +1612,7 @@ def knn_smooth_chrom(adata_atac, nn_idx=None, nn_dist=None, conn=None, n_neighbo
 
 
 # Modified from MultiVelo
+# to support batch correction
 def velocity_graph(adata, key='vae', xkey=None, batch_corrected=False, velocity_offset=False, t_perc=1, **kwargs):
     vkey = f'{key}_velocity'
     if vkey+'_norm' not in adata.layers.keys():
@@ -1839,6 +1840,7 @@ def regress_out(adata, keys, layer=None, n_jobs=8, copy=False, add_intercept=Fal
 
 
 # The following code was modified from scVelo https://github.com/theislab/scvelo/blob/main/scvelo
+# to support negative values
 def get_modality(adata, modality):
     if modality in ["X", None]:
         return adata.X
@@ -1870,9 +1872,15 @@ def verify_dtypes(adata) -> None:
             adata.uns = uns
 
 
+def scv_sum(a, axis):
+    if a.ndim == 1:
+        axis = 0
+    return a.sum(axis=axis).A1 if issparse(a) else a.sum(axis=axis)
+
+
 def get_size(adata, modality=None):
     X = get_modality(adata=adata, modality=modality)
-    return sum(X, axis=1)
+    return scv_sum(X, axis=1)
 
 
 def set_initial_size(adata, layers=None):

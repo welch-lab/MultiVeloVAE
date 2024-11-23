@@ -145,8 +145,8 @@ def differential_dynamics(adata,
         g1_dataset = SCDataE(x[g1_sample_idx], e[[g1_sample_idx]], device=model.device)
         g2_dataset = SCDataE(x[g2_sample_idx], e[[g2_sample_idx]], device=model.device)
 
-    g1_corrected = model.test(g1_dataset, batch=(None if batch_correction else batch_array[g1_sample_idx]), sample=True, seed=seed)
-    g2_corrected = model.test(g2_dataset, batch=(None if batch_correction else batch_array[g2_sample_idx]), sample=True, seed=seed)
+    g1_corrected = model.test(g1_dataset, batch=(None if batch_correction else batch_array[g1_sample_idx]), sample=True, seed=seed, out_of_sample=True)
+    g2_corrected = model.test(g2_dataset, batch=(None if batch_correction else batch_array[g2_sample_idx]), sample=True, seed=seed, out_of_sample=True)
 
     kc1 = g1_corrected[11]
     kc2 = g2_corrected[11]

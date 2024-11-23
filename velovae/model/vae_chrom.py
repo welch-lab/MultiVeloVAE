@@ -1593,7 +1593,7 @@ class VAEChrom():
 
         return loss, err_rec, self.config["kl_t"]*kldt, self.config["kl_z"]*kldz, err_rec_e, self.config["kl_z"]*klde
 
-    def pred_all(self, dataset, mode='test', output=None, gene_idx=None, batch=None, var_to_regress=None):
+    def pred_all(self, dataset, mode='test', output=None, gene_idx=None, batch=None, var_to_regress=None, encoder_only=False):
         if output is None:
             output = ["chat", "uhat", "shat", "t", "z", "kc", "rho"]
             if self.config['split_enhancer']:
@@ -1668,13 +1668,27 @@ class VAEChrom():
                 else:
                     idx = torch.arange(i, j, device=self.device)
 
-                c0 = self.c0[idx] if self.use_knn else None
-                u0 = self.u0[idx] if self.use_knn else None
-                s0 = self.s0[idx] if self.use_knn else None
-                t0 = self.t0[idx] if self.use_knn else None
-                t1 = self.t1[idx] if self.use_knn and self.config['velocity_continuity'] else None
-                p_t = self.p_t[:, idx, :]
-                p_z = self.p_z[:, idx, :]
+                if encoder_only:
+                    c0 = torch.zeros(len(idx), G, dtype=torch.float, device=self.device) if self.use_knn else None
+                else:
+                    c0 = self.c0[idx] if self.use_knn else None
+                if encoder_only:
+                    u0 = torch.zeros(len(idx), G, dtype=torch.float, device=self.device) if self.use_knn else None
+                else:
+                    u0 = self.u0[idx] if self.use_knn else None
+                if encoder_only:
+                    s0 = torch.zeros(len(idx), G, dtype=torch.float, device=self.device) if self.use_knn else None
+                else:
+                    s0 = self.s0[idx] if self.use_knn else None
+                if encoder_only:
+                    t0 = torch.zeros(len(idx), 1, dtype=torch.float, device=self.device) if self.use_knn else None
+                else:
+                    t0 = self.t0[idx] if self.use_knn else None
+                if encoder_only:
+                    t1 = torch.zeros(len(idx), 1, dtype=torch.float, device=self.device) if self.use_knn and self.config['velocity_continuity'] else None
+                else:
+                    t1 = self.t1[idx] if self.use_knn and self.config['velocity_continuity'] else None
+
                 if batch is None:
                     condition = self.onehot[idx] if self.enable_cvae else None
                 else:
@@ -1683,45 +1697,48 @@ class VAEChrom():
                 out = self.forward(data_in, data_in_e, c0, u0, s0, t0, t1, condition, regressor, sample=False, return_velocity=("v" in output))
                 mu_tx, std_tx, mu_zx, std_zx, mu_ex, std_ex, chat, uhat, shat, ehat, t_, kc, rho, chat_fw, uhat_fw, shat_fw, vc, vu, vs, vc_fw, vu_fw, vs_fw = out
 
-                loss = self.vae_risk((mu_tx, std_tx),
-                                     p_t,
-                                     (mu_zx, std_zx),
-                                     p_z,
-                                     (mu_ex, std_ex),
-                                     data_in[:, :G],
-                                     data_in[:, G:G*2],
-                                     data_in[:, G*2:],
-                                     data_in_e,
-                                     chat,
-                                     uhat,
-                                     shat,
-                                     ehat,
-                                     vc,
-                                     vu,
-                                     vs,
-                                     c0,
-                                     u0,
-                                     s0,
-                                     chat_fw,
-                                     uhat_fw,
-                                     shat_fw,
-                                     vc_fw,
-                                     vu_fw,
-                                     vs_fw,
-                                     self.c1[idx] if self.use_knn and self.config['velocity_continuity'] else None,
-                                     self.u1[idx] if self.use_knn and self.config['velocity_continuity'] else None,
-                                     self.s1[idx] if self.use_knn and self.config['velocity_continuity'] else None,
-                                     self.s_knn[idx] if self.reg_velocity else None,
-                                     condition,
-                                     sample=False)
+                if not encoder_only:
+                    p_t = self.p_t[:, idx, :]
+                    p_z = self.p_z[:, idx, :]
+                    loss = self.vae_risk((mu_tx, std_tx),
+                                         p_t,
+                                         (mu_zx, std_zx),
+                                         p_z,
+                                         (mu_ex, std_ex),
+                                         data_in[:, :G],
+                                         data_in[:, G:G*2],
+                                         data_in[:, G*2:],
+                                         data_in_e,
+                                         chat,
+                                         uhat,
+                                         shat,
+                                         ehat,
+                                         vc,
+                                         vu,
+                                         vs,
+                                         c0,
+                                         u0,
+                                         s0,
+                                         chat_fw,
+                                         uhat_fw,
+                                         shat_fw,
+                                         vc_fw,
+                                         vu_fw,
+                                         vs_fw,
+                                         self.c1[idx] if self.use_knn and self.config['velocity_continuity'] else None,
+                                         self.u1[idx] if self.use_knn and self.config['velocity_continuity'] else None,
+                                         self.s1[idx] if self.use_knn and self.config['velocity_continuity'] else None,
+                                         self.s_knn[idx] if self.reg_velocity else None,
+                                         condition,
+                                         sample=False)
 
-                elbo = elbo - ((j-i)/N)*loss[0].detach().cpu().item()
-                rec = rec - ((j-i)/N)*loss[1].detach().cpu().item()
-                klt = klt - ((j-i)/N)*loss[2].detach().cpu().item()
-                klz = klz - ((j-i)/N)*loss[3].detach().cpu().item()
-                if self.config['split_enhancer']:
-                    rec_e = rec_e - ((j-i)/N)*loss[4].detach().cpu().item()
-                    kle = kle - ((j-i)/N)*loss[5].detach().cpu().item()
+                    elbo = elbo - ((j-i)/N)*loss[0].detach().cpu().item()
+                    rec = rec - ((j-i)/N)*loss[1].detach().cpu().item()
+                    klt = klt - ((j-i)/N)*loss[2].detach().cpu().item()
+                    klz = klz - ((j-i)/N)*loss[3].detach().cpu().item()
+                    if self.config['split_enhancer']:
+                        rec_e = rec_e - ((j-i)/N)*loss[4].detach().cpu().item()
+                        kle = kle - ((j-i)/N)*loss[5].detach().cpu().item()
                 if "chat" in output:
                     if chat.ndim == 3:
                         chat = torch.sum(chat*w_hard, 1)
@@ -2667,21 +2684,21 @@ class VAEChrom():
         print(f"Final: Train ELBO = {elbo_train:.3f},\tTest ELBO = {elbo_test:.3f}")
         print(f"*********      Finished. Total Time = {convert_time(time.time()-start)}     *********")
 
-    def test(self, dataset, batch=None, covar=None, k=1, sample=False, seed=0):
+    def test(self, dataset, batch=None, covar=None, k=1, sample=False, seed=0, out_of_sample=False):
         self.set_mode('eval')
 
         if not self.enable_cvae:
-            out, _ = self.pred_all(dataset, mode="both")
+            out, _ = self.pred_all(dataset, mode="both", encoder_only=out_of_sample)
         else:
             if batch is not None:
                 print('Using supplied batch list for latent variable computation.')
                 batch = np.array([self.batch_dic[x] for x in np.array(batch)])
                 batch = torch.tensor(batch, dtype=int, device=self.device)
-                out, _ = self.pred_all(dataset, mode="both", batch=batch)
+                out, _ = self.pred_all(dataset, mode="both", batch=batch, encoder_only=out_of_sample)
             else:
                 print('Using reference batch for latent variable computation.')
                 batch = torch.full((dataset.data.shape[0],), self.ref_batch, dtype=int, device=self.device)
-                out, _ = self.pred_all(dataset, mode="both", batch=batch)
+                out, _ = self.pred_all(dataset, mode="both", batch=batch, encoder_only=out_of_sample)
 
         c0_test = np.zeros((dataset.data.shape[0], dataset.data.shape[1]//3), dtype=np.float32)
         u0_test = np.zeros((dataset.data.shape[0], dataset.data.shape[1]//3), dtype=np.float32)
@@ -2964,6 +2981,9 @@ class VAEChrom():
                          batch_hvg_key=self.config['batch_hvg_key'],
                          batch_correction=self.enable_cvae,
                          rna_only=self.config['rna_only'])
+
+        if np.nanmax(t_) - np.nanmin(t_) < 0.1:
+            logger.warn('Time shrinked to very narrow range. Consider reduring the number of epochs in Stage 1: n_epochs (default 2000).')
 
         if file_name is not None:
             print("Writing anndata output to file.")
