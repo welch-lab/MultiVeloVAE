@@ -1586,6 +1586,8 @@ def knn_smooth_chrom(adata_atac, nn_idx=None, nn_dist=None, conn=None, n_neighbo
     if nn_idx is not None and nn_dist is not None:
         if nn_idx.shape[0] != adata_atac.shape[0]:
             raise ValueError('Number of rows of KNN indices does not equal to number of observations.')
+        if np.min(nn_idx) == 0:
+            raise ValueError('KNN indices should be 1-based. Found 0s.')
         if nn_dist.shape[0] != adata_atac.shape[0]:
             raise ValueError('Number of rows of KNN distances does not equal to number of observations.')
         X = coo_matrix(([], ([], [])), shape=(nn_idx.shape[0], 1))
