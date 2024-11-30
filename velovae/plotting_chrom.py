@@ -583,11 +583,35 @@ def ellipse_fit(adata,
                 pointsize=2,
                 linewidth=2
                 ):
+    """Plot ellipse fit for genes.
+
+    Args:
+        adata (:class:`anndata.AnnData`):
+            Input data object.
+        genes ([str, list of str]):
+            Gene names to plot.
+        color_by (str, optional):
+            Color used for the plots. Defaults to ellipse 'quantile'.
+        n_cols (int, optional):
+            Number of columns to plot. Defaults to 8.
+        title (str, optional):
+            Title of the whole figure. Defaults to None.
+        figsize (tuple, optional):
+            Size of the figure. Defaults to None.
+        axis_on (bool, optional):
+            Whether to plot axis. Defaults to False.
+        pointsize (int, optional):
+            Point size. Defaults to 2.
+        linewidth (int, optional):
+            Line width. Defaults to 2.
+    """
     by_quantile = color_by == 'quantile'
     by_quantile_score = color_by == 'quantile_scores'
     if not by_quantile and not by_quantile_score:
         types = adata.obs[color_by].cat.categories
         colors = adata.uns[f'{color_by}_colors']
+    if isinstance(genes, str):
+        genes = [genes]
     gn = len(genes)
     if gn < n_cols:
         n_cols = gn
@@ -725,6 +749,48 @@ def dynamic_plot(adata,
                  pointsize=2,
                  cmap='coolwarm'
                  ):
+    """Gene dynamics plot.
+
+    This function plots accessibility, expression, or velocity by time.
+
+    Args:
+        adata :class:`anndata.AnnData`:
+            Anndata result after VAE inference.
+        adata_atac :class:`anndata.AnnData`:
+            ATAC Anndata object.
+        genes [str,  list of str]:
+            List of genes to plot.
+        key (str, optional):
+            Key to find VAE variables. Defaults to `vae`.
+        by (str, optional):
+            Plot accessibilities and expressions if `expression`. Plot velocities if `velocity`.
+            Defaults to `expression`.
+        modalities (list, optional):
+            List of modalities in adata.layers to plot. Defaults to None.
+        modalities_pred (list, optional):
+            List of predicted modalities in adata.layers to plot. Defaults to None.
+        color_by: (str, optional):
+            Color used for the plots. Defaults to None.
+        axis_on (bool):
+            Whether to show axis labels. Defaults to True.
+        frame_on (bool):
+            Whether to show plot frames. Defaults to True.
+        show_pred (bool):
+            Whether to show prediction. Defaults to True.
+        show_pred_only (bool):
+            Whether to show prediction only. Defaults to False.
+        batch_correction (bool):
+            Whether the output was generated with batch correction. Defaults to False.
+        downsample (int):
+            How much to downsample the cells. The remaining number will be 1/`downsample` of original.
+            Defaults to 1.
+        figsize (tuple):
+            Total figure size. Defaults to None.
+        pointsize (float):
+            Point size for scatter plots. Defaults to 2.
+        cmap: (str)
+            Color map for continuous color key. Defaults to 'coolwarm'.
+    """
     from pandas.api.types import is_numeric_dtype, is_categorical_dtype
     if by not in ['expression', 'velocity']:
         raise ValueError('"by" must be either "expression" or "velocity".')
@@ -879,6 +945,65 @@ def scatter_plot(adata,
                  view_3d_azim=None,
                  full_name=False
                  ):
+    """Gene scatter plot.
+
+    This function plots phase portraits of the specified plane.
+
+    Args:
+        adata :class:`anndata.AnnData`:
+            Anndata result after VAE inference.
+        adata_atac :class:`anndata.AnnData`:
+            ATAC Anndata object.
+        genes [str,  list of str]:
+            List of genes to plot.
+        key (str, optional):
+            Key to find VAE variables. Defaults to `vae`.
+        by (str):
+            Plot unspliced-spliced plane if `us`. Plot chromatin-unspliced plane if `cu`.
+            Plot 3D phase portraits if `cus`. Defaults to 'us'.
+        modalities (list, optional):
+            List of modalities in adata.layers to plot. Defaults to None.
+        modalities_pred (list, optional):
+            List of predicted modalities in adata.layers to plot. Defaults to None.
+        color_by: (str, optional):
+            Color used for the plots. Defaults to None.
+        n_cols (int):
+            Number of columns to plot. Defaults to 5.
+        axis_on (bool):
+            Whether to show axis labels. Defaults to True.
+        frame_on (bool):
+            Whether to show plot frames. Defaults to True.
+        show_pred (bool):
+            Whether to show prediction. Defaults to True.
+        show_pred_only (bool):
+            Whether to show prediction only. Defaults to False.
+        batch_correction (bool):
+            Whether the output was generated with batch correction. Defaults to False.
+        title_more_info (bool):
+            Whether to show likelihood for the gene in title. Defaults to False.
+        velocity_arrows (bool):
+            Whether to show velocity arrows of cells on the phase portraits. Defaults to False.
+        downsample (int):
+            How much to downsample the cells. The remaining number will be 1/`downsample` of original.
+            Defaults to 1.
+        figsize (tuple):
+            Total figure size. Defaults to None.
+        pointsize (float):
+            Point size for scatter plots. Defaults to 2.
+        fontsize (int):
+            Font size for title. Defaults to 11.
+        cmap: (str)
+            Color map for continuous color key. Defaults to 'coolwarm'.
+        view_3d_elev (float):
+            Matplotlib 3D plot `elev` argument. `elev=90` is the same as U-S plane, and `elev=0` is the same as C-U plane.
+            Defaults to None.
+        view_3d_azim (float):
+            Matplotlib 3D plot `azim` argument. `azim=270` is the same as U-S plane, and `azim=0` is the same as C-U plane.
+            Defaults to None.
+        full_name (bool):
+            Show full names for chromatin, unspliced, and spliced rather than using abbreviated terms c, u, and s.
+            Defaults to False.
+    """
     from pandas.api.types import is_numeric_dtype, is_categorical_dtype
     if by not in ['us', 'cu', 'cus']:
         raise ValueError("'by' argument must be one of ['us', 'cu', 'cus']")
@@ -1064,8 +1189,8 @@ def scatter_plot(adata,
             ax.view_init(elev=view_3d_elev, azim=view_3d_azim)
         title = gene
         if title_more_info:
-            if f'{key}_likelihood' in adata.var and not np.all(adata.var[f'{key}_likelihood'].values == -1):
-                title += f" {adata[:,gene].var[f'{key}_likelihood'].values[0]:.3g}"
+            if f'{key}_likelihood' in adata.var and not np.isnan(adata[:, gene].var[f'{key}_likelihood']):
+                title += f" {adata[:, gene].var[f'{key}_likelihood'].values[0]:.3g}"
         ax.set_title(f'{title}', fontsize=fontsize)
         if by == 'us':
             ax.set_xlabel('spliced' if full_name else 's')
@@ -1186,6 +1311,56 @@ def differential_dynamics_plot(adata,
                                frame_on=True,
                                title=True,
                                legend=True):
+    """Plot differential dynamics between two groups of cells.
+
+    Args:
+        adata (:class:`anndata.AnnData`):
+            RNA AnnData object.
+        adata_atac (:class:`anndata.AnnData`):
+            ATAC AnnData object.
+        group1 (str, optional):
+            Name of group 1. Defaults to None.
+        group2 (str, optional):
+            Name of group 2. Defaults to None.
+        var (str, optional):
+            Variable to plot. Defaults to velocity 'v'.
+        signed_velocity (bool, optional):
+            Whether to use original velocity values or absolute values. Defaults to True.
+        color_by: (str, optional):
+            Color used for the plots. Defaults to None.
+        color_include (list, optional):
+            List of categories such as cell types to include in the plot. Defaults to None.
+        t_min (float, optional):
+            Minimum time point to include in the plot. Defaults to None.
+        t_max (float, optional):
+            Maximum time point to include in the plot. Defaults to None.
+        key (str, optional):
+            Key to find VAE variables. Defaults to `vae`.
+        n_bins (int, optional):
+            Number of bins to divide the time points. Defaults to 50.
+        n_samples (int, optional):
+            Number of data points to permute in each bin for each group. Defaults to 100.
+        seed (int, optional):
+            Seed for random generator. Defaults to 0.
+        kernel (str, optional):
+            Kernel to use for Gaussian Process regression. Defaults to 'RBF'.
+        p_value (bool, optional):
+            Whether to show p-value in the plot. Defaults to True.
+        n_cols (int, optional):
+            Number of columns to plot. Defaults to 5.
+        figsize (tuple, optional):
+            Total figure size. Defaults to None.
+        plot_equal (bool, optional):
+            Whether to plot equal time points. Defaults to True.
+        axis_on (bool, optional):
+            Whether to show axis labels. Defaults to True.
+        frame_on (bool, optional):
+            Whether to show plot frames. Defaults to True.
+        title (bool, optional):
+            Whether to show title. Defaults to True.
+        legend (bool, optional):
+            Whether to show legend. Defaults to True.
+    """
     eps = 1e-8
     if isinstance(genes, str) or isinstance(genes, int):
         genes = [genes]
@@ -1377,6 +1552,21 @@ def differential_dynamics_plot(adata,
 
 # Modified from MultiVelo
 def velocity_embedding_stream(adata, key='vae', show=True, **kwargs):
+    """Plot velocity streamplot with `scvelo.pl.velocity_embedding_stream`.
+
+    Args:
+        adata (:class:`anndata.AnnData`):
+            Anndata output from VAE inference.
+        key (str, optional):
+            Key to find layers. Defaults to 'vae'.
+        show (bool):
+            Whether to show the plot. Defaults to True.
+        **kwargs:
+            Additional parameters passed to `scvelo.pl.velocity_embedding_stream`.
+
+    Returns
+        if not show. A matplotlib axis object.
+    """
     vkey = f'{key}_velocity'
     if vkey+'_norm' not in adata.layers.keys():
         adata.layers[vkey+'_norm'] = adata.layers[vkey] / np.sum(np.abs(adata.layers[vkey]), 0)

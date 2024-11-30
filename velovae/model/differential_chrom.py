@@ -28,6 +28,8 @@ def log2_fold_change(v1, v2, eps=1e-8):
     return np.log2(v1 + eps) - np.log2(v2 + eps)
 
 
+# Inspired by [Lopez2018] and [Boyeau2019]
+# https://docs.scvi-tools.org/en/stable/user_guide/background/differential_expression.html
 def differential_dynamics(adata,
                           adata_atac,
                           model,
@@ -45,7 +47,49 @@ def differential_dynamics(adata,
                           n_samples=5000,
                           delta=1,
                           seed=0):
-    # inspired by [Lopez2018] and [Boyeau2019]
+    """Calculate differential dynamics between two groups of cells.
+
+    Args:
+        adata (:class:`anndata.AnnData`):
+            RNA AnnData object.
+        adata_atac (:class:`anndata.AnnData`):
+            ATAC AnnData object.
+        model (:class:`velovae.VAEChrom`):
+            A trained MultiVeloVAE model.
+        group1 (str, optional):
+            Name of group 1 in adata.obs[`group_key`]. Defaults to None.
+        group2 (str, optional):
+            Name of group 2 in adata.obs[`group_key`]. Defaults to None.
+        group_key (str, optional):
+            Field in adata.obs to find group labels. Defaults to None.
+        idx1 ([list, :class:`numpy.ndarray`], optional):
+            Indices of cells in group 1. Defaults to None.
+        idx2 ([list, :class:`numpy.ndarray`], optional):
+            Indices of cells in group 2. Defaults to None.
+        batch_key (str, optional):
+            Field in adata.obs to find batch labels. Defaults to None.
+        batch_correction (bool, optional):
+            Whether to perform batch correction before group comparisons. Defaults to True.
+        weight_batch_uniform (bool, optional):
+            Whether to draw cells equally or based on cell counts in each batch. Defaults to False.
+        mode (str, optional):
+            vanilla mode is one-sided and change mode is two-sided.
+            change mode uses `delta` to specify null hypothesis and computes a P-value.
+            Defaults to 'vanilla'.
+        signed_velocity (bool, optional):
+            Whether to use original velocity values or absolute values. Defaults to True.
+        save_raw (bool, optional):
+            Whether to save the predicted data in adata. Defaults to False.
+        n_samples (int, optional):
+            Number of data points in each group to generate. Defaults to 5000.
+        delta (Float, optional):
+            Interval of change used to define null hypothesis. Defaults to 1.
+        seed (int, optional):
+            Seed for random generator. Defaults to 0.
+
+    Returns:
+        :class:`pandas.DataFrame`: Output DataFrame with differential dynamics on various variables.
+    """
     eps = 1e-8
     if idx1 is None and idx2 is None and group_key is None and batch_key is None:
         raise ValueError("Need to specify either the group_key that contains the groups or idx1 (and idx2) directly.")

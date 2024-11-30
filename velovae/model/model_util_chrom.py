@@ -1251,37 +1251,43 @@ def elbo_collapsed_categorical(logits_phi, alpha, K, N):
 
 
 # Modified from MultiVelo
-def aggregate_peaks_10x(adata_atac, peak_annot_file, linkage_file, peak_dist=10000, min_corr=0.5, gene_body=False, return_dict=False, split_enhancer=False, verbose=False):
-    """Peak to gene aggregation.
+def aggregate_peaks_10x(adata_atac,
+                        peak_annot_file,
+                        linkage_file,
+                        peak_dist=10000,
+                        min_corr=0.5,
+                        gene_body=False,
+                        return_dict=False,
+                        split_enhancer=False,
+                        verbose=False):
+    """Aggregate promoter and enhancer peaks to genes based on the 10X linkage file.
 
-    This function aggregates promoter and enhancer peaks to genes based on the 10X linkage file.
-
-    Parameters
-    ----------
-    adata_atac: :class:`~anndata.AnnData`
-        ATAC anndata object which stores raw peak counts.
-    peak_annot_file: `str`
-        Peak annotation file from 10X CellRanger ARC.
-    linkage_file: `str`
-        Peak-gene linkage file from 10X CellRanger ARC. This file stores highly correlated peak-peak
-        and peak-gene pair information.
-    peak_dist: `int` (default: 10000)
-        Maximum distance for peaks to be included for a gene.
-    min_corr: `float` (default: 0.5)
-        Minimum correlation for a peak to be considered as enhancer.
-    gene_body: `bool` (default: `False`)
-        Whether to add gene body peaks to the associated promoters.
-    return_dict: `bool` (default: `False`)
-        Whether to return promoter and enhancer dictionaries.
-    verbose: `bool` (default: `False`)
-        Whether to print number of genes with promoter peaks.
+    Args:
+        adata_atac (:class:`anndata.AnnData`):
+            ATAC Anndata object which stores raw peak counts.
+        peak_annot_file (str):
+            Peak annotation file from 10X CellRanger ARC.
+        linkage_file (str):
+            Peak-gene linkage file from 10X CellRanger ARC. This file stores highly correlated peak-peak and peak-gene pair information.
+        peak_dist (int, optional):
+            Maximum distance for peaks to be included for a gene. Defaults to 10000.
+        min_corr (float, optional):
+            Minimum correlation for a peak to be considered as enhancer. Defaults to 0.5.
+        gene_body (bool, optional):
+            Whether to add gene body peaks to the associated promoters. Defaults to False.
+        return_dict (bool, optional):
+            Whether to return promoter and enhancer dictionaries. Defaults to False.
+        verbose (bool, optional):
+            Whether to print number of genes with promoter peaks. Defaults to False.
 
     Returns
-    -------
-    A new ATAC anndata object which stores gene aggreagted peak counts.
-    Additionally, if `return_dict==True`:
-        A dictionary which stores genes and promoter peaks.
-        And a dictionary which stores genes and enhancer peaks.
+        Tuple(:class:`anndata.AnnData`, dict, dict):
+            if `return_dict`:
+                - A new ATAC anndata object which stores gene aggreagted peak counts.
+                - A dictionary which stores genes and promoter peaks.
+                - A dictionary which stores genes and enhancer peaks.
+        :class:`anndata.AnnData`:
+            if not `return dict`: A new ATAC anndata object which stores gene aggreagted peak counts.
     """
     promoter_dict = {}
     distal_dict = {}
@@ -1489,22 +1495,21 @@ def aggregate_peaks_10x(adata_atac, peak_annot_file, linkage_file, peak_dist=100
 
 
 def tfidf_norm(adata_atac, scale_factor=1e4, copy=False):
-    """TF-IDF normalization.
+    """Normalize counts in an AnnData object with TF-IDF.
 
-    This function normalizes counts in an AnnData object with TF-IDF.
-
-    Parameters
-    ----------
-    adata_atac: :class:`~anndata.AnnData`
-        ATAC anndata object.
-    scale_factor: `float` (default: 1e4)
-        Value to be multiplied after normalization.
-    copy: `bool` (default: `False`)
-        Whether to return a copy or modify `.X` directly.
+    Args:
+        adata_atac (:class:`anndata.AnnData`):
+            ATAC Anndata object.
+        scale_factor (float, optional):
+            Value to be multiplied after normalization. Defaults to 1e4.
+        copy (bool, optional):
+            Whether to return a copy or modify `.X` directly. Defaults to False.
 
     Returns
-    -------
-    If `copy==True`, a new ATAC anndata object which stores normalized counts in `.X`.
+        None:
+            if not `copy`. Directly modifies `.X`.
+        :class:`anndata.AnnData`:
+            if `copy`: a new ATAC anndata object which stores normalized counts in `.X`.
     """
     npeaks = adata_atac.X.sum(1)
     npeaks_inv = csr_matrix(1.0/npeaks)
@@ -1562,28 +1567,21 @@ def select_connectivities(connectivities, n_neighbors=None):
 
 # Modified from MultiVelo
 def knn_smooth_chrom(adata_atac, nn_idx=None, nn_dist=None, conn=None, n_neighbors=None):
-    """KNN smoothing.
+    """Smooth (imputes) the count matrix with k nearest neighbors.
+       The inputs can be either KNN index (1-based) and distance matrices or a pre-computed
+       connectivities matrix (for example in adata_rna object).
 
-    This function smooth (impute) the count matrix with k nearest neighbors.
-    The inputs can be either KNN index and distance matrices or a pre-computed
-    connectivities matrix (for example in adata_rna object).
-
-    Parameters
-    ----------
-    adata_atac: :class:`~anndata.AnnData`
-        ATAC anndata object.
-    nn_idx: `np.darray` (default: `None`)
-        KNN index matrix of size (cells, k).
-    nn_dist: `np.darray` (default: `None`)
-        KNN distance matrix of size (cells, k).
-    conn: `csr_matrix` (default: `None`)
-        Pre-computed connectivities matrix.
-    n_neighbors: `int` (default: `None`)
-        Top N neighbors to extract for each cell in the connectivities matrix.
-
-    Returns
-    -------
-    `.layers['Mc']` stores imputed values.
+    Args:
+        adata_atac (:class:`anndata.AnnData`):
+            ATAC Anndata object.
+        nn_idx (:class:`numpy.ndarray`, optional):
+            KNN index matrix of size (cells, k) (1-based). Defaults to None.
+        nn_dist (:class:`numpy.ndarray`, optional):
+            KNN distance matrix of size (cells, k). Defaults to None.
+        conn (:class:`scipy.sparse.csr_matrix`, optional):
+            Pre-computed connectivities matrix. Defaults to None.
+        n_neighbors (int, optional):
+            Top N neighbors to extract for each cell in the connectivities matrix. Defaults to None.
     """
     if nn_idx is not None and nn_dist is not None:
         if nn_idx.shape[0] != adata_atac.shape[0]:
@@ -1591,7 +1589,7 @@ def knn_smooth_chrom(adata_atac, nn_idx=None, nn_dist=None, conn=None, n_neighbo
         if nn_dist.shape[0] != adata_atac.shape[0]:
             raise ValueError('Number of rows of KNN distances does not equal to number of observations.')
         X = coo_matrix(([], ([], [])), shape=(nn_idx.shape[0], 1))
-        conn, sigma, rho, dists = fuzzy_simplicial_set(X, nn_idx.shape[1], None, None, knn_indices=nn_idx-1, knn_dists=nn_dist, return_dists=True)
+        conn, _, _, _ = fuzzy_simplicial_set(X, nn_idx.shape[1], None, None, knn_indices=nn_idx-1, knn_dists=nn_dist, return_dists=True)
     elif conn is not None:
         pass
     else:
@@ -1614,6 +1612,24 @@ def knn_smooth_chrom(adata_atac, nn_idx=None, nn_dist=None, conn=None, n_neighbo
 # Modified from MultiVelo
 # to support batch correction
 def velocity_graph(adata, key='vae', xkey=None, batch_corrected=False, velocity_offset=False, t_perc=1, **kwargs):
+    """Normalize the velocity matrix and computes velocity graph with `scvelo.tl.velocity_graph`.
+
+    Args:
+        adata (:class:`anndata.AnnData`):
+            Anndata output from VAE inference.
+        key (str, optional):
+            Key to find layers. Defaults to 'vae'.
+        xkey (str, optional):
+            Default to use smoothed spliced counts. Defaults to 'shat' if `batch_corrected`, otherwise 'Ms'.
+        batch_corrected (bool, optional):
+            Whether the output was generated with batch correction. Defaults to False.
+        velocity_offset (bool, optional):
+            Whether to center the velocities of cells in the first `t_perc` percentile of latent time. Defaults to False.
+        t_perc (float, optional):
+            Percentile of latent time to center velocities. Defaults to 1.
+        **kwargs:
+            Additional parameters passed to `scvelo.tl.velocity_graph`.
+    """
     vkey = f'{key}_velocity'
     if vkey+'_norm' not in adata.layers.keys():
         v = adata.layers[vkey]
@@ -1633,20 +1649,41 @@ def velocity_graph(adata, key='vae', xkey=None, batch_corrected=False, velocity_
 
 
 # Modified from https://www.sc-best-practices.org/preprocessing_visualization/quality_control.html
-def is_outlier(adata, metric, lower_nmads=20, upper_nmads=20):
+def is_outlier(adata, metric, lower_nmads=20, upper_nmads=20, plot=True):
+    """Find outlier cells via median absolute deviations.
+
+    Args:
+        adata (:class:`anndata.AnnData`):
+            Anndata object.
+        metric (str):
+            A field in `adata.obs` to be filtered on.
+        lower_nmads (int, optional):
+            Lower n MADs threshold. Defaults to 20.
+        upper_nmads (int, optional):
+            Upper n MADs threshold. Defaults to 20.
+        plot (bool, optional):
+            Whether to plot the outliers.
+
+    Returns:
+        :class:`numpy.ndarray`: Outlier filter binary vector.
+    """
     M = adata.obs[metric]
-    lower_bound = max(np.min(M), np.median(M) - lower_nmads * median_abs_deviation(M))
-    upper_bound = min(np.max(M), np.median(M) + upper_nmads * median_abs_deviation(M))
+    mad = median_abs_deviation(M)
+    lower_bound = max(np.min(M), np.median(M) - lower_nmads * mad)
+    upper_bound = min(np.max(M), np.median(M) + upper_nmads * mad)
     if metric.startswith('log1p_'):
         print(f'{metric[6:]} lower_bound {np.expm1(lower_bound)}, upper_bound {np.expm1(upper_bound)}')
     else:
         print(f'{metric} lower_bound {lower_bound}, upper_bound {upper_bound}')
     outlier = (M < lower_bound) | (upper_bound < M)
-    plt.figure()
-    sns.distplot(M)
-    sns.rugplot(M)
-    sns.distplot(M[~outlier])
-    sns.rugplot(M[~outlier])
+    if plot:
+        plt.figure()
+        # sns.distplot(M)
+        sns.histplot(M, kde=True, stat="density", kde_kws=dict(cut=3), alpha=0.4)
+        sns.rugplot(M)
+        # sns.distplot(M[~outlier])
+        sns.histplot(M[~outlier], kde=True, stat="density", kde_kws=dict(cut=3), alpha=0.4)
+        sns.rugplot(M[~outlier])
     return outlier
 
 
@@ -1751,32 +1788,31 @@ def _regress_out_chunk(data):
 
 
 def regress_out(adata, keys, layer=None, n_jobs=8, copy=False, add_intercept=False):
-    """\
-    Regress out (mostly) unwanted sources of variation.
+    """Regress out (mostly) unwanted sources of variation.
 
     Uses simple linear regression. This is inspired by Seurat's `regressOut`
     function in R [Satija15]. Note that this function tends to overcorrect
     in certain circumstances as described in :issue:`526`.
 
-    Parameters
-    ----------
-    adata
-        The annotated data matrix.
-    keys
-        Keys for observation annotation on which to regress.
-    layer
-        If provided, which element of layers to use in regression.
-    n_jobs
-        Number of jobs for parallel computation.
-        `None` means using :attr:`scanpy._settings.ScanpyConfig.n_jobs`.
-    copy
-        Determines whether a copy of `adata` is returned.
-    add_intercept
-        If True, regress_out will add intercept back to residuals in order to transform results back into gene-count space. Defaults to False
+    Args:
+        adata (:class:`anndata.AnnData`):
+            The annotated data matrix.
+        keys (Union[str, Sequence[str]]):
+            Keys for observation annotation on which to regress.
+        layer (str, optional):
+            If provided, which element of layers to use in regression. Defaults to None.
+        n_jobs (int, optional):
+            Number of jobs for parallel computation. Defaults to 8.
+        copy (bool, optional):
+            Determines whether a copy of `adata` is returned. Defaults to False.
+        add_intercept (bool, optional):
+            If True, regress_out will add intercept back to residuals in order to transform results back into gene-count space. Defaults to False.
 
     Returns
-    -------
-    Depending on `copy` returns or updates `adata` with the corrected data matrix.
+        None:
+            if not `copy`. Directly modifies `adata` with corrected data matrix.
+        :class:`anndata.AnnData`:
+            if `copy`. Returns AnnData with corrected data matrix.
     """
     from pandas.api.types import CategoricalDtype
     adata = adata.copy() if copy else adata
@@ -1975,44 +2011,44 @@ def filter_genes_dispersion(
     expression of genes. This means that for each bin of mean expression, highly
     variable genes are selected.
 
-    Parameters
-    ----------
-    data : :class:`~anndata.AnnData`, `np.ndarray`, `sp.sparse`
-        The (annotated) data matrix of shape `n_obs` × `n_vars`. Rows correspond
-        to cells and columns to genes.
-    flavor : {'seurat', 'cell_ranger', 'svr'}, optional (default: 'seurat')
-        Choose the flavor for computing normalized dispersion. If choosing
-        'seurat', this expects non-logarithmized data - the logarithm of mean
-        and dispersion is taken internally when `log` is at its default value
-        `True`. For 'cell_ranger', this is usually called for logarithmized data
-        - in this case you should set `log` to `False`. In their default
-        workflows, Seurat passes the cutoffs whereas Cell Ranger passes
-        `n_top_genes`.
-    min_mean=0.0125, max_mean=3, min_disp=0.5, max_disp=`None` : `float`, optional
-        If `n_top_genes` unequals `None`, these cutoffs for the means and the
-        normalized dispersions are ignored.
-    n_bins : `int` (default: 20)
-        Number of bins for binning the mean gene expression. Normalization is
-        done with respect to each bin. If just a single gene falls into a bin,
-        the normalized dispersion is artificially set to 1. You'll be informed
-        about this if you set `settings.verbosity = 4`.
-    n_top_genes : `int` or `None` (default: `None`)
-        Number of highly-variable genes to keep.
-    retain_genes: `list`, optional (default: `None`)
-        List of gene names to be retained independent of thresholds.
-    log : `bool`, optional (default: `True`)
-        Use the logarithm of the mean to variance ratio.
-    subset : `bool`, optional (default: `True`)
-        Keep highly-variable genes only (if True) else write a bool
-        array for highly-variable genes while keeping all genes.
-    copy : `bool`, optional (default: `False`)
-        If an :class:`~anndata.AnnData` is passed, determines whether a copy
-        is returned.
+    Args:
+        data : :class:`anndata.AnnData`, `np.ndarray`, `sp.sparse`
+            The (annotated) data matrix of shape `n_obs` x `n_vars`. Rows correspond
+            to cells and columns to genes.
+        flavor : {'seurat', 'cell_ranger', 'svr'}, optional (default: 'seurat')
+            Choose the flavor for computing normalized dispersion. If choosing
+            'seurat', this expects non-logarithmized data - the logarithm of mean
+            and dispersion is taken internally when `log` is at its default value
+            `True`. For 'cell_ranger', this is usually called for logarithmized data
+            - in this case you should set `log` to `False`. In their default
+            workflows, Seurat passes the cutoffs whereas Cell Ranger passes
+            `n_top_genes`.
+        min_mean=0.0125, max_mean=3, min_disp=0.5, max_disp=`None` : `float`, optional
+            If `n_top_genes` unequals `None`, these cutoffs for the means and the
+            normalized dispersions are ignored.
+        n_bins : `int` (default: 20)
+            Number of bins for binning the mean gene expression. Normalization is
+            done with respect to each bin. If just a single gene falls into a bin,
+            the normalized dispersion is artificially set to 1. You'll be informed
+            about this if you set `settings.verbosity = 4`.
+        n_top_genes : `int` or `None` (default: `None`)
+            Number of highly-variable genes to keep.
+        retain_genes: `list`, optional (default: `None`)
+            List of gene names to be retained independent of thresholds.
+        log : `bool`, optional (default: `True`)
+            Use the logarithm of the mean to variance ratio.
+        subset : `bool`, optional (default: `True`)
+            Keep highly-variable genes only (if True) else write a bool
+            array for highly-variable genes while keeping all genes.
+        copy : `bool`, optional (default: `False`)
+            If an :class:`~anndata.AnnData` is passed, determines whether a copy
+            is returned.
 
     Returns
-    -------
-    If an AnnData `adata` is passed, returns or updates `adata` depending on \
-    `copy`. It filters the `adata` and adds the annotations
+        None:
+            if not `copy`. Directly modifies `adata`.
+        :class:`~anndata.AnnData`:
+            if `copy`. Returns a new AnnData object.
     """
 
     import warnings

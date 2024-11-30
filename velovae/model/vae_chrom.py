@@ -18,7 +18,7 @@ from .model_util_chrom import pred_exp, pred_exp_numpy, pred_exp_numpy_backward,
 from .model_util_chrom import kl_gaussian, reparameterize, softplusinv, knnx0_index, get_x0
 from .model_util_chrom import pearson, loss_vel, cosine_similarity
 from .training_data_chrom import SCData, SCDataE
-from .velocity_chrom import rna_velocity_vae
+from .velocity_chrom import velocity
 logger = logging.getLogger(__name__)
 
 
@@ -738,7 +738,7 @@ class VAEChrom():
         Args:
             adata ((:class:`anndata.AnnData`)):
                 Input AnnData object for RNA data.
-            adata ((:class:`anndata.AnnData`)):
+            adata_atac ((:class:`anndata.AnnData`)):
                 Input AnnData object for chromatin data. Defaults to None for RNA-only.
             dim_z (int, optional):
                 Latent cell state dimension. Defaults to None.
@@ -761,6 +761,10 @@ class VAEChrom():
                 Whether to use parallel architecture for the indicator functions. Defaults to True.
             t_network (bool, optional):
                 Whether to use a neural network to estimate the time distribution. Defaults to True.
+            four_basis (bool, optional):
+                Whether to enable BasisVAE to model genes as induction and repression. Defaults to False.
+            run_2nd_stage (bool, optional):
+                Whether to run the second stage of training. Defaults to True.
             tmax (float):
                 Maximum time, specifies the time range for initialization.
             init_method (str, optional):
@@ -1335,6 +1339,27 @@ class VAEChrom():
                        save=f"{figure_path}/phasescaled-{gene_plot[i].replace('.', '-')}-init-us.png")
 
     def prepare_dataset(self, c=None, u=None, s=None, only_full=False):
+        """Prepare dataset for training and testing
+
+        Args:
+            c (:class:`numpy.ndarray`, optional):
+                Chromatin accessibility values (nxg). Defaults to None.
+            u (:class:`numpy.ndarray`, optional):
+                Unspliced RNA values (nxg). Defaults to None.
+            s (:class:`numpy.ndarray`, optional):
+                Spliced RNA values (nxg). Defaults to None.
+            only_full (bool, optional):
+                Whether to return only the full dataset, or datasets for training set and test set as well. Defaults to False.
+
+        Returns:
+            Tuple[:class:`SCData`, :class:`SCData`, :class:`SCData`]:
+                if not only_full:
+                    - Full dataset containing all cells
+                    - Training dataset
+                    - Test dataset
+            :class:`SCData`:
+                if only_full: Full dataset
+        """
         chrom_key = 'Mc' if not self.config['split_enhancer'] else 'Mp'
         if c is None:
             c = self.adata_atac.layers[chrom_key].toarray() if issparse(self.adata_atac.layers[chrom_key]) else self.adata_atac.layers[chrom_key]
@@ -2281,12 +2306,23 @@ class VAEChrom():
         self.decoder.register_buffer('sigma_u', torch.tensor(std_u, dtype=torch.float, device=self.device))
         self.decoder.register_buffer('sigma_s', torch.tensor(std_s, dtype=torch.float, device=self.device))
 
-    def train(self,
-              config={},
-              plot=False,
-              gene_plot=[],
-              figure_path="figures",
-              embed="umap"):
+    def train(self, config={}, plot=False, gene_plot=[], figure_path="figures", embed="umap"):
+        """The high-level API for training
+
+        Args:
+            config (dict, optional):
+                Contains the hyper-parameters users want to modify.
+                Users can change the default using this argument. Defaults to {}.
+            plot (bool, optional):
+                Whether to plot intermediate results. Used for debugging. Defaults to False.
+            gene_plot (list, optional):
+                Genes to plot. Effective only when plot is True. Defaults to [].
+            figure_path (str, optional):
+                Path to the folder for saving plots. Defaults to "figures".
+            embed (str, optional):
+                Low dimensional embedding in adata.obsm. Used for plotting.
+                The actual key storing the embedding in adata.obsm is f'X_{embed}'. Defaults to "umap".
+        """
         self.update_config(config)
         start = time.time()
         self.global_counter = 0
@@ -2685,6 +2721,26 @@ class VAEChrom():
         print(f"*********      Finished. Total Time = {convert_time(time.time()-start)}     *********")
 
     def test(self, dataset, batch=None, covar=None, k=1, sample=False, seed=0, out_of_sample=False):
+        """Predict latent variables and modality outputs for new data
+
+        Args:
+            dataset (:class:`anndata.AnnData`):
+                Input AnnData object
+            config (dict, optional):
+                Contains the hyper-parameters users want to modify.
+                Users can change the default using this argument. Defaults to {}.
+            plot (bool, optional):
+                Whether to plot intermediate results. Used for debugging. Defaults to False.
+            gene_plot (list, optional):
+                Genes to plot. Effective only when plot is True. Defaults to [].
+            cluster_key (str, optional):
+                Key in adata.obs storing the cell type annotation.. Defaults to "clusters".
+            figure_path (str, optional):
+                Path to the folder for saving plots. Defaults to "figures".
+            embed (str, optional):
+                Low dimensional embedding in adata.obsm. Used for plotting.
+                The actual key storing the embedding should be f'X_{embed}'. Defaults to "umap".
+        """
         self.set_mode('eval')
 
         if not self.enable_cvae:
@@ -2803,11 +2859,29 @@ class VAEChrom():
         return chat_res, uhat_res, shat_res, vc_res, vu_res, vs_res, z_mu, z_std, t_mu, t_std, time_out, kc_res, rho_res
 
     def save_model(self, file_path, enc_name='encoder', dec_name='decoder'):
+        """Function to save trained models
+
+        Args:
+            file_path (str):
+                Path to save the models
+            enc_name (str, optional):
+                Encoder file name. Defaults to 'encoder'.
+            dec_name (str, optional):
+                Decoder file name. Defaults to 'decoder'.
+        """
         os.makedirs(file_path, exist_ok=True)
         torch.save(self.encoder.state_dict(), f"{file_path}/{enc_name}.pt")
         torch.save(self.decoder.state_dict(), f"{file_path}/{dec_name}.pt")
 
     def save_anndata(self, file_path=None, file_name=None):
+        """Function to save variables to Anndata object
+
+        Args:
+            file_path (str, optional):
+                Path to save the anndata. Defaults to None.
+            file_name (str, optional):
+                Name of the h5ad file to be saved. Defaults to None.
+        """
         self.set_mode('eval')
         if file_path is not None:
             os.makedirs(file_path, exist_ok=True)
@@ -2975,12 +3049,12 @@ class VAEChrom():
         self.adata.uns[f"{key}_test_idx"] = self.test_idx.detach().cpu().numpy()
 
         print("Computing velocity.")
-        rna_velocity_vae(self.adata, self.adata_atac, key,
-                         batch_key=self.config['batch_key'],
-                         ref_batch=self.ref_batch,
-                         batch_hvg_key=self.config['batch_hvg_key'],
-                         batch_correction=self.enable_cvae,
-                         rna_only=self.config['rna_only'])
+        velocity(self.adata, self.adata_atac, key,
+                 batch_key=self.config['batch_key'],
+                 ref_batch=self.ref_batch,
+                 batch_hvg_key=self.config['batch_hvg_key'],
+                 batch_correction=self.enable_cvae,
+                 rna_only=self.config['rna_only'])
 
         if np.nanmax(t_) - np.nanmin(t_) < 0.1:
             logger.warn('Time shrinked to very narrow range. Consider reduring the number of epochs in Stage 1: n_epochs (default 2000).')

@@ -6,19 +6,49 @@ from .model_util_chrom import pred_exp_numpy, encode_type
 logger = logging.getLogger(__name__)
 
 
-def rna_velocity_vae(adata,
-                     adata_atac,
-                     key,
-                     batch_key=None,
-                     ref_batch=None,
-                     batch_hvg_key=None,
-                     batch_correction=False,
-                     use_raw=False,
-                     rna_only=False,
-                     likelihood_thred=None,
-                     use_only_ref=True,
-                     sigma=None,
-                     approx=False):
+def velocity(adata,
+             adata_atac,
+             key,
+             batch_key=None,
+             ref_batch=None,
+             batch_hvg_key=None,
+             batch_correction=False,
+             use_original=False,
+             rna_only=False,
+             likelihood_thred=None,
+             use_only_ref=True,
+             sigma=None,
+             approx=False):
+    """Compute multi-omic velocity for VAE.
+
+    Args:
+        adata (:class:`anndata.AnnData`):
+            RNA AnnData object.
+        adata_atac (:class:`anndata.AnnData`):
+            ATAC AnnData object.
+        key (str):
+            Key of VAE variables.
+        batch_key (str, optional):
+            Field in adata.obs to find batch labels. Defaults to None.
+        ref_batch (int, optional):
+            Index to use as the reference batch. Defaults to None.
+        batch_hvg_key (str, optional):
+            Prefix of key for batch highly-variable genes in adata.var. Defaults to None.
+        batch_correction (bool, optional):
+            Whether the output was generated with batch correction. Defaults to False.
+        use_original (bool, optional):
+            whether to use the (noisy) input count to compute the velocity. Defaults to False.
+        rna_only (bool, optional):
+            Whether the model was trained with RNA only. Defaults to False.
+        likelihood_thred (float, optional):
+            Threshold to set high likelihood velocity genes. Defaults to None.
+        use_only_ref (bool, optional):
+            Select velocity genes only from highly variable gene list of the reference batch. Defaults to True.
+        sigma (float, optional):
+            Parameter used in Gaussian filtering of velocity values. Defaults to None.
+        approx (bool, optional):
+            Whether to use linear approximation to compute velocity. Defaults to False.
+    """
     n_batch = 0
     batch = None
     if batch_key is not None and batch_key in adata.obs:
@@ -95,7 +125,7 @@ def rna_velocity_vae(adata,
     u0 = adata.layers[f"{key}_u0"]
     s0 = adata.layers[f"{key}_s0"]
 
-    if use_raw:
+    if use_original:
         c, u, s = adata_atac.layers['Mc'], adata.layers['Mu'], adata.layers['Ms']
         c = c.toarray() if issparse(c) else c
         u = u.toarray() if issparse(u) else u
