@@ -28,6 +28,18 @@ def log2_fold_change(v1, v2, eps=1e-8):
     return np.log2(v1 + eps) - np.log2(v2 + eps)
 
 
+# scVI False Discovery Proportion method [Boyeau2019]
+def fdp(df, col, fdr):
+    p_col = f'p_{col}_no_change'
+    original_order = df.index
+    df = df.sort_values(p_col, ascending=True)
+    cum_fdr = np.cumsum(df[p_col].values) / np.arange(1, df.shape[0] + 1)
+    kd = np.sum(cum_fdr <= fdr)
+    df[f'fdr_{col}<{fdr}'] = False
+    df.loc[df.index[:kd], f'fdr_{col}<{fdr}'] = True
+    return df.loc[original_order]
+
+
 # Inspired by [Lopez2018] and [Boyeau2019]
 # https://docs.scvi-tools.org/en/stable/user_guide/background/differential_expression.html
 def differential_dynamics(adata,
@@ -46,6 +58,7 @@ def differential_dynamics(adata,
                           save_raw=False,
                           n_samples=5000,
                           delta=1,
+                          fdr=0.05,
                           seed=0):
     """Calculate differential dynamics between two groups of cells.
 
@@ -84,6 +97,8 @@ def differential_dynamics(adata,
             Number of data points in each group to generate. Defaults to 5000.
         delta (Float, optional):
             Interval of change used to define null hypothesis. Defaults to 1.
+        fdr (Float, optional):
+            False Discovery Rate threshold. Defaults to 0.05.
         seed (int, optional):
             Seed for random generator. Defaults to 0.
 
@@ -319,6 +334,7 @@ def differential_dynamics(adata,
                               'bayes_factor_kc': bf_kc,
                               'log2_diff_kc': np.mean(ld_kc, 0)},
                              index=adata.var_names)
+        df_kc = fdp(df_kc, 'kc', fdr)
 
         p1_rho = np.mean(np.abs(ld_rho) >= delta, 0)
         p2_rho = 1.0 - p1_rho
@@ -330,6 +346,7 @@ def differential_dynamics(adata,
                                'bayes_factor_rho': bf_rho,
                                'log2_diff_rho': np.mean(ld_rho, 0)},
                               index=adata.var_names)
+        df_rho = fdp(df_rho, 'rho', fdr)
 
         p1_c = np.mean(np.abs(lfc_c) >= delta, 0)
         p2_c = 1.0 - p1_c
@@ -341,6 +358,7 @@ def differential_dynamics(adata,
                              'bayes_factor_c': bf_c,
                              'log2_fc_c': np.mean(lfc_c, 0)},
                             index=adata.var_names)
+        df_c = fdp(df_c, 'c', fdr)
 
         p1_u = np.mean(np.abs(lfc_u) >= delta, 0)
         p2_u = 1.0 - p1_u
@@ -352,6 +370,7 @@ def differential_dynamics(adata,
                              'bayes_factor_u': bf_u,
                              'log2_fc_u': np.mean(lfc_u, 0)},
                             index=adata.var_names)
+        df_u = fdp(df_u, 'u', fdr)
 
         p1_s = np.mean(np.abs(lfc_s) >= delta, 0)
         p2_s = 1.0 - p1_s
@@ -364,6 +383,7 @@ def differential_dynamics(adata,
                              'log2_fc_s': np.mean(lfc_s, 0)},
                             index=adata.var_names)
         df_s = df_s.sort_values('bayes_factor_s', ascending=False)
+        df_s = fdp(df_s, 's', fdr)
 
         p1_vs = np.mean(np.abs(ld_vs if signed_velocity else lfc_vs) >= delta, 0)
         p2_vs = 1.0 - p1_vs
@@ -378,7 +398,7 @@ def differential_dynamics(adata,
             df_vs['log2_diff_v'] = np.mean(ld_vs, 0)
         else:
             df_vs['log2_fc_v'] = np.mean(lfc_vs, 0)
-        df_vs = df_vs.sort_values('bayes_factor_v', ascending=False)
+        df_vs = fdp(df_vs, 'v', fdr)
 
     df_dd = pd.concat([df_kc, df_rho, df_c, df_u, df_s, df_vs], axis=1)
 
