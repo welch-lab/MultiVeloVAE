@@ -8,3 +8,5 @@ import sys
 sys.path.append(< path to the package >)
 import velovae as vv
 ```
+
+Please feel free to test our method on our previously generated 10X Multiome datasets. See https://multivelo.readthedocs.io/en/latest/MultiVelo_Demo.html. The example to run the mouse brain dataset is located in [paper-notebooks](https://github.com/welch-lab/MultiVeloVAE/tree/main/paper-notebooks).
