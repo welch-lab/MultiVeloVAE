@@ -9,6 +9,6 @@ sys.path.append(< path to the package >)
 import velovae as vv
 ```
 
-Please feel free to test our method on our previously generated 10X Multiome datasets. See https://multivelo.readthedocs.io/en/latest/MultiVelo_Demo.html. The example of running the mouse brain dataset is located in [paper-notebooks](https://github.com/welch-lab/MultiVeloVAE/tree/main/paper-notebooks). Expected run times can be found inside each notebook.
+Please feel free to test our method on our previously published 10X Multiome datasets. See https://multivelo.readthedocs.io/en/latest/MultiVelo_Demo.html. The example of running the mouse brain dataset is located in [paper-notebooks](https://github.com/welch-lab/MultiVeloVAE/tree/main/paper-notebooks). Expected run times can be found inside each notebook.
 
 [This file](https://github.com/welch-lab/MultiVeloVAE/blob/main/paper-notebooks/reproducible_package_versions.txt) lists the versions of packages used to generate manuscript figures.
