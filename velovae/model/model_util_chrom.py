@@ -1549,7 +1549,7 @@ def tfidf_norm(adata_atac, scale_factor=1e4, copy=False):
 # From scvelo https://github.com/theislab/scvelo/blob/main/scvelo/preprocessing/neighbors.py
 def select_connectivities(connectivities, n_neighbors=None):
     C = connectivities.copy()
-    n_counts = (C > 0).sum(1).A1 if issparse(C) else (C > 0).sum(1)
+    n_counts = (C > 0).sum(1).toarray() if issparse(C) else (C > 0).sum(1)
     n_neighbors = (
         n_counts.min() if n_neighbors is None else min(n_counts.min(), n_neighbors)
     )
@@ -1598,7 +1598,7 @@ def knn_smooth_chrom(adata_atac, nn_idx=None, nn_dist=None, conn=None, n_neighbo
         raise ValueError('Please input nearest neighbor indices and distances, or a connectivities matrix of size n x n, with columns being neighbors.' +
                          ' For example, RNA connectivities can usually be found in adata.obsp.')
     conn = conn.tocsr().copy()
-    n_counts = (conn > 0).sum(1).A1
+    n_counts = (conn > 0).sum(1).toarray()
     if n_neighbors is not None and n_neighbors < n_counts.min():
         conn = select_connectivities(conn, n_neighbors)
     conn.setdiag(1)
@@ -1913,7 +1913,7 @@ def verify_dtypes(adata) -> None:
 def scv_sum(a, axis):
     if a.ndim == 1:
         axis = 0
-    return a.sum(axis=axis).A1 if issparse(a) else a.sum(axis=axis)
+    return a.sum(axis=axis).toarray() if issparse(a) else a.sum(axis=axis)
 
 
 def get_size(adata, modality=None):
@@ -1960,7 +1960,7 @@ def get_mean_var(X, ignore_zeros=False, perc=None):
     if mask_nans.sum() > 0:
         if issparse(X):
             data[mask_nans] = 0
-            n_nans = (n_nonzeros - (X != 0).sum(0)).A1
+            n_nans = (n_nonzeros - (X != 0).sum(0)).toarray()
         else:
             X[mask_nans] = 0
             n_nans = mask_nans.sum(0)
@@ -1976,8 +1976,8 @@ def get_mean_var(X, ignore_zeros=False, perc=None):
             X = np.clip(data, lb, ub)
 
     if issparse(X):
-        mean = (X.sum(0) / n_counts).A1
-        mean_sq = (X.multiply(X).sum(0) / n_counts).A1
+        mean = (X.sum(0) / n_counts).toarray()
+        mean_sq = (X.multiply(X).sum(0) / n_counts).toarray()
     else:
         mean = X.sum(0) / n_counts
         mean_sq = np.multiply(X, X).sum(0) / n_counts
