@@ -1060,6 +1060,13 @@ def cluster_by_quantile(adata,
     return cluster, perc_good
 
 
+def find_dirichlet_param(mu, std, n_basis=2):
+    alpha_i = ((mu/std)*((1-mu)/std) - 1) * mu
+    params = [alpha_i for i in range(n_basis-1)]
+    params.append((1-mu)/mu*alpha_i)
+    return np.array(params)
+
+
 def sample_dir_mix(w, yw, std_prior):
     # Sample from a mixture of dirichlet distributions
     mu_0, mu_1 = np.mean(w[yw == 0]), np.mean(w[yw == 1])
@@ -1173,19 +1180,12 @@ def assign_gene_mode_auto(adata,
     return w, p
 
 
-def find_dirichlet_param(mu, std, n_basis=2):
-    alpha_i = ((mu/std)*((1-mu)/std) - 1) * mu
-    params = [alpha_i for i in range(n_basis-1)]
-    params.append((1-mu)/mu*alpha_i)
-    return np.array(params)
-
-
 def assign_gene_mode(adata,
                      w_noisy,
                      assign_type='binary',
                      thred=0.05,
                      std_prior=0.1,
-                     n_cluster_thred=3):
+                     n_cluster_thred=7):
     # Assign one of ('inductive', 'repressive', 'mixture') to gene clusters
     # `assign_type' specifies which strategy to use
     if assign_type == 'binary':
@@ -1202,7 +1202,11 @@ def assign_gene_mode(adata,
         return dirichlet.rvs(alpha_rep, size=adata.n_vars)[:, 0]
 
 
-def assign_gene_mode_tprior(adata, tkey, train_idx, std_prior=0.05):
+def assign_gene_mode_tprior(adata, tkey, train_idx, std_prior=0.05, n_clusters=7):
+    # Cluster by ellipse fit
+    y, p = cluster_by_quantile(adata, n_clusters=n_clusters)
+    adata.var['quantile_cluster'] = y
+
     # Same as assign_gene_mode, but uses the informative time prior
     # to determine inductive and repressive genes
     tprior = adata.obs[tkey].to_numpy()[train_idx]

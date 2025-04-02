@@ -364,7 +364,7 @@ class Decoder(nn.Module):
             self.t_init = self.t_init
             self.t_init = self.t_init/self.t_init.max()*self.tmax
             if self.reinit:
-                toff = get_ts_global(self.t_init, u/scaling_u, s, 95)
+                toff = get_ts_global(self.t_init, c/scaling_c, u/scaling_u, s, 95)
                 alpha_c, alpha, beta, gamma, ton = reinit_params(c/scaling_c, u/scaling_u, s, self.t_init, toff, rna_only=self.rna_only, rna_only_idx=rna_only_idx)
 
         else:
@@ -720,7 +720,7 @@ class VAEChrom():
                  run_2nd_stage=True,
                  tmax=1,
                  init_method='steady',
-                 init_key=None,
+                 init_tprior=None,
                  tprior=None,
                  deming_std=False,
                  rna_only=False,
@@ -769,7 +769,7 @@ class VAEChrom():
                 Maximum time, specifies the time range for initialization.
             init_method (str, optional):
                 {'steady', 'tprior'}, initialization method. Defaults to 'steady'.
-            init_key (str, optional):
+            init_tprior (str, optional):
                 Key in adata.obs storing the capture time or any prior time information.
                 This is used in initialization. Defaults to None.
             tprior (str, optional):
@@ -846,7 +846,7 @@ class VAEChrom():
             "ref_batch": ref_batch,
             "batch_hvg_key": batch_hvg_key,
             "var_to_regress": var_to_regress,
-            "reinit_params": False,
+            "reinit_params": tprior is not None,
             "init_ton_zero": True,
             "unit_scale": True,
             'loss_std_type': 'deming' if deming_std else 'global',
@@ -855,7 +855,7 @@ class VAEChrom():
             "rna_only_idx": rna_only_idx,
             "tmax": tmax,
             "init_method": init_method,
-            "init_key": init_key,
+            "init_key": init_tprior,
             "tprior": tprior,
             "std_z_prior": 0.05,
             "tail": 0.01,
@@ -953,7 +953,7 @@ class VAEChrom():
                                dim_cond=self.n_batch,
                                dim_reg=(0 if self.var_to_regress is None else self.var_to_regress.shape[1]),
                                hidden_size=hidden_size,
-                               t_network=t_network,
+                               t_network=self.config['t_network'],
                                split_enhancer=self.config['split_enhancer'],
                                Cin_e=self.adata_atac.obsm['Me'].shape[1] if self.config['split_enhancer'] else None,
                                checkpoint=checkpoints[0]).float().to(self.device)
@@ -969,7 +969,7 @@ class VAEChrom():
                                hidden_size=hidden_size,
                                split_enhancer=self.config['split_enhancer'],
                                parallel_arch=parallel_arch,
-                               t_network=t_network,
+                               t_network=self.config['t_network'],
                                full_vb=full_vb,
                                global_std=(not deming_std),
                                log_params=self.config["log_params"],
@@ -981,7 +981,7 @@ class VAEChrom():
                                train_x0=self.config["train_x0"],
                                init_ton_zero=self.config["init_ton_zero"],
                                init_method=init_method,
-                               init_key=init_key,
+                               init_key=init_tprior,
                                checkpoint=checkpoints[1]).float().to(self.device)
 
         self.alpha_w = torch.tensor(find_dirichlet_param(0.5, 0.05, 4), dtype=torch.float, device=self.device)
@@ -1216,6 +1216,9 @@ class VAEChrom():
                 std_t[t == t_cap[i]] = 0.5*(t_cap[i] - t_cap[i-1])*(0.5+0.5*self.config["std_t_scaling"]) + 0.5*(t_cap[i+1] - t_cap[i])*(0.5+0.5*self.config["std_t_scaling"])
             std_t[t == t_cap[-1]] = (t_cap[-1] - t_cap[-2])*(0.5+0.5*self.config["std_t_scaling"])
             self.p_t = torch.stack([torch.tensor(t).view(-1, 1), torch.tensor(std_t).view(-1, 1)]).float().to(self.device)
+
+        if not self.config['t_network']:
+            self.config['kl_t'] = self.config['kl_t'] * self.config['dim_z']
 
         self.p_z = torch.stack([torch.zeros(adata.n_obs, self.config['dim_z']),
                                 torch.ones(adata.n_obs, self.config['dim_z'])*self.config["std_z_prior"]]).float().to(self.device)
