@@ -1027,13 +1027,13 @@ def compute_quantile_scores(adata, n_pcs=30, n_neighbors=30):
     quantile_scores_2bit[:, :, 1] = csr_matrix.dot(conn_norm, quantile_scores_2bit[:, :, 1])
 
     if np.any(np.isnan(quantile_scores)):
-        logger.warn('nan found during ellipse fit')
+        logger.warning('nan found during ellipse fit')
     if np.any(np.isinf(quantile_scores)):
-        logger.warn('inf found during ellipse fit')
+        logger.warning('inf found during ellipse fit')
     if np.any(np.isnan(quantile_scores_2bit)):
-        logger.warn('nan found during ellipse fit')
+        logger.warning('nan found during ellipse fit')
     if np.any(np.isinf(quantile_scores_2bit)):
-        logger.warn('inf found during ellipse fit')
+        logger.warning('inf found during ellipse fit')
 
     adata.layers['quantile_scores'] = quantile_scores
     adata.layers['quantile_scores_1st_bit'] = quantile_scores_2bit[:, :, 0]

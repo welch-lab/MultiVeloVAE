@@ -23,6 +23,43 @@ logger = logging.getLogger(__name__)
 
 
 class Encoder(nn.Module):
+    """
+    Neural network encoder for the MultiVeloVAE model.
+
+    This class encodes data (RNA counts and optionally chromatin accessibility) into
+    latent representations. It maps input from the observation space to a distribution
+    over latent variables z (cell state) and t (pseudotime).
+
+    Attributes:
+        t_network (bool): Whether to use a neural network to model pseudotime as a vector.
+        split_enhancer (bool): Whether to separately encode enhancer data.
+        fc1, bn1, dpt1: First fully connected layer, batch norm, and dropout for main network.
+        net: Sequential network combining first layer components.
+        fc_mu_t, fc_std_t: Linear layers for latent time mean and standard deviation.
+        fc_mu_z, fc_std_z: Linear layers for latent cell state mean and standard deviation.
+        spt, sp1, sp2: SoftPlus activation functions for non-negative outputs.
+        net_e, fc_mu_e, fc_std_e, sp3: Components for enhancer encoder (optional).
+
+    Args:
+        Cin (int):
+            Input feature dimension (typically 3*number_of_genes for combined c/u/s data).
+        dim_z (int):
+            Latent variable dimensionality.
+        dim_cond (int, optional):
+            Dimension of condition vector for conditional VAE. Defaults to 0.
+        dim_reg (int, optional):
+            Dimension of regression covariates to regress out. Defaults to 0.
+        hidden_size (int, optional):
+            Size of hidden layer. Defaults to 256.
+        t_network (bool, optional):
+            If True, model pseudotime as a vector. Defaults to False.
+        split_enhancer (bool, optional):
+            If True, separately encode enhancer data. Defaults to False.
+        Cin_e (int, optional):
+            Enhancer input dimension. Required if split_enhancer is True. Defaults to None.
+        checkpoint (str, optional):
+            Path to checkpoint file to load weights. Defaults to None.
+    """
     def __init__(self,
                  Cin,
                  dim_z,
@@ -110,6 +147,84 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
+    """
+    Neural network decoder for the MultiVeloVAE model.
+
+    This decoder generates predictions of gene expression and chromatin accessibility
+    based on latent cell state z and pseudotime t, using a mechanistic ODE model
+    with neural networks to predict the regulatory parameters.
+
+    The decoder models gene expression dynamics using the following system of ODEs:
+    dc/dt = α_c × (k_c - c)
+    du/dt = α × ρ × c - β × u
+    ds/dt = β × u - γ × s
+
+    where:
+    - c = chromatin accessibility
+    - u = unspliced RNA
+    - s = spliced RNA
+    - k_c, ρ are outputs of neural networks (regulatory parameters)
+    - α_c, α, β, γ are gene-specific parameters
+
+    Attributes:
+        adata: AnnData object containing RNA data.
+        adata_atac: AnnData object containing chromatin accessibility data.
+        Many other attributes for model configuration and parameters.
+
+    Args:
+        adata (AnnData):
+            AnnData object containing RNA data.
+        adata_atac (AnnData):
+            AnnData object containing chromatin accessibility data.
+        train_idx (array-like):
+            Indices of training data.
+        dim_z (int):
+            Latent variable dimensionality.
+        dim_cond (int, optional):
+            Dimension of condition vector for conditional VAE. Defaults to 0.
+        dim_reg (int, optional):
+            Dimension of regression covariates. Defaults to 0.
+        batch_idx (array-like, optional):
+            Batch indices for training data. Defaults to None.
+        ref_batch (int, optional):
+            Reference batch index. Defaults to None.
+        hidden_size (int, optional):
+            Size of hidden layers. Defaults to 256.
+        split_enhancer (bool, optional):
+            Whether to separately decode enhancer data. Defaults to False.
+        parallel_arch (bool, optional):
+            Whether to use parallel architecture for regulatory networks. Defaults to True.
+        t_network (bool, optional):
+            Whether pseudotime is encoded as a vector. Defaults to True.
+        full_vb (bool, optional):
+            Whether to use full variational Bayes for ODE parameters. Defaults to False.
+        global_std (bool, optional):
+            Whether to use global std for noise model. Defaults to True.
+        log_params (bool, optional):
+            Whether parameters are in log space. Defaults to False.
+        rna_only (bool, optional):
+            Whether to run in RNA-only mode. Defaults to False.
+        rna_only_idx (list, optional):
+            Indices of RNA-only batches. Defaults to [].
+        perc (int, optional):
+            Percentile for parameter initialization. Defaults to 98.
+        tmax (float, optional):
+            Maximum pseudotime. Defaults to 1.
+        reinit (bool, optional):
+            Whether to reinitialize parameters. Defaults to False.
+        train_x0 (bool, optional):
+            Whether to train initial conditions. Defaults to False.
+        init_ton_zero (bool, optional):
+            Whether to initialize activation time to zero. Defaults to True.
+        init_method (str, optional):
+            Method for initialization ('steady' or 'tprior'). Defaults to 'steady'.
+        init_key (str, optional):
+            Key in adata.obs for initialization. Defaults to None.
+        checkpoint (str, optional):
+            Path to checkpoint file to load weights. Defaults to None.
+        vram_constrained (bool, optional):
+            Whether to enable VRAM-constrained mode. Defaults to False.
+    """
     def __init__(self,
                  adata,
                  adata_atac,
@@ -211,8 +326,8 @@ class Decoder(nn.Module):
             self.register_buffer('sigma_c', torch.empty(G))
             self.register_buffer('sigma_u', torch.empty(G))
             self.register_buffer('sigma_s', torch.empty(G))
-            self.register_buffer('zero_vec', torch.empty(G))
-            self.register_buffer('one_vec', torch.empty(G))
+            self.register_buffer('zero_vec', torch.zeros(G))
+            self.register_buffer('one_vec', torch.ones(G))
 
             self.ton = nn.Parameter(torch.empty(G))
             self.toff = nn.Parameter(torch.empty(G))
@@ -230,8 +345,8 @@ class Decoder(nn.Module):
                 self.offset_c = nn.Parameter(torch.empty((self.dim_cond, G)))
                 self.offset_u = nn.Parameter(torch.empty((self.dim_cond, G)))
                 self.offset_s = nn.Parameter(torch.empty((self.dim_cond, G)))
-                self.register_buffer('one_mat', torch.empty((self.dim_cond, G)))
-                self.register_buffer('zero_mat', torch.empty((self.dim_cond, G)))
+                self.register_buffer('one_mat', torch.ones((self.dim_cond, G)))
+                self.register_buffer('zero_mat', torch.zeros((self.dim_cond, G)))
             else:
                 self.scaling_c = nn.Parameter(torch.empty(G))
                 self.scaling_u = nn.Parameter(torch.empty(G))
@@ -421,7 +536,7 @@ class Decoder(nn.Module):
                     filt = (si > 0) * (ui > 0) * (ci > 0)
                     if np.any(np.sum(filt, axis=0) == 0):
                         j = np.where(np.sum(filt, axis=0) == 0)[0]
-                        logger.warn(f'Batch class {i} gene {j} has no valid data.')
+                        logger.warning(f'Batch class {i} gene {j} has no valid data.')
                     ci[~filt] = np.nan
                     ui[~filt] = np.nan
                     si[~filt] = np.nan
@@ -435,17 +550,17 @@ class Decoder(nn.Module):
             offset_s = np.zeros((self.dim_cond, G))
         if not self.cvae:
             if np.any(np.isnan(scaling_c)):
-                logger.warn('Warning: scaling_c invalid (nan).')
+                logger.warning('Warning: scaling_c invalid (nan).')
             if np.any(np.isinf(scaling_c)):
-                logger.warn('Warning: scaling_c invalid (inf).')
+                logger.warning('Warning: scaling_c invalid (inf).')
             if np.any(np.isnan(scaling_u)):
-                logger.warn('Warning: scaling_u invalid (nan).')
+                logger.warning('Warning: scaling_u invalid (nan).')
             if np.any(np.isinf(scaling_u)):
-                logger.warn('Warning: scaling_u invalid (inf).')
+                logger.warning('Warning: scaling_u invalid (inf).')
             if np.any(np.isnan(scaling_s)):
-                logger.warn('Warning: scaling_s invalid (nan).')
+                logger.warning('Warning: scaling_s invalid (nan).')
             if np.any(np.isinf(scaling_s)):
-                logger.warn('Warning: scaling_s invalid (inf).')
+                logger.warning('Warning: scaling_s invalid (inf).')
         scaling_c[np.isnan(scaling_c)] = 1.0
         scaling_u[np.isnan(scaling_u)] = 1.0
         scaling_s[np.isnan(scaling_s)] = 1.0
@@ -703,6 +818,91 @@ class Decoder(nn.Module):
 
 
 class VAEChrom():
+    """
+    MultiVeloVAE model for joint multi-omics velocity inference.
+
+    This is the main class implementing the MultiVeloVAE model, which integrates
+    chromatin accessibility and RNA sequencing data to infer cellular dynamics
+    through a variational autoencoder framework with a mechanistic ODE model.
+
+    The model learns a low-dimensional latent representation of cell state,
+    a pseudotime for each cell, and the parameters of a gene regulatory model
+    that explains the observed data. It can handle batch effects and
+    RNA-only samples through a conditional VAE design.
+
+    The model consists of:
+    1. An encoder that maps data to a distribution over latent variables
+    2. A decoder that generates predictions using a mechanistic ODE model
+    3. Training procedures including KNN refinement for velocity inference
+
+    Attributes:
+        adata: AnnData object containing RNA data
+        adata_atac: AnnData object containing chromatin accessibility data
+        encoder: Neural network encoder
+        decoder: Neural network decoder with ODE model
+        config: Dictionary containing model configuration and hyperparameters
+        Many other attributes for training and inference
+
+    Args:
+        adata (AnnData):
+            Input AnnData object for RNA data.
+        adata_atac (AnnData, optional):
+            Input AnnData object for chromatin data. Defaults to None for RNA-only.
+        dim_z (int, optional):
+            Latent cell state dimension. Defaults to None.
+        batch_key (str, optional):
+            Key of batch labels in adata.obs. Defaults to None.
+        ref_batch (int, optional):
+            Index to use as the reference batch. Defaults to None.
+        batch_hvg_key (str, optional):
+            Prefix of key for batch highly-variable genes in adata.var. Defaults to None.
+        var_to_regress (str or list, optional):
+            Continuous variable(s) to be regressed out. Defaults to None.
+        device (torch.device, optional):
+            Device used for training. Defaults to 'cpu'.
+        hidden_size (int, optional):
+            The width of the hidden layers of the encoder and decoder. Defaults to 256.
+        full_vb (bool, optional):
+            Whether to use full variational Bayes for rate parameters. Defaults to False.
+        parallel_arch (bool, optional):
+            Whether to use parallel architecture for the indicator functions. Defaults to True.
+        t_network (bool, optional):
+            Whether to use a neural network to estimate the time distribution. Defaults to True.
+        four_basis (bool, optional):
+            Whether to enable BasisVAE to model genes as induction and repression. Defaults to False.
+        run_2nd_stage (bool, optional):
+            Whether to run the second stage of training. Defaults to True.
+        tmax (float):
+            Maximum time, specifies the time range for initialization.
+        init_method (str, optional):
+            {'steady', 'tprior'}, initialization method. Defaults to 'steady'.
+        init_tprior (str, optional):
+            Key in adata.obs for initialization. Defaults to None.
+        tprior (str, optional):
+            Key in adata.obs containing the informative time prior. Defaults to None.
+        deming_std (bool, optional):
+            Whether to use Deming residual for the loss function std. Defaults to False.
+        rna_only (bool, optional):
+            Whether to run in RNA-only mode. Defaults to False.
+        rna_only_idx (list, optional):
+            List of indices of RNA-only samples. Defaults to [].
+        learning_rate (float, optional):
+            Learning rate for training. Defaults to None.
+        early_stop_thred (float, optional):
+            Early stopping threshold for training. Defaults to None.
+        checkpoints (list, optional):
+            List of two .pt files with pretrained parameters. Defaults to [None, None].
+        plot_init (bool, optional):
+            Whether to plot initialization results. Defaults to False.
+        gene_plot (list, optional):
+            List of gene names to plot. Defaults to [].
+        cluster_key (str, optional):
+            Key in adata.obs for plot colors. Defaults to 'clusters'.
+        figure_path (str, optional):
+            Path to save figures. Defaults to 'figures'.
+        vram_constrained (bool, optional):
+            Whether to enable VRAM-constrained mode. Defaults to False.
+    """
     def __init__(self,
                  adata,
                  adata_atac=None,
@@ -732,7 +932,8 @@ class VAEChrom():
                  gene_plot=[],
                  cluster_key='clusters',
                  figure_path='figures',
-                 embed=None):
+                 embed=None,
+                 vram_constrained=False):
         """MultiVeloVAE Model
 
         Args:
@@ -796,6 +997,8 @@ class VAEChrom():
                 Key in adata.obs containing the cluster labels for plot colors. Defaults to 'clusters'.
             figure_path (str, optional):
                 Path to save the figures. Defaults to 'figures'.
+            vram_constrained (bool, optional):
+                Whether to enable VRAM-constrained mode. Defaults to False.
         """
         if adata_atac is None or rna_only:
             rna_only = True
@@ -824,11 +1027,11 @@ class VAEChrom():
         if issparse(adata.layers['Ms']):
             adata.layers['Ms'] = adata.layers['Ms'].toarray()
         if np.any(adata_atac.layers['Mc'] < 0):
-            logger.warn('Negative expression values detected in layers["Mc"]. Please make sure all values are non-negative.')
+            logger.warning('Negative expression values detected in layers["Mc"]. Please make sure all values are non-negative.')
         if np.any(adata.layers['Mu'] < 0):
-            logger.warn('Negative expression values detected in layers["Mu"]. Please make sure all values are non-negative.')
+            logger.warning('Negative expression values detected in layers["Mu"]. Please make sure all values are non-negative.')
         if np.any(adata.layers['Ms'] < 0):
-            logger.warn('Negative expression values detected in layers["Ms"]. Please make sure all values are non-negative.')
+            logger.warning('Negative expression values detected in layers["Ms"]. Please make sure all values are non-negative.')
 
         self.config = {
             # model parameters
@@ -906,6 +1109,7 @@ class VAEChrom():
             "knn_use_pred": True,
             "run_2nd_stage": run_2nd_stage,
             "save_epoch": 50,
+            "vram_constrained": vram_constrained,
 
             # plotting
             "sparsify": 1}
@@ -1025,7 +1229,7 @@ class VAEChrom():
             if torch.cuda.is_available():
                 self.device = torch.device(device)
             else:
-                logger.warn('GPU not detected. Using CPU as the device.')
+                logger.warning('GPU not detected. Using CPU as the device.')
                 self.device = torch.device('cpu')
         else:
             self.device = torch.device('cpu')
@@ -1048,7 +1252,7 @@ class VAEChrom():
             elif net == 'decoder':
                 self.decoder.eval()
         else:
-            logger.warn("Mode not recognized. Must be 'train' or 'test'!")
+            logger.warning("Mode not recognized. Must be 'train' or 'test'!")
 
     def split_train_test(self, N):
         rand_perm = np.random.permutation(N)
@@ -1082,7 +1286,7 @@ class VAEChrom():
             print(f'Reference batch set to {self.ref_batch} ({self.batch_names_raw[self.ref_batch]}).')
             self.config['ref_batch'] = self.batch_names_raw[self.ref_batch]
             if np.issubdtype(self.batch_names_raw.dtype, np.number) and 0 not in self.batch_names_raw:
-                logger.warn('Integer batch names do not start from 0. Reference batch index may not match the actual batch name!')
+                logger.warning('Integer batch names do not start from 0. Reference batch index may not match the actual batch name!')
         elif isinstance(self.ref_batch, str):
             if self.config['ref_batch'] in self.batch_names_raw:
                 self.ref_batch = self.batch_dic[self.config['ref_batch']]
@@ -1097,9 +1301,9 @@ class VAEChrom():
         self.enable_cvae = self.n_batch > 0
         if self.config['dim_z'] is not None:
             if self.enable_cvae and 2*self.n_batch > self.config['dim_z']:
-                logger.warn('Number of batch classes is larger than half of dim_z. Consider increasing dim_z.')
+                logger.warning('Number of batch classes is larger than half of dim_z. Consider increasing dim_z.')
             if self.enable_cvae and 10*self.n_batch < self.config['dim_z']:
-                logger.warn('Number of batch classes is smaller than 1/10 of dim_z. Consider decreasing dim_z.')
+                logger.warning('Number of batch classes is smaller than 1/10 of dim_z. Consider decreasing dim_z.')
         else:
             if self.config['rna_only']:
                 dim_z = 3 + adata.n_vars // 512
@@ -1115,7 +1319,7 @@ class VAEChrom():
                 if f"{batch_hvg_key}-{batch}" in adata.var.keys():
                     self.batch_hvg_genes_[self.batch_dic[batch]] = adata.var[f"{batch_hvg_key}-{batch}"].to_numpy()
                 else:
-                    logger.warn(f'Highly variable genes for batch {batch} not found in var: {batch_hvg_key}-batch. All genes will be used for batch {batch}.')
+                    logger.warning(f'Highly variable genes for batch {batch} not found in var: {batch_hvg_key}-batch. All genes will be used for batch {batch}.')
                     self.batch_hvg_genes_[self.batch_dic[batch]] = True
         elif self.enable_cvae:
             for i in range(self.n_batch):
@@ -1189,11 +1393,12 @@ class VAEChrom():
             self.config["learning_rate_ode"] = self.config["learning_rate_ode"] / 2
         if self.config["early_stop_thred"] is None:
             if self.enable_cvae:
-                self.config["early_stop_thred"] = np.sum(self.batch_hvg_genes_) / self.n_batch * 1e-3
+                self.config["early_stop_thred"] = np.sum(self.batch_hvg_genes_) * 1e-3
             else:
                 self.config["early_stop_thred"] = adata.n_vars / 2 * 1e-3
-            if self.enable_cvae:
-                self.config["early_stop_thred"] = self.config["early_stop_thred"] * self.n_batch
+            if len(self.rna_only_idx) > 0:
+                scaling_factor = max(3 / self.n_batch, 0.75)
+                self.config["early_stop_thred"] = self.config["early_stop_thred"] * scaling_factor
             print(f"Early stop threshold set to {self.config['early_stop_thred']:.1f}.")
 
     def get_prior(self, adata):
@@ -1229,7 +1434,7 @@ class VAEChrom():
                 self.config[key] = config[key]
             else:
                 self.config[key] = config[key]
-                logger.warn(f"Unknown hyperparameter: {key}")
+                logger.warning(f"Unknown hyperparameter: {key}")
 
     def plot_initial(self, gene_plot, figure_path="figures", embed=None):
         gind, gene_plot = get_gene_index(self.adata.var_names, gene_plot)
@@ -1371,23 +1576,25 @@ class VAEChrom():
         if s is None:
             s = self.adata.layers['Ms'].toarray() if issparse(self.adata.layers['Ms']) else self.adata.layers['Ms']
         X = np.concatenate((c, u, s), 1).astype(float)
+
+        device = 'cpu' if self.config['vram_constrained'] else self.device
         if self.config['split_enhancer']:
             E = self.adata_atac.obsm['Me'].toarray() if issparse(self.adata_atac.obsm['Me']) else self.adata_atac.obsm['Me']
             E = E.astype(float)
         if not self.config['split_enhancer']:
-            full_set = SCData(X, device=self.device)
+            full_set = SCData(X, device=device)
             if not only_full:
-                train_set = SCData(X[self.train_idx], device=self.device)
+                train_set = SCData(X[self.train_idx], device=device)
                 test_set = None
                 if len(self.test_idx) > 0:
-                    test_set = SCData(X[self.test_idx], device=self.device)
+                    test_set = SCData(X[self.test_idx], device=device)
         else:
             if not only_full:
-                full_set = SCDataE(X, E, device=self.device)
-                train_set = SCDataE(X[self.train_idx], E[self.train_idx], device=self.device)
+                full_set = SCDataE(X, E, device=device)
+                train_set = SCDataE(X[self.train_idx], E[self.train_idx], device=device)
                 test_set = None
                 if len(self.test_idx) > 0:
-                    test_set = SCDataE(X[self.test_idx], E[self.test_idx], device=self.device)
+                    test_set = SCDataE(X[self.test_idx], E[self.test_idx], device=device)
         if not only_full:
             return full_set, train_set, test_set
         else:
@@ -1684,9 +1891,9 @@ class VAEChrom():
             for n in range(Nb):
                 i = n*B
                 j = min([(n+1)*B, N])
-                data_in = dataset.data[i:j]
+                data_in = dataset.data[i:j] if not self.config['vram_constrained'] else dataset.data[i:j].to(self.device)
                 if self.config['split_enhancer']:
-                    data_in_e = dataset.data_e[i:j]
+                    data_in_e = dataset.data_e[i:j] if not self.config['vram_constrained'] else dataset.data_e[i:j].to(self.device)
                 else:
                     data_in_e = None
                 if mode == "test":
@@ -1698,23 +1905,15 @@ class VAEChrom():
 
                 if encoder_only:
                     c0 = torch.zeros(len(idx), G, dtype=torch.float, device=self.device) if self.use_knn else None
-                else:
-                    c0 = self.c0[idx] if self.use_knn else None
-                if encoder_only:
                     u0 = torch.zeros(len(idx), G, dtype=torch.float, device=self.device) if self.use_knn else None
-                else:
-                    u0 = self.u0[idx] if self.use_knn else None
-                if encoder_only:
                     s0 = torch.zeros(len(idx), G, dtype=torch.float, device=self.device) if self.use_knn else None
-                else:
-                    s0 = self.s0[idx] if self.use_knn else None
-                if encoder_only:
                     t0 = torch.zeros(len(idx), 1, dtype=torch.float, device=self.device) if self.use_knn else None
-                else:
-                    t0 = self.t0[idx] if self.use_knn else None
-                if encoder_only:
                     t1 = torch.zeros(len(idx), 1, dtype=torch.float, device=self.device) if self.use_knn and self.config['velocity_continuity'] else None
                 else:
+                    c0 = self.c0[idx] if self.use_knn else None
+                    u0 = self.u0[idx] if self.use_knn else None
+                    s0 = self.s0[idx] if self.use_knn else None
+                    t0 = self.t0[idx] if self.use_knn else None
                     t1 = self.t1[idx] if self.use_knn and self.config['velocity_continuity'] else None
 
                 if batch is None:
@@ -2336,7 +2535,7 @@ class VAEChrom():
             Xembed_train = Xembed[self.train_idx]
             Xembed_test = Xembed[self.test_idx]
         except KeyError:
-            logger.warn(f"Embedding X_{embed} not found! Set to None.")
+            logger.warning(f"Embedding X_{embed} not found! Set to None.")
             Xembed = np.nan*np.ones((self.adata.n_obs, 2))
             Xembed_train = Xembed[self.train_idx]
             Xembed_test = Xembed[self.test_idx]
@@ -2344,7 +2543,12 @@ class VAEChrom():
 
         print("*********      Creating Training and Validation Datasets      *********")
         full_set, train_set, test_set = self.prepare_dataset()
-        data_loader = DataLoader(train_set, batch_size=self.config["batch_size"], shuffle=True)
+
+        data_loader = DataLoader(train_set,
+                                 batch_size=self.config["batch_size"],
+                                 shuffle=True,
+                                 pin_memory=self.config["vram_constrained"])
+
         if self.config["test_iter"] is None:
             self.config["test_iter"] = len(self.train_idx)//self.config["batch_size"]*2
 
@@ -2861,18 +3065,21 @@ class VAEChrom():
 
         return chat_res, uhat_res, shat_res, vc_res, vu_res, vs_res, z_mu, z_std, t_mu, t_std, time_out, kc_res, rho_res
 
-    def save_model(self, file_path, enc_name='encoder', dec_name='decoder'):
+    def save_model(self, file_path=None, enc_name='encoder', dec_name='decoder'):
         """Function to save trained models
 
         Args:
-            file_path (str):
+            file_path (str, optional):
                 Path to save the models
             enc_name (str, optional):
                 Encoder file name. Defaults to 'encoder'.
             dec_name (str, optional):
                 Decoder file name. Defaults to 'decoder'.
         """
-        os.makedirs(file_path, exist_ok=True)
+        if file_path is not None:
+            os.makedirs(file_path, exist_ok=True)
+        else:
+            file_path = '.'
         torch.save(self.encoder.state_dict(), f"{file_path}/{enc_name}.pt")
         torch.save(self.decoder.state_dict(), f"{file_path}/{dec_name}.pt")
 
@@ -2888,6 +3095,8 @@ class VAEChrom():
         self.set_mode('eval')
         if file_path is not None:
             os.makedirs(file_path, exist_ok=True)
+        else:
+            file_path = '.'
 
         key = self.config['key']
         if self.config['is_full_vb']:
@@ -3060,10 +3269,8 @@ class VAEChrom():
                  rna_only=self.config['rna_only'])
 
         if np.nanmax(t_) - np.nanmin(t_) < 0.1:
-            logger.warn('Time shrinked to very narrow range. Consider reduring the number of epochs in Stage 1: n_epochs (default 2000).')
+            logger.warning('Time shrinked to very narrow range.\nConsider reduring the number of epochs in Stage 1: n_epochs (default 2000)\n or increasing early_stop_thred, and re-train.')
 
         if file_name is not None:
             print("Writing anndata output to file.")
-            if file_path is None:
-                file_path = '.'
             self.adata.write_h5ad(f"{file_path}/{file_name}")

@@ -151,7 +151,7 @@ def differential_dynamics(adata,
     rng = np.random.default_rng(seed=seed)
     if batch_key is None:
         if model.enable_cvae:
-            logger.warn("Batch correction was enabled during training. It's recommended to use the same batch_key to sample pairs.")
+            logger.warning("Batch correction was enabled during training. It's recommended to use the same batch_key to sample pairs.")
         g1_sample_idx = rng.choice(idx1, n_samples)
         g2_sample_idx = rng.choice(idx2, n_samples)
     else:
@@ -170,10 +170,10 @@ def differential_dynamics(adata,
                 idx_batch1 = np.where((batch_array == batch) & idx1_bin)[0]
                 idx_batch2 = np.where((batch_array == batch) & idx2_bin)[0]
                 if len(idx_batch1) < 10:
-                    logger.warn(f"Group1 in batch {batch} has less than 10 cells. Skipping this batch.")
+                    logger.warning(f"Group1 in batch {batch} has less than 10 cells. Skipping this batch.")
                     continue
                 if len(idx_batch2) < 10:
-                    logger.warn(f"Group2 in batch {batch} has less than 10 cells. Skipping this batch.")
+                    logger.warning(f"Group2 in batch {batch} has less than 10 cells. Skipping this batch.")
                     continue
                 g1_sample_idx.append(rng.choice(idx_batch1, n_samples_cur_batch))
                 g2_sample_idx.append(rng.choice(idx_batch2, n_samples_cur_batch))
