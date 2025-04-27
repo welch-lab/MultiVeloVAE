@@ -1397,7 +1397,7 @@ class VAEChrom():
             else:
                 self.config["early_stop_thred"] = adata.n_vars / 2 * 1e-3
             if len(self.rna_only_idx) > 0:
-                scaling_factor = max(3 / self.n_batch, 0.75)
+                scaling_factor = max(-self.n_batch / len(self.rna_only_idx) / 3 + 2, 2/3)
                 self.config["early_stop_thred"] = self.config["early_stop_thred"] * scaling_factor
             print(f"Early stop threshold set to {self.config['early_stop_thred']:.1f}.")
 

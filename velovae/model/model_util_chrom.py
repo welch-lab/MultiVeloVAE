@@ -12,11 +12,10 @@ from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 from sklearn.cluster import AgglomerativeClustering, SpectralClustering, KMeans
 from scipy.spatial import KDTree
-from scipy.sparse import csr_matrix, coo_matrix, diags
+from scipy.sparse import csr_matrix, coo_matrix, diags, issparse
 from scipy.stats import dirichlet, bernoulli, kstest, linregress
 from tqdm.notebook import tqdm_notebook
 from scipy.stats import median_abs_deviation
-from scipy.sparse import issparse
 import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd

@@ -55,8 +55,10 @@ def differential_dynamics(adata,
                           weight_batch_uniform=False,
                           mode='vanilla',
                           signed_velocity=True,
+                          test_decoupling=False,
                           save_raw=False,
                           n_samples=5000,
+                          norm=0.1,
                           delta=1,
                           fdr=0.05,
                           seed=0):
@@ -95,6 +97,8 @@ def differential_dynamics(adata,
             Whether to save the predicted data in adata. Defaults to False.
         n_samples (int, optional):
             Number of data points in each group to generate. Defaults to 5000.
+        norm (Float, optional):
+            Normalization factor for log2 difference. Defaults to 0.1.
         delta (Float, optional):
             Interval of change used to define null hypothesis. Defaults to 1.
         fdr (Float, optional):
@@ -207,220 +211,117 @@ def differential_dynamics(adata,
     g1_corrected = model.test(g1_dataset, batch=(None if batch_correction else batch_array[g1_sample_idx]), sample=True, seed=seed, out_of_sample=True)
     g2_corrected = model.test(g2_dataset, batch=(None if batch_correction else batch_array[g2_sample_idx]), sample=True, seed=seed, out_of_sample=True)
 
-    kc1 = g1_corrected[11]
-    kc2 = g2_corrected[11]
-    mean_kc1 = np.mean(kc1, 0)
-    mean_kc2 = np.mean(kc2, 0)
-    ld_kc = log2_difference(kc1, kc2)
+    var_info = [
+        ('kc', 11, log2_difference, 'kc', norm),
+        ('rho', 12, log2_difference, 'rho', norm),
+        ('c', 0, log2_fold_change, 'c', norm),
+        ('u', 1, log2_fold_change, 'u', norm),
+        ('s', 2, log2_fold_change, 's', norm),
+        ('vc', 3, log2_difference if signed_velocity else log2_fold_change, 'vc', None),
+        ('vu', 4, log2_difference if signed_velocity else log2_fold_change, 'vu', None),
+        ('vs', 5, log2_difference if signed_velocity else log2_fold_change, 'v', None)
+    ]
 
-    rho1 = g1_corrected[12]
-    rho2 = g2_corrected[12]
-    mean_rho1 = np.mean(rho1, 0)
-    mean_rho2 = np.mean(rho2, 0)
-    ld_rho = log2_difference(rho1, rho2)
+    var_data = {}
+    for name, idx, func, _, norm_factor in var_info:
+        var_data[f"{name}1"] = g1_corrected[idx]
+        var_data[f"{name}2"] = g2_corrected[idx]
+        if name.startswith('v'):
+            if not signed_velocity:
+                var_data[f"{name}1"] = np.abs(var_data[f"{name}1"])
+                var_data[f"{name}2"] = np.abs(var_data[f"{name}2"])
+            if norm_factor is None:
+                norm_factor = var_data[f"mean_{name[-1]}2"]
+        var_data[f"mean_{name}1"] = np.mean(var_data[f"{name}1"], 0)
+        var_data[f"mean_{name}2"] = np.mean(var_data[f"{name}2"], 0)
 
-    c1 = g1_corrected[0]
-    c2 = g2_corrected[0]
-    mean_c1 = np.mean(c1, 0)
-    mean_c2 = np.mean(c2, 0)
-    lfc_c = log2_fold_change(c1, c2)
+        var_data[f"{'ld' if func == log2_difference else 'lfc'}_{name}"] = func(var_data[f"{name}1"], var_data[f"{name}2"],
+                                                                                norm_factor if func == log2_difference else eps)
 
-    u1 = g1_corrected[1]
-    u2 = g2_corrected[1]
-    mean_u1 = np.mean(u1, 0)
-    mean_u2 = np.mean(u2, 0)
-    lfc_u = log2_fold_change(u1, u2)
+    if test_decoupling:
+        var_data["decoupling1"] = g1_corrected[11] - g1_corrected[12]
+        var_data["decoupling2"] = g2_corrected[11] - g2_corrected[12]
+        var_data["mean_decoupling1"] = np.mean(var_data["decoupling1"], 0)
+        var_data["mean_decoupling2"] = np.mean(var_data["decoupling2"], 0)
+        var_data["ld_decoupling"] = log2_difference(var_data["decoupling1"], var_data["decoupling2"], norm)
+        var_data["coupling1"] = g1_corrected[11] + g1_corrected[12] - 1
+        var_data["coupling2"] = g2_corrected[11] + g2_corrected[12] - 1
+        var_data["mean_coupling1"] = np.mean(var_data["coupling1"], 0)
+        var_data["mean_coupling2"] = np.mean(var_data["coupling2"], 0)
+        var_data["ld_coupling"] = log2_difference(var_data["coupling1"], var_data["coupling2"], norm)
 
-    s1 = g1_corrected[2]
-    s2 = g2_corrected[2]
-    mean_s1 = np.mean(s1, 0)
-    mean_s2 = np.mean(s2, 0)
-    lfc_s = log2_fold_change(s1, s2)
-
-    vs1 = g1_corrected[5]
-    vs2 = g2_corrected[5]
-    if signed_velocity:
-        mean_vs1 = np.mean(vs1, 0)
-        mean_vs2 = np.mean(vs2, 0)
-        ld_vs = log2_difference(vs1, vs2, mean_s2)
-    else:
-        vs1 = np.abs(vs1)
-        vs2 = np.abs(vs2)
-        mean_vs1 = np.mean(vs1, 0)
-        mean_vs2 = np.mean(vs2, 0)
-        lfc_vs = log2_fold_change(vs1, vs2)
+        var_info.append(('decoupling', None, log2_difference, 'decoupling', norm))
+        var_info.append(('coupling', None, log2_difference, 'coupling', norm))
 
     if mode not in ['vanilla', 'change']:
-        logging.warn(f"Mode {mode} not recognized. Using vanilla mode.")
+        logging.warning(f"Mode {mode} not recognized. Using vanilla mode.")
         mode = 'vanilla'
-    if mode == 'vanilla':
-        p1_kc = np.mean(kc1 > kc2, 0)
-        p2_kc = 1.0 - p1_kc
-        bf_kc = np.log(p1_kc + eps) - np.log(p2_kc + eps)
-        df_kc = pd.DataFrame({'mean_kc1': mean_kc1,
-                              'mean_kc2': mean_kc2,
-                              'p1_kc': p1_kc,
-                              'p2_kc': p2_kc,
-                              'bayes_factor_kc': bf_kc,
-                              'log2_diff_kc': np.mean(ld_kc, 0)},
-                             index=adata.var_names)
 
-        p1_rho = np.mean(rho1 > rho2, 0)
-        p2_rho = 1.0 - p1_rho
-        bf_rho = np.log(p1_rho + eps) - np.log(p2_rho + eps)
-        df_rho = pd.DataFrame({'mean_rho1': mean_rho1,
-                               'mean_rho2': mean_rho2,
-                               'p1_rho': p1_rho,
-                               'p2_rho': p2_rho,
-                               'bayes_factor_rho': bf_rho,
-                               'log2_diff_rho': np.mean(ld_rho, 0)},
-                              index=adata.var_names)
+    dfs = {}
+    for name, _, func, disp_name, _ in var_info:
+        transform_type = 'diff' if func == log2_difference else 'fc'
+        transform_prefix = 'ld' if func == log2_difference else 'lfc'
 
-        p1_c = np.mean(c1 > c2, 0)
-        p2_c = 1.0 - p1_c
-        bf_c = np.log(p1_c + eps) - np.log(p2_c + eps)
-        df_c = pd.DataFrame({'mean_c1': mean_c1,
-                             'mean_c2': mean_c2,
-                             'p1_c': p1_c,
-                             'p2_c': p2_c,
-                             'bayes_factor_c': bf_c,
-                             'log2_fc_c': np.mean(lfc_c, 0)},
-                            index=adata.var_names)
+        if name.startswith('v'):
+            if signed_velocity:
+                transform_type = 'diff'
+                transform_prefix = 'ld'
+            else:
+                transform_type = 'fc'
+                transform_prefix = 'lfc'
 
-        p1_u = np.mean(u1 > u2, 0)
-        p2_u = 1.0 - p1_u
-        bf_u = np.log(p1_u + eps) - np.log(p2_u + eps)
-        df_u = pd.DataFrame({'mean_u1': mean_u1,
-                             'mean_u2': mean_u2,
-                             'p1_u': p1_u,
-                             'p2_u': p2_u,
-                             'bayes_factor_u': bf_u,
-                             'log2_fc_u': np.mean(lfc_u, 0)},
-                            index=adata.var_names)
+        if mode == 'vanilla':
+            p1 = np.mean(var_data[f"{name}1"] > var_data[f"{name}2"], 0)
+            p2 = 1.0 - p1
+            bf = np.log(p1 + eps) - np.log(p2 + eps)
 
-        p1_s = np.mean(s1 > s2, 0)
-        p2_s = 1.0 - p1_s
-        bf_s = np.log(p1_s + eps) - np.log(p2_s + eps)
-        df_s = pd.DataFrame({'mean_s1': mean_s1,
-                             'mean_s2': mean_s2,
-                             'p1_s': p1_s,
-                             'p2_s': p2_s,
-                             'bayes_factor_s': bf_s,
-                             'log2_fc_s': np.mean(lfc_s, 0)},
-                            index=adata.var_names)
+            df_data = {
+                f'mean_{disp_name}1': var_data[f"mean_{name}1"],
+                f'mean_{disp_name}2': var_data[f"mean_{name}2"],
+                f'p1_{disp_name}': p1,
+                f'p2_{disp_name}': p2,
+                f'bayes_factor_{disp_name}': bf
+            }
 
-        p1_vs = np.mean(vs1 > vs2, 0)
-        p2_vs = 1.0 - p1_vs
-        bf_vs = np.log(p1_vs + eps) - np.log(p2_vs + eps)
-        df_vs = pd.DataFrame({'mean_v1': mean_vs1,
-                              'mean_v2': mean_vs2,
-                              'p1_v': p1_vs,
-                              'p2_v': p2_vs,
-                              'bayes_factor_v': bf_vs},
-                             index=adata.var_names)
-        if signed_velocity:
-            df_vs['log2_diff_v'] = np.mean(ld_vs, 0)
-        else:
-            df_vs['log2_fc_v'] = np.mean(lfc_vs, 0)
+            df_data[f'log2_{transform_type}_{disp_name}'] = np.mean(var_data[f"{transform_prefix}_{name}"], 0)
+            df = pd.DataFrame(df_data, index=adata.var_names)
 
-    elif mode == 'change':
-        p1_kc = np.mean(np.abs(ld_kc) >= delta, 0)
-        p2_kc = 1.0 - p1_kc
-        bf_kc = np.log(p1_kc + eps) - np.log(p2_kc + eps)
-        df_kc = pd.DataFrame({'mean_kc1': mean_kc1,
-                              'mean_kc2': mean_kc2,
-                              'p_kc_change': p1_kc,
-                              'p_kc_no_change': p2_kc,
-                              'bayes_factor_kc': bf_kc,
-                              'log2_diff_kc': np.mean(ld_kc, 0)},
-                             index=adata.var_names)
-        df_kc = fdp(df_kc, 'kc', fdr)
+        elif mode == 'change':
+            p1 = np.mean(np.abs(var_data[f"{transform_prefix}_{name}"]) >= delta, 0)
+            p2 = 1.0 - p1
+            bf = np.log(p1 + eps) - np.log(p2 + eps)
 
-        p1_rho = np.mean(np.abs(ld_rho) >= delta, 0)
-        p2_rho = 1.0 - p1_rho
-        bf_rho = np.log(p1_rho + eps) - np.log(p2_rho + eps)
-        df_rho = pd.DataFrame({'mean_rho1': mean_rho1,
-                               'mean_rho2': mean_rho2,
-                               'p_rho_change': p1_rho,
-                               'p_rho_no_change': p2_rho,
-                               'bayes_factor_rho': bf_rho,
-                               'log2_diff_rho': np.mean(ld_rho, 0)},
-                              index=adata.var_names)
-        df_rho = fdp(df_rho, 'rho', fdr)
+            df_data = {
+                f'mean_{disp_name}1': var_data[f"mean_{name}1"],
+                f'mean_{disp_name}2': var_data[f"mean_{name}2"],
+                f'p_{disp_name}_change': p1,
+                f'p_{disp_name}_no_change': p2,
+                f'bayes_factor_{disp_name}': bf
+            }
 
-        p1_c = np.mean(np.abs(lfc_c) >= delta, 0)
-        p2_c = 1.0 - p1_c
-        bf_c = np.log(p1_c + eps) - np.log(p2_c + eps)
-        df_c = pd.DataFrame({'mean_c1': mean_c1,
-                             'mean_c2': mean_c2,
-                             'p_c_change': p1_c,
-                             'p_c_no_change': p2_c,
-                             'bayes_factor_c': bf_c,
-                             'log2_fc_c': np.mean(lfc_c, 0)},
-                            index=adata.var_names)
-        df_c = fdp(df_c, 'c', fdr)
+            df_data[f'log2_{transform_type}_{disp_name}'] = np.mean(var_data[f"{transform_prefix}_{name}"], 0)
+            df = pd.DataFrame(df_data, index=adata.var_names)
+            df = fdp(df, disp_name, fdr)
 
-        p1_u = np.mean(np.abs(lfc_u) >= delta, 0)
-        p2_u = 1.0 - p1_u
-        bf_u = np.log(p1_u + eps) - np.log(p2_u + eps)
-        df_u = pd.DataFrame({'mean_u1': mean_u1,
-                             'mean_u2': mean_u2,
-                             'p_u_change': p1_u,
-                             'p_u_no_change': p2_u,
-                             'bayes_factor_u': bf_u,
-                             'log2_fc_u': np.mean(lfc_u, 0)},
-                            index=adata.var_names)
-        df_u = fdp(df_u, 'u', fdr)
+        dfs[disp_name] = df
 
-        p1_s = np.mean(np.abs(lfc_s) >= delta, 0)
-        p2_s = 1.0 - p1_s
-        bf_s = np.log(p1_s + eps) - np.log(p2_s + eps)
-        df_s = pd.DataFrame({'mean_s1': mean_s1,
-                             'mean_s2': mean_s2,
-                             'p_s_change': p1_s,
-                             'p_s_no_change': p2_s,
-                             'bayes_factor_s': bf_s,
-                             'log2_fc_s': np.mean(lfc_s, 0)},
-                            index=adata.var_names)
-        df_s = df_s.sort_values('bayes_factor_s', ascending=False)
-        df_s = fdp(df_s, 's', fdr)
-
-        p1_vs = np.mean(np.abs(ld_vs if signed_velocity else lfc_vs) >= delta, 0)
-        p2_vs = 1.0 - p1_vs
-        bf_vs = np.log(p1_vs + eps) - np.log(p2_vs + eps)
-        df_vs = pd.DataFrame({'mean_v1': mean_vs1,
-                              'mean_v2': mean_vs2,
-                              'p_v_change': p1_vs,
-                              'p_v_no_change': p2_vs,
-                              'bayes_factor_v': bf_vs},
-                             index=adata.var_names)
-        if signed_velocity:
-            df_vs['log2_diff_v'] = np.mean(ld_vs, 0)
-        else:
-            df_vs['log2_fc_v'] = np.mean(lfc_vs, 0)
-        df_vs = fdp(df_vs, 'v', fdr)
-
-    df_dd = pd.concat([df_kc, df_rho, df_c, df_u, df_s, df_vs], axis=1)
+    df_dd = pd.concat(list(dfs.values()), axis=1)
 
     if group1 is None:
         group1 = '1'
     if group2 is None:
         group2 = '2'
     if save_raw:
-        adata.uns['differential_dynamics'] = {f'kc_{group1}': kc1,
-                                              f'kc_{group2}': kc2,
-                                              f'rho_{group1}': rho1,
-                                              f'rho_{group2}': rho2,
-                                              f'c_{group1}': c1,
-                                              f'c_{group2}': c2,
-                                              f'u_{group1}': u1,
-                                              f'u_{group2}': u2,
-                                              f's_{group1}': s1,
-                                              f's_{group2}': s2,
-                                              f'v_{group1}': vs1,
-                                              f'v_{group2}': vs2,
-                                              f't_{group1}': g1_corrected[10],
-                                              f't_{group2}': g2_corrected[10]}
+        differential_dynamics_dict = {}
+        for name, _, _, disp_name, _ in var_info:
+            differential_dynamics_dict[f'{disp_name}_{group1}'] = var_data[f"{name}1"]
+            differential_dynamics_dict[f'{disp_name}_{group2}'] = var_data[f"{name}2"]
+
+        differential_dynamics_dict[f't_{group1}'] = g1_corrected[10]
+        differential_dynamics_dict[f't_{group2}'] = g2_corrected[10]
+
+        adata.uns['differential_dynamics'] = differential_dynamics_dict
+
     return df_dd
 
 
@@ -443,32 +344,34 @@ def dd_func(var1_g1_gene,
     if func == 'ld':
         mean_norm_gene = mean_norm_gene if mean_norm_gene is not None else 1
 
-    time_array, dd_array = [], []
+    time_array, dd_array, count_gen = [], [], []
     for i in range(n_bins):
         time_bin = np.mean(t_both[t_bins == i])
-        time_array.append(time_bin)
         var1_g1_bin = var1_g1_gene[t1_bins == i]
         var1_g2_bin = var1_g2_gene[t2_bins == i]
         if len(var1_g1_bin) < 10 or len(var1_g2_bin) < 10:
             continue
+        if var2_g1_gene is not None:
+            var2_g1_bin = var2_g1_gene[t1_bins == i]
+            var2_g2_bin = var2_g2_gene[t2_bins == i]
+            if len(var2_g1_bin) < 10 or len(var2_g2_bin) < 10:
+                continue
+        time_array.append(time_bin)
+        count_gen.append(len(var1_g1_bin))
         var1_g1_bin_perm = rng.choice(var1_g1_bin, n_samples)
         var1_g2_bin_perm = rng.choice(var1_g2_bin, n_samples)
         if func == 'lfc':
-            fc_bin = fold_change(np.abs(var1_g1_bin_perm), np.abs(var1_g2_bin_perm))
+            fc_bin = fold_change(np.abs(var1_g1_bin_perm), np.abs(var1_g2_bin_perm), eps)
             dd_array.append(np.mean(fc_bin))
         else:
             diff_bin = difference(var1_g1_bin_perm, var1_g2_bin_perm, mean_norm_gene)
             dd_array.append(np.mean(diff_bin))
 
         if var2_g1_gene is not None:
-            var2_g1_bin = var2_g1_gene[t1_bins == i]
-            var2_g2_bin = var2_g2_gene[t2_bins == i]
-            if len(var2_g1_bin) < 10 or len(var2_g2_bin) < 10:
-                continue
             var2_g1_bin_perm = rng.choice(var2_g1_bin, n_samples)
             var2_g2_bin_perm = rng.choice(var2_g2_bin, n_samples)
             if func == 'lfc':
-                fc_bin = fold_change(np.abs(var2_g1_bin_perm), np.abs(var2_g2_bin_perm))
+                fc_bin = fold_change(np.abs(var2_g1_bin_perm), np.abs(var2_g2_bin_perm), eps)
                 dd_array[-1] /= np.mean(fc_bin + eps)
             else:
                 diff_bin = difference(var2_g1_bin_perm, var2_g2_bin_perm, mean_norm_gene)
@@ -476,6 +379,7 @@ def dd_func(var1_g1_gene,
 
     time_array = np.array(time_array)
     dd_array = np.array(dd_array)
+    count_gen = np.array(count_gen)
     bounds = np.quantile(t_both, [0.005, 0.995])
     t_both_sorted = np.sort(t_both)
     t_both_sorted = t_both_sorted[(t_both_sorted >= bounds[0]) & (t_both_sorted <= bounds[1])]
@@ -502,7 +406,11 @@ def dd_func(var1_g1_gene,
     ll_null = gaussian_process_.log_marginal_likelihood(gaussian_process_.kernel_.theta)
     lrt = -2 * (ll_null - ll)
     pval = chi2.sf(lrt, 1)
-    return pval
+    if func == 'lfc':
+        mean_out = np.mean(np.log2(dd_array + eps) * count_gen * n_samples / np.sum(count_gen))
+    else:
+        mean_out = np.mean(np.log2(np.abs(dd_array) + 1) * np.sign(dd_array) * count_gen * n_samples / np.sum(count_gen))
+    return mean_out, pval
 
 
 def differential_decoupling(adata,
@@ -523,6 +431,7 @@ def differential_decoupling(adata,
     elif genes is None:
         genes = adata.var_names
     gn = len(genes)
+    mean_list = np.full(gn, np.nan)
     pval_list = np.full(gn, np.nan)
     var_names_dict = {k: v for v, k in enumerate(adata.var_names)}
     gene_idx = np.array([var_names_dict[gene] for gene in genes])
@@ -530,18 +439,20 @@ def differential_decoupling(adata,
         group1 = '1'
     if group2 is None:
         group2 = '2'
-    if var1 not in ['kc', 'rho', 'c', 'u', 's', 'v']:
-        raise ValueError(f"Variable {var1} not recognized. Must be one of ['kc', 'rho', 'c', 'u', 's', 'v'].")
+    if var1 not in ['kc', 'rho', 'c', 'u', 's', 'vc', 'vu', 'v']:
+        raise ValueError(f"Variable {var1} not recognized. Must be one of ['kc', 'rho', 'c', 'u', 's', 'vc', 'vu', 'v'].")
     if var1 == 'v':
         var2 = None
         print('Testing velocity. Setting var2 to None.')
-    if var2 is not None and var2 not in ['kc', 'rho', 'c', 'u', 's', 'v']:
-        raise ValueError(f"Variable {var2} not recognized. Must be one of ['kc', 'rho', 'c', 'u', 's', 'v'].")
+    if var2 is not None and var2 not in ['kc', 'rho', 'c', 'u', 's', 'vc', 'vu', 'v']:
+        raise ValueError(f"Variable {var2} not recognized. Must be one of ['kc', 'rho', 'c', 'u', 's', 'vc', 'vu', 'v'].")
     default_func = {'kc': 'ld',
                     'rho': 'ld',
                     'c': 'lfc',
                     'u': 'lfc',
                     's': 'lfc',
+                    'vc': 'ld' if signed_velocity else 'lfc',
+                    'vu': 'ld' if signed_velocity else 'lfc',
                     'v': 'ld' if signed_velocity else 'lfc'}
     if var2 is not None and default_func[var1] != default_func[var2]:
         raise ValueError(f"{var1} and {var2} have different differential functions. Please select variables with simialr distributions, such as (kc, rho) or (c, u, s).")
@@ -601,6 +512,6 @@ def differential_decoupling(adata,
                 eps)
             for i in idx)
         for i, r in zip(idx, res):
-            pval_list[i] = r
+            mean_list[i], pval_list[i] = r[0], r[1]
         pbar.update(len(idx))
-    return pval_list
+    return mean_list, pval_list

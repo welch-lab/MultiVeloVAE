@@ -1288,7 +1288,8 @@ def cross_boundary_correctness(
             gene_mask = ~np.isnan(v_emb[0])
         x_emb = x_emb[:, gene_mask]
         v_emb = v_emb[:, gene_mask]
-
+    if 'indices' not in adata.uns['neighbors']:
+        print("Please rerun scVelo's `scv.pp.neighbors` function instead of scanpy's `sc.pp.neighbors`.")
     for u, v in cluster_edges:
         sel = adata.obs[k_cluster] == u
         nbs = adata.uns['neighbors']['indices'][sel]  # [n * 30]
@@ -1394,6 +1395,8 @@ def gen_cross_boundary_correctness(
         v_emb = v_emb[:, gene_mask]
     t = adata.obs[tkey].to_numpy()
     np.random.seed(random_state)
+    if 'indices' not in adata.uns['neighbors']:
+        print("Please rerun scVelo's `scv.pp.neighbors` function instead of scanpy's `sc.pp.neighbors`.")
     for u, v in cluster_edges:
         sel = adata.obs[k_cluster] == u
         nbs = adata.uns['neighbors']['indices'][sel]  # [n * 30]
@@ -1536,6 +1539,8 @@ def gen_cross_boundary_correctness_test(
         v_emb = v_emb[:, gene_mask]
     t = adata.obs[tkey].to_numpy()
     np.random.seed(random_state)
+    if 'indices' not in adata.uns['neighbors']:
+        print("Please rerun scVelo's `scv.pp.neighbors` function instead of scanpy's `sc.pp.neighbors`.")
     for u, v in cluster_edges:
         sel = adata.obs[k_cluster] == u
         nbs = adata.uns['neighbors']['indices'][sel]  # [n * 30]
@@ -1696,7 +1701,8 @@ def calibrated_cross_boundary_correctness(
         v_emb = v_emb[:, gene_mask]
     t = adata.obs[k_time].to_numpy()
     std_t = None if k_std_t is None else adata.obs[k_std_t].to_numpy()
-
+    if 'indices' not in adata.uns['neighbors']:
+        print("Please rerun scVelo's `scv.pp.neighbors` function instead of scanpy's `sc.pp.neighbors`.")
     for u, v in cluster_edges:
         n1, n2 = 0, 0
         sel = adata.obs[k_cluster] == u
@@ -1841,7 +1847,8 @@ def inner_cluster_coh(adata, k_cluster, k_velocity, gene_mask=None, return_raw=F
     clusters = np.unique(adata.obs[k_cluster])
     scores = {}
     all_scores = {}
-
+    if 'indices' not in adata.uns['neighbors']:
+        print("Please rerun scVelo's `scv.pp.neighbors` function instead of scanpy's `sc.pp.neighbors`.")
     for cat in clusters:
         sel = adata.obs[k_cluster] == cat
         nbs = adata.uns['neighbors']['indices'][sel]
@@ -1882,6 +1889,8 @@ def velocity_consistency(adata, vkey, gene_mask=None):
     Returns:
         float: Average score over all cells.
     """
+    if 'indices' not in adata.uns['neighbors']:
+        print("Please rerun scVelo's `scv.pp.neighbors` function instead of scanpy's `sc.pp.neighbors`.")
     nbs = adata.uns['neighbors']['indices']
 
     velocities = adata.layers[vkey]
@@ -1892,6 +1901,40 @@ def velocity_consistency(adata, vkey, gene_mask=None):
                          for ith in range(adata.n_obs)]
     adata.obs[f'{vkey}_consistency'] = consistency_score
     return np.mean(consistency_score)
+
+
+# The following code was modified from VeloVI https://github.com/YosefLab/velovi_reproducibility/blob/main/notebooks/uncertainty/pancreas.ipynb
+def gene_velocity_coherence(adata, key="vae", time_order=True, use_pred=True, normalize=False):
+    from scipy.stats import rankdata
+    import scvelo as scv
+    from scipy.sparse import csr_matrix
+    vkey = f'{key}_velocity_norm'
+    tm = scv.utils.get_transition_matrix(
+        adata, vkey=vkey, use_negative_cosines=True, self_transitions=True
+    )
+    tm.setdiag(0)
+    if time_order:
+        sort_indices = np.argsort(adata.obs[f'{key}_time'].to_numpy())
+        tm = tm[sort_indices, :][:, sort_indices]  # sort by time
+        tm = csr_matrix(np.tril(tm.toarray(), k=-1))  # keep ancestors only
+        tm = tm.multiply(csr_matrix(1.0 / np.abs(tm).sum(1)))
+        recover_indices = np.argsort(sort_indices)
+        tm = tm[recover_indices, :][:, recover_indices]  # recover original order
+    if use_pred:
+        adata.layers['shat_extrap'] = tm @ adata.layers[f'{key}_shat']
+        adata.layers['shat_delta'] = adata.layers['shat_extrap'] - adata.layers[f'{key}_shat']
+        prod = adata.layers['shat_delta'] * adata.layers[vkey]
+    else:
+        adata.layers['Ms_extrap'] = tm @ adata.layers['Ms']
+        adata.layers['Ms_delta'] = adata.layers['Ms_extrap'] - adata.layers['Ms']
+        prod = adata.layers['Ms_delta'] * adata.layers[vkey]
+    if normalize:
+        prod = prod / np.mean(adata.layers['Ms'], axis=0, keepdims=True)
+
+    ranked = rankdata(prod, axis=1)
+    adata.layers['product_score'] = prod
+    adata.layers['ranked_score'] = ranked
+
 
 ##########################################################################
 # End of Reference

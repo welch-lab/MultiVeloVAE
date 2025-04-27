@@ -1434,13 +1434,14 @@ def differential_dynamics_plot(adata,
             var_g1_bin_perm = rng.choice(var_g1_bin, n_samples)
             var_g2_bin_perm = rng.choice(var_g2_bin, n_samples)
             if func == 'lfc':
-                fc_bin = fold_change(np.abs(var_g1_bin_perm), np.abs(var_g2_bin_perm))
+                fc_bin = fold_change(np.abs(var_g1_bin_perm), np.abs(var_g2_bin_perm), eps)
                 dd_array.append(np.mean(fc_bin))
             else:
                 diff_bin = difference(var_g1_bin_perm, var_g2_bin_perm, mean_norm_gene)
                 dd_array.append(np.mean(diff_bin))
             p1 = np.mean(var_g1_bin_perm > var_g2_bin_perm)
             bf_array.append(np.log(p1 + eps) - np.log(1 - p1 + eps))
+
         time_array = np.array(time_array)
         dd_array = np.array(dd_array)
         bounds = np.quantile(t_both, [0.005, 0.995])

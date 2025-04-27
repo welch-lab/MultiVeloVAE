@@ -5,6 +5,7 @@ from .evaluation_util import (cross_boundary_correctness,
                               time_score,
                               inner_cluster_coh,
                               velocity_consistency,
+                              gene_velocity_coherence,
                               get_err_velovae)
 from .perf_logger import PerfLogger
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "time_score",
     "inner_cluster_coh",
     "velocity_consistency",
+    "gene_velocity_coherence",
     "get_err_velovae",
     "PerfLogger"
     ]
