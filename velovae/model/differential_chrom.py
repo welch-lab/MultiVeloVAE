@@ -93,6 +93,8 @@ def differential_dynamics(adata,
             Defaults to 'vanilla'.
         signed_velocity (bool, optional):
             Whether to use original velocity values or absolute values. Defaults to True.
+        test_decoupling (bool, optional):
+            Whether to test decoupling and coupling dynamics. Defaults to False.
         save_raw (bool, optional):
             Whether to save the predicted data in adata. Defaults to False.
         n_samples (int, optional):
@@ -138,7 +140,9 @@ def differential_dynamics(adata,
     else:
         if idx2 is None:
             print("Using the rest of cells as reference (control).")
-            idx2 = np.setdiff1d(np.arange(adata.n_obs), np.where(idx1)[0])
+            idx2 = np.setdiff1d(np.array(np.arange(adata.n_obs)), np.where(idx1)[0])
+            if len(idx2) == 0:
+                raise ValueError("Please specify idx2 explicitly.")
     if (len(idx2) == adata.n_obs) and np.array_equal(idx2, idx2.astype(bool)):
         idx2_bin = idx2
         idx2 = np.where(idx2)[0]
@@ -413,18 +417,18 @@ def dd_func(var1_g1_gene,
     return mean_out, pval
 
 
-def differential_decoupling(adata,
-                            genes=None,
-                            group1=None,
-                            group2=None,
-                            var1='kc',
-                            var2='rho',
-                            signed_velocity=True,
-                            n_bins=50,
-                            n_samples=100,
-                            seed=0,
-                            kernel='RBF',
-                            n_jobs=None):
+def differential_var_decoupling(adata,
+                                genes=None,
+                                group1=None,
+                                group2=None,
+                                var1='kc',
+                                var2='rho',
+                                signed_velocity=True,
+                                n_bins=50,
+                                n_samples=100,
+                                seed=0,
+                                kernel='RBF',
+                                n_jobs=None):
     eps = 1e-8
     if isinstance(genes, str) or isinstance(genes, int):
         genes = [genes]

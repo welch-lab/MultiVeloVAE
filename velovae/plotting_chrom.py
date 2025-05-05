@@ -809,7 +809,7 @@ def dynamic_plot(adata,
     genes = np.array(genes)
     missing_genes = genes[~np.isin(genes, adata.var_names)]
     if len(missing_genes) > 0:
-        logger.warn(f'{missing_genes} not found')
+        logger.warning(f'{missing_genes} not found')
     genes = genes[np.isin(genes, adata.var_names)]
     gn = len(genes)
     if gn == 0:
@@ -917,6 +917,8 @@ def dynamic_plot(adata,
                 ax.xaxis.set_ticks_position('none')
                 ax.yaxis.set_ticks_position('none')
                 ax.set_frame_on(False)
+            if no_c:
+                fig.delaxes(ax)
     fig.tight_layout()
 
 
@@ -1315,9 +1317,9 @@ def differential_dynamics_plot(adata,
 
     Args:
         adata (:class:`anndata.AnnData`):
-            RNA AnnData object.
-        adata_atac (:class:`anndata.AnnData`):
-            ATAC AnnData object.
+            Anndata object with differential dynamics results stored in `adata.uns['differential_dynamics']`.
+        genes (str, list of str):
+            List of genes to plot.
         group1 (str, optional):
             Name of group 1. Defaults to None.
         group2 (str, optional):
@@ -1407,6 +1409,8 @@ def differential_dynamics_plot(adata,
             types = adata.obs[color_by].cat.categories
             colors = adata.uns[f'{color_by}_colors']
             colors_dict = dict(zip(types, colors))
+            if color_include is None:
+                color_include = types
             cell_time = adata.obs[f'{key}_time'].values[np.isin(adata.obs[color_by].values, color_include)]
             color_array = np.array([colors_dict[x] for x in adata.obs[color_by].values if x in color_include])
             color_array = color_array[np.argsort(cell_time)]
@@ -1547,7 +1551,277 @@ def differential_dynamics_plot(adata,
         plt.suptitle(f"Gaussian process regression on differential dynamics on {var}", fontsize=12+2*min(n_cols, len(genes)), y=1.01)
     if legend:
         handles, labels = ax.get_legend_handles_labels()
-        fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(1.6-0.1*min(n_cols, len(genes)), 0.8), fontsize=11)
+        fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(-np.log10(min(n_cols, len(genes)))/2+1.5, 1),  # (1.6-0.1*min(n_cols, len(genes)), 0.8),
+                   fontsize=11)
+    fig.tight_layout()
+
+
+def decoupling_plot(adata,
+                    genes,
+                    group1=None,
+                    group2=None,
+                    absolute=False,
+                    show_coupling=True,
+                    show_decoupling=True,
+                    color_by=None,
+                    color_include=None,
+                    key='vae',
+                    n_bins=50,
+                    n_samples=100,
+                    seed=0,
+                    n_cols=5,
+                    figsize=None,
+                    axis_on=True,
+                    frame_on=True,
+                    title=True,
+                    legend=True):
+    """Plot differential dynamics between two groups of cells.
+
+    Args:
+        adata (:class:`anndata.AnnData`):
+            AnnData object with differential dynamics results.
+        genes (str or list of str):
+            List of genes to plot.
+        group1 (str, optional):
+            Name of group 1. Defaults to None.
+        group2 (str, optional):
+            Name of group 2. Defaults to None.
+        absolute (bool, optional):
+            Whether to plot absolute (de)coupling values. Defaults to False.
+        show_coupling (bool, optional):
+            Whether to show coupling values in the plot. Defaults to True.
+        show_decoupling (bool, optional):
+            Whether to show decoupling values in the plot. Defaults to True.
+        color_by (str, optional):
+            Key in `adata.obs` to color the points by. Defaults to None.
+        color_include (list, optional):
+            List of categories to include in the color_by variable. Defaults to None.
+        key (str, optional):
+            Key to find VAE variables. Defaults to `vae`.
+        n_bins (int, optional):
+            Number of bins to divide the time points. Defaults to 50.
+        n_samples (int, optional):
+            Number of data points to permute in each bin for each group. Defaults to 100.
+        seed (int, optional):
+            Seed for random generator. Defaults to 0.
+        n_cols (int, optional):
+            Number of columns to plot. Defaults to 5.
+        figsize (tuple, optional):
+            Total figure size. Defaults to None.
+        axis_on (bool, optional):
+            Whether to show axis labels. Defaults to True.
+        frame_on (bool, optional):
+            Whether to show plot frames. Defaults to True.
+        title (bool, optional):
+            Whether to show title. Defaults to True.
+        legend (bool, optional):
+            Whether to show legend. Defaults to True.
+    """
+    import statsmodels.api as sm
+    lowess = sm.nonparametric.lowess
+    if isinstance(genes, str) or isinstance(genes, int):
+        genes = [genes]
+    if group1 is None:
+        group1 = '1'
+    if group2 is None:
+        group2 = '2'
+    if f'decoupling_{group1}' not in adata.uns['differential_dynamics'].keys():
+        raise ValueError(f"decoupling_{group1} not found in adata.varm.\nWas differential_dynamics run with save_raw and test_decoupling=True?")
+    if f'decoupling_{group2}' not in adata.uns['differential_dynamics'].keys():
+        raise ValueError(f"decoupling_{group2} not found in adata.varm.\nWas differential_dynamics run with save_raw and test_decoupling=True?")
+    decoupling_g1 = adata.uns['differential_dynamics'][f'decoupling_{group1}']
+    decoupling_g2 = adata.uns['differential_dynamics'][f'decoupling_{group2}']
+    coupling_g1 = adata.uns['differential_dynamics'][f'coupling_{group1}']
+    coupling_g2 = adata.uns['differential_dynamics'][f'coupling_{group2}']
+
+    t1 = adata.uns['differential_dynamics'][f't_{group1}']
+    t2 = adata.uns['differential_dynamics'][f't_{group2}']
+    t_both = np.concatenate([t1, t2])
+    steps = np.quantile(t_both, np.linspace(0, 1, n_bins + 1))
+    steps = steps[1:-1]
+    t_bins = np.digitize(t_both, steps)
+    t1_bins = np.digitize(t1, steps)
+    t2_bins = np.digitize(t2, steps)
+
+    if color_by is not None:
+        from pandas.api.types import is_categorical_dtype
+        if color_by not in adata.obs:
+            raise ValueError(f"Color key {color_by} not found in adata.obs.")
+        elif not is_categorical_dtype(adata.obs[color_by]) or color_by+'_colors' not in adata.uns.keys():
+            raise ValueError(f"Color key {color_by} must be a categorical variable with colors stored in adata.uns.")
+        else:
+            types = adata.obs[color_by].cat.categories
+            colors = adata.uns[f'{color_by}_colors']
+            colors_dict = dict(zip(types, colors))
+            if color_include is None:
+                color_include = types
+            cell_time = adata.obs[f'{key}_time'].values[np.isin(adata.obs[color_by].values, color_include)]
+            color_array = np.array([colors_dict[x] for x in adata.obs[color_by].values if x in color_include])
+            color_array = color_array[np.argsort(cell_time)]
+            cell_time = np.sort(cell_time)
+
+    fig, axs = plt.subplots(-(-len(genes) // n_cols), min(n_cols, len(genes)), squeeze=False, figsize=(5*min(n_cols, len(genes)), 4.4*(-(-len(genes) // n_cols))) if figsize is None else figsize)
+    fig.patch.set_facecolor('white')
+    count = 0
+    for gene in genes:
+        rng = np.random.default_rng(seed=seed)
+        gene_idx = adata.var_names == gene
+        decoupling_g1_gene = decoupling_g1[:, gene_idx]
+        decoupling_g2_gene = decoupling_g2[:, gene_idx]
+
+        time_array, decoupling_array, coupling_array = [], [], []
+        for i in range(n_bins):
+            time_bin = np.mean(t_both[t_bins == i])
+            decoupling_g1_bin = decoupling_g1_gene[t1_bins == i]
+            decoupling_g2_bin = decoupling_g2_gene[t2_bins == i]
+            if len(decoupling_g1_bin) < 10 or len(decoupling_g2_bin) < 10:
+                continue
+            coupling_g1_bin = coupling_g1[:, gene_idx][t1_bins == i]
+            coupling_g2_bin = coupling_g2[:, gene_idx][t2_bins == i]
+            if len(coupling_g1_bin) < 10 or len(coupling_g2_bin) < 10:
+                continue
+            time_array.append(time_bin)
+            decoupling_g1_bin_perm = rng.choice(decoupling_g1_bin, n_samples)
+            decoupling_g2_bin_perm = rng.choice(decoupling_g2_bin, n_samples)
+            decoupling_array.append(np.mean(np.concatenate([decoupling_g1_bin_perm, decoupling_g2_bin_perm])))
+            coupling_g1_bin_perm = rng.choice(coupling_g1_bin, n_samples)
+            coupling_g2_bin_perm = rng.choice(coupling_g2_bin, n_samples)
+            coupling_array.append(np.mean(np.concatenate([coupling_g1_bin_perm, coupling_g2_bin_perm])))
+
+        time_array = np.array(time_array)
+        decoupling_array = np.array(decoupling_array)
+        coupling_array = np.array(coupling_array)
+        if absolute:
+            decoupling_array = np.abs(decoupling_array)
+            coupling_array = np.abs(coupling_array)
+        decoupling_smooth = lowess(decoupling_array, time_array, frac=0.3)[:, 1]
+        coupling_smooth = lowess(coupling_array, time_array, frac=0.3)[:, 1]
+        decoupling_smooth_pos_idx = np.where(decoupling_smooth > 0)[0]
+        breaks = np.where(np.diff(decoupling_smooth_pos_idx) > 1)[0] + 1
+        if len(breaks) > 0:
+            decoupling_smooth_pos_idx = np.array_split(decoupling_smooth_pos_idx, breaks)
+            for i, x in enumerate(decoupling_smooth_pos_idx[:-1]):
+                decoupling_smooth_pos_idx[i] = np.append(x, x[-1] + 1)
+            decoupling_smooth_pos_idx[-1] = np.append([decoupling_smooth_pos_idx[-1][0]-1], decoupling_smooth_pos_idx[-1])
+        else:
+            if len(decoupling_smooth_pos_idx) > 0 and np.min(decoupling_smooth_pos_idx) > 0:
+                decoupling_smooth_pos_idx = np.append([decoupling_smooth_pos_idx[0]-1], decoupling_smooth_pos_idx)
+            if len(decoupling_smooth_pos_idx) > 0 and np.max(decoupling_smooth_pos_idx) < len(decoupling_smooth) - 1:
+                decoupling_smooth_pos_idx = np.append(decoupling_smooth_pos_idx, [decoupling_smooth_pos_idx[-1] + 1])
+            decoupling_smooth_pos_idx = [decoupling_smooth_pos_idx]
+        coupling_smooth_pos_idx = np.where(coupling_smooth > 0)[0]
+        breaks = np.where(np.diff(coupling_smooth_pos_idx) > 1)[0] + 1
+        if len(breaks) > 0:
+            coupling_smooth_pos_idx = np.array_split(coupling_smooth_pos_idx, breaks)
+            for i, x in enumerate(coupling_smooth_pos_idx[:-1]):
+                coupling_smooth_pos_idx[i] = np.append(x, x[-1] + 1)
+        else:
+            if len(coupling_smooth_pos_idx) > 0 and np.min(coupling_smooth_pos_idx) > 0:
+                coupling_smooth_pos_idx = np.append([coupling_smooth_pos_idx[0]-1], coupling_smooth_pos_idx)
+            if len(coupling_smooth_pos_idx) > 0 and np.max(coupling_smooth_pos_idx) < len(coupling_smooth) - 1:
+                coupling_smooth_pos_idx = np.append(coupling_smooth_pos_idx, [coupling_smooth_pos_idx[-1] + 1])
+            coupling_smooth_pos_idx = [coupling_smooth_pos_idx]
+        decoupling_smooth_neg_idx = np.where(decoupling_smooth < 0)[0]
+        breaks = np.where(np.diff(decoupling_smooth_neg_idx) > 1)[0] + 1
+        if len(breaks) > 0:
+            decoupling_smooth_neg_idx = np.array_split(decoupling_smooth_neg_idx, breaks)
+            for i, x in enumerate(decoupling_smooth_neg_idx[:-1]):
+                decoupling_smooth_neg_idx[i] = np.append(x, x[-1] + 1)
+        else:
+            if len(decoupling_smooth_neg_idx) > 0 and np.min(decoupling_smooth_neg_idx) > 0:
+                decoupling_smooth_neg_idx = np.append([decoupling_smooth_neg_idx[0]-1], decoupling_smooth_neg_idx)
+            if len(decoupling_smooth_neg_idx) > 0 and np.max(decoupling_smooth_neg_idx) < len(decoupling_smooth) - 1:
+                decoupling_smooth_neg_idx = np.append(decoupling_smooth_neg_idx, [decoupling_smooth_neg_idx[-1] + 1])
+            decoupling_smooth_neg_idx = [decoupling_smooth_neg_idx]
+        coupling_smooth_neg_idx = np.where(coupling_smooth < 0)[0]
+        breaks = np.where(np.diff(coupling_smooth_neg_idx) > 1)[0] + 1
+        if len(breaks) > 0:
+            coupling_smooth_neg_idx = np.array_split(coupling_smooth_neg_idx, breaks)
+            for i, x in enumerate(coupling_smooth_neg_idx[:-1]):
+                coupling_smooth_neg_idx[i] = np.append(x, x[-1] + 1)
+        else:
+            if len(coupling_smooth_neg_idx) > 0 and np.min(coupling_smooth_neg_idx) > 0:
+                coupling_smooth_neg_idx = np.append([coupling_smooth_neg_idx[0]-1], coupling_smooth_neg_idx)
+            if len(coupling_smooth_neg_idx) > 0 and np.max(coupling_smooth_neg_idx) < len(coupling_smooth) - 1:
+                coupling_smooth_neg_idx = np.append(coupling_smooth_neg_idx, [coupling_smooth_neg_idx[-1] + 1])
+            coupling_smooth_neg_idx = [coupling_smooth_neg_idx]
+
+        row = count // n_cols
+        col = count % n_cols
+        ax = axs[row, col]
+
+        if show_decoupling:
+            label_ = True
+            for arr in decoupling_smooth_pos_idx:
+                if label_:
+                    ax.plot(time_array[arr], decoupling_smooth[arr], label="Decoupled" if absolute else "Decoupled kc > rho", color='tab:blue', linestyle='solid', linewidth=2)
+                else:
+                    ax.plot(time_array[arr], decoupling_smooth[arr], label="", color='tab:blue', linestyle='solid', linewidth=2)
+                label_ = False
+        if show_coupling:
+            label_ = True
+            for arr in coupling_smooth_pos_idx:
+                if label_:
+                    ax.plot(time_array[arr], coupling_smooth[arr], label="Coupled" if absolute else "Coupled induction", color='tab:orange', linestyle='dashed', linewidth=2)
+                else:
+                    ax.plot(time_array[arr], coupling_smooth[arr], label="", color='tab:orange', linestyle='dashed', linewidth=2)
+                label_ = False
+        if not absolute:
+            if show_decoupling:
+                label_ = True
+                for arr in decoupling_smooth_neg_idx:
+                    if label_:
+                        ax.plot(time_array[arr], decoupling_smooth[arr], label="Decoupled kc < rho", color='tab:green', linestyle='solid', linewidth=2)
+                    else:
+                        ax.plot(time_array[arr], decoupling_smooth[arr], label="", color='tab:green', linestyle='solid', linewidth=2)
+                    label_ = False
+            if show_coupling:
+                label_ = True
+                for arr in coupling_smooth_neg_idx:
+                    if label_:
+                        ax.plot(time_array[arr], coupling_smooth[arr], label="Coupled repression", color='tab:red', linestyle='dashed', linewidth=2)
+                    else:
+                        ax.plot(time_array[arr], coupling_smooth[arr], label="", color='tab:red', linestyle='dashed', linewidth=2)
+                    label_ = False
+
+        cell_filt = (cell_time >= np.min(time_array)) & (cell_time <= np.max(time_array))
+        cell_time_ = cell_time[cell_filt]
+        ax.scatter(cell_time_, np.zeros_like(cell_time_), label=f"Zero line\ncolored by {color_by}", c=color_array[cell_filt], s=20, marker='|')
+
+        ax.set_xlabel("Time")
+        if show_decoupling and not show_coupling:
+            y_text = "Decoupling"
+        elif not show_decoupling and show_coupling:
+            y_text = "Coupling"
+        else:
+            y_text = "(De)coupling"
+        ax.set_ylabel(y_text + (" (absolute)" if absolute else ""))
+        ax.set_title(f'{gene}', fontsize=11)
+        if not axis_on:
+            ax.xaxis.set_ticks_position('none')
+            ax.yaxis.set_ticks_position('none')
+            ax.get_xaxis().set_visible(False)
+            ax.get_yaxis().set_visible(False)
+        if not frame_on:
+            ax.xaxis.set_ticks_position('none')
+            ax.yaxis.set_ticks_position('none')
+            ax.set_frame_on(False)
+        count += 1
+    if len(genes) > n_cols:
+        for i in range(col+1, n_cols):
+            fig.delaxes(axs[row, i])
+    if title:
+        if show_decoupling and not show_coupling:
+            title_text = "Decoupling factors"
+        elif not show_decoupling and show_coupling:
+            title_text = "Coupling factors"
+        else:
+            title_text = "Decoupling and coupling factors"
+        plt.suptitle(title_text, fontsize=12+2*min(n_cols, len(genes)), y=1.01)
+    if legend:
+        handles, labels = ax.get_legend_handles_labels()
+        fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(-np.log10(min(n_cols, len(genes)))/2+1.45, 1),  # (1.6-0.15*min(n_cols, len(genes)), 1),
+                   fontsize=11)
     fig.tight_layout()
 
 

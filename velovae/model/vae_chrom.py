@@ -2409,9 +2409,9 @@ class VAEChrom():
         self.t0_ = t0
 
         if np.sum(np.isnan(self.t0)) > 0:
-            print('t0 contains nan.')
+            raise ValueError('t0 contains nan. Consider raising early stopping threshold or reducing n_epochs.')
         if np.sum(np.isnan(self.c0)) > 0 or np.sum(np.isnan(self.u0)) > 0 or np.sum(np.isnan(self.s0)) > 0:
-            print('c0, u0, or s0 contains nan. Consider raising early stopping threshold.')
+            raise ValueError('c0, u0, or s0 contains nan. Consider raising early stopping threshold or reducing n_epochs.')
 
         if self.config["velocity_continuity"]:
             end_mask = (t >= np.quantile(t, 0.98))
@@ -2508,7 +2508,7 @@ class VAEChrom():
         self.decoder.register_buffer('sigma_u', torch.tensor(std_u, dtype=torch.float, device=self.device))
         self.decoder.register_buffer('sigma_s', torch.tensor(std_s, dtype=torch.float, device=self.device))
 
-    def train(self, config={}, plot=False, gene_plot=[], figure_path="figures", embed="umap"):
+    def train(self, config={}, plot=False, gene_plot=[], figure_path="figures", embed="umap", n_epochs=None):
         """The high-level API for training
 
         Args:
@@ -2526,10 +2526,12 @@ class VAEChrom():
                 The actual key storing the embedding in adata.obsm is f'X_{embed}'. Defaults to "umap".
         """
         self.update_config(config)
+        if n_epochs is not None:
+            self.config["n_epochs"] = n_epochs
         start = time.time()
         self.global_counter = 0
 
-        print("--------------------------- Train a VeloVAE ---------------------------")
+        print("-------------------------- Train a MultiVeloVAE -------------------------")
         try:
             Xembed = self.adata.obsm[f"X_{embed}"]
             Xembed_train = Xembed[self.train_idx]

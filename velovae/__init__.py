@@ -30,6 +30,7 @@ from .plotting_chrom import (plot_sig_,
                              dynamic_plot,
                              scatter_plot,
                              differential_dynamics_plot,
+                             decoupling_plot,
                              velocity_embedding_stream,
                              plot_train_loss_log,
                              plot_test_loss_log)

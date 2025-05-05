@@ -318,6 +318,7 @@ def post_analysis(adata,
                   dpi=120,
                   figure_path=None,
                   save=None,
+                  return_pred=False,
                   **kwargs):
     """High-level API for method evaluation and plotting after training.
     This function computes performance metrics and generates plots based on user input.
@@ -704,4 +705,6 @@ def post_analysis(adata,
             stats_df.to_csv(f"{figure_path}/metrics_{test_id}.csv", sep='\t')
         return stats_df, stats_type_df
 
+    if return_pred:
+        return (That, Uhat, Shat), None
     return None, None

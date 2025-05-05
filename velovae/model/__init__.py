@@ -4,7 +4,7 @@ from .model_util_chrom import ode, ode_numpy, knn_approx, get_x0, cosine_similar
 from .model_util_chrom import aggregate_peaks_10x, tfidf_norm, knn_smooth_chrom, velocity_graph, is_outlier
 from .model_util_chrom import regress_out, filter_genes_dispersion
 from .velocity_chrom import velocity
-from .differential_chrom import log2_difference, log2_fold_change, differential_dynamics, differential_decoupling
+from .differential_chrom import log2_difference, log2_fold_change, differential_dynamics, differential_var_decoupling
 from .training_data_chrom import SCData, SCDataE
 
 __all__ = [
@@ -33,7 +33,7 @@ __all__ = [
     "log2_difference",
     "log2_fold_change",
     "differential_dynamics",
-    "differential_decoupling",
+    "differential_var_decoupling",
     "SCData",
     "SCDataE"
     ]
