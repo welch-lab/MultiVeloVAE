@@ -8,6 +8,7 @@ from .model.model_util_chrom import velocity_graph
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ExpSineSquared, RationalQuadratic, WhiteKernel, ConstantKernel
 from scipy.stats.distributions import chi2
+import statsmodels.api as sm
 logger = logging.getLogger(__name__)
 
 #######################################################################################
@@ -1569,6 +1570,8 @@ def decoupling_plot(adata,
                     n_bins=50,
                     n_samples=100,
                     seed=0,
+                    use_gp=False,
+                    kernel='RBF',
                     n_cols=5,
                     figsize=None,
                     axis_on=True,
@@ -1617,7 +1620,6 @@ def decoupling_plot(adata,
         legend (bool, optional):
             Whether to show legend. Defaults to True.
     """
-    import statsmodels.api as sm
     lowess = sm.nonparametric.lowess
     if isinstance(genes, str) or isinstance(genes, int):
         genes = [genes]
@@ -1694,95 +1696,138 @@ def decoupling_plot(adata,
         if absolute:
             decoupling_array = np.abs(decoupling_array)
             coupling_array = np.abs(coupling_array)
-        decoupling_smooth = lowess(decoupling_array, time_array, frac=0.3)[:, 1]
-        coupling_smooth = lowess(coupling_array, time_array, frac=0.3)[:, 1]
-        decoupling_smooth_pos_idx = np.where(decoupling_smooth > 0)[0]
-        breaks = np.where(np.diff(decoupling_smooth_pos_idx) > 1)[0] + 1
-        if len(breaks) > 0:
-            decoupling_smooth_pos_idx = np.array_split(decoupling_smooth_pos_idx, breaks)
-            for i, x in enumerate(decoupling_smooth_pos_idx[:-1]):
-                decoupling_smooth_pos_idx[i] = np.append(x, x[-1] + 1)
-            decoupling_smooth_pos_idx[-1] = np.append([decoupling_smooth_pos_idx[-1][0]-1], decoupling_smooth_pos_idx[-1])
-        else:
-            if len(decoupling_smooth_pos_idx) > 0 and np.min(decoupling_smooth_pos_idx) > 0:
-                decoupling_smooth_pos_idx = np.append([decoupling_smooth_pos_idx[0]-1], decoupling_smooth_pos_idx)
-            if len(decoupling_smooth_pos_idx) > 0 and np.max(decoupling_smooth_pos_idx) < len(decoupling_smooth) - 1:
-                decoupling_smooth_pos_idx = np.append(decoupling_smooth_pos_idx, [decoupling_smooth_pos_idx[-1] + 1])
-            decoupling_smooth_pos_idx = [decoupling_smooth_pos_idx]
-        coupling_smooth_pos_idx = np.where(coupling_smooth > 0)[0]
-        breaks = np.where(np.diff(coupling_smooth_pos_idx) > 1)[0] + 1
-        if len(breaks) > 0:
-            coupling_smooth_pos_idx = np.array_split(coupling_smooth_pos_idx, breaks)
-            for i, x in enumerate(coupling_smooth_pos_idx[:-1]):
-                coupling_smooth_pos_idx[i] = np.append(x, x[-1] + 1)
-        else:
-            if len(coupling_smooth_pos_idx) > 0 and np.min(coupling_smooth_pos_idx) > 0:
-                coupling_smooth_pos_idx = np.append([coupling_smooth_pos_idx[0]-1], coupling_smooth_pos_idx)
-            if len(coupling_smooth_pos_idx) > 0 and np.max(coupling_smooth_pos_idx) < len(coupling_smooth) - 1:
-                coupling_smooth_pos_idx = np.append(coupling_smooth_pos_idx, [coupling_smooth_pos_idx[-1] + 1])
-            coupling_smooth_pos_idx = [coupling_smooth_pos_idx]
-        decoupling_smooth_neg_idx = np.where(decoupling_smooth < 0)[0]
-        breaks = np.where(np.diff(decoupling_smooth_neg_idx) > 1)[0] + 1
-        if len(breaks) > 0:
-            decoupling_smooth_neg_idx = np.array_split(decoupling_smooth_neg_idx, breaks)
-            for i, x in enumerate(decoupling_smooth_neg_idx[:-1]):
-                decoupling_smooth_neg_idx[i] = np.append(x, x[-1] + 1)
-        else:
-            if len(decoupling_smooth_neg_idx) > 0 and np.min(decoupling_smooth_neg_idx) > 0:
-                decoupling_smooth_neg_idx = np.append([decoupling_smooth_neg_idx[0]-1], decoupling_smooth_neg_idx)
-            if len(decoupling_smooth_neg_idx) > 0 and np.max(decoupling_smooth_neg_idx) < len(decoupling_smooth) - 1:
-                decoupling_smooth_neg_idx = np.append(decoupling_smooth_neg_idx, [decoupling_smooth_neg_idx[-1] + 1])
-            decoupling_smooth_neg_idx = [decoupling_smooth_neg_idx]
-        coupling_smooth_neg_idx = np.where(coupling_smooth < 0)[0]
-        breaks = np.where(np.diff(coupling_smooth_neg_idx) > 1)[0] + 1
-        if len(breaks) > 0:
-            coupling_smooth_neg_idx = np.array_split(coupling_smooth_neg_idx, breaks)
-            for i, x in enumerate(coupling_smooth_neg_idx[:-1]):
-                coupling_smooth_neg_idx[i] = np.append(x, x[-1] + 1)
-        else:
-            if len(coupling_smooth_neg_idx) > 0 and np.min(coupling_smooth_neg_idx) > 0:
-                coupling_smooth_neg_idx = np.append([coupling_smooth_neg_idx[0]-1], coupling_smooth_neg_idx)
-            if len(coupling_smooth_neg_idx) > 0 and np.max(coupling_smooth_neg_idx) < len(coupling_smooth) - 1:
-                coupling_smooth_neg_idx = np.append(coupling_smooth_neg_idx, [coupling_smooth_neg_idx[-1] + 1])
-            coupling_smooth_neg_idx = [coupling_smooth_neg_idx]
 
         row = count // n_cols
         col = count % n_cols
         ax = axs[row, col]
 
-        if show_decoupling:
-            label_ = True
-            for arr in decoupling_smooth_pos_idx:
-                if label_:
-                    ax.plot(time_array[arr], decoupling_smooth[arr], label="Decoupled" if absolute else "Decoupled kc > rho", color='tab:blue', linestyle='solid', linewidth=2)
-                else:
-                    ax.plot(time_array[arr], decoupling_smooth[arr], label="", color='tab:blue', linestyle='solid', linewidth=2)
-                label_ = False
-        if show_coupling:
-            label_ = True
-            for arr in coupling_smooth_pos_idx:
-                if label_:
-                    ax.plot(time_array[arr], coupling_smooth[arr], label="Coupled" if absolute else "Coupled induction", color='tab:orange', linestyle='dashed', linewidth=2)
-                else:
-                    ax.plot(time_array[arr], coupling_smooth[arr], label="", color='tab:orange', linestyle='dashed', linewidth=2)
-                label_ = False
-        if not absolute:
+        if use_gp:
+            bounds = np.quantile(t_both, [0.005, 0.995])
+            t_both_sorted = np.sort(t_both)
+            t_both_sorted = t_both_sorted[(t_both_sorted >= bounds[0]) & (t_both_sorted <= bounds[1])]
+            if kernel == 'RBF':
+                kernel_ = 1.0 * RBF(1.0, length_scale_bounds=(0.1, 10.0)) + WhiteKernel(0.1)
+            elif kernel == 'ExpSineSquared':
+                kernel_ = 1.0 * ExpSineSquared(1.0, 1.0, length_scale_bounds=(0.1, 10.0), periodicity_bounds=(0.1, 10.0)) + WhiteKernel(0.1)
+            elif kernel == 'RationalQuadratic':
+                kernel_ = 1.0 * RationalQuadratic(1.0, 1.0, length_scale_bounds=(0.1, 10.0), alpha_bounds=(0.1, 10.0)) + WhiteKernel(0.1)
+            else:
+                raise ValueError(f"Kernel {kernel} not supported. Must be one of ['RBF', 'ExpSineSquared', 'RationalQuadratic'].")
+            gaussian_process = GaussianProcessRegressor(kernel=kernel_, random_state=seed, n_restarts_optimizer=10)
+            gaussian_process.fit(time_array.reshape(-1, 1), decoupling_array.reshape(-1, 1))
+            mean_prediction_decoupling, std_prediction_decoupling = gaussian_process.predict(t_both_sorted.reshape(-1, 1), return_std=True)
+            gaussian_process = GaussianProcessRegressor(kernel=kernel_, random_state=seed, n_restarts_optimizer=10)
+            gaussian_process.fit(time_array.reshape(-1, 1), coupling_array.reshape(-1, 1))
+            mean_prediction_coupling, std_prediction_coupling = gaussian_process.predict(t_both_sorted.reshape(-1, 1), return_std=True)
+
+            if show_decoupling:
+                ax.plot(t_both_sorted, mean_prediction_decoupling, label="Mean prediction decoupling" + ('\n(absolute)' if absolute else ''),
+                        color='black', linestyle='solid', linewidth=2)
+                ax.fill_between(
+                    t_both_sorted,
+                    mean_prediction_decoupling - 1.96 * std_prediction_decoupling,
+                    mean_prediction_decoupling + 1.96 * std_prediction_decoupling,
+                    alpha=0.4,
+                    label="Credible interval",
+                    facecolor='gray'
+                )
+            if show_coupling:
+                ax.plot(t_both_sorted, mean_prediction_coupling, label="Mean prediction coupling" + ('\n(absolute)' if absolute else ''),
+                        color='black', linestyle='dashed', linewidth=2)
+                ax.fill_between(
+                    t_both_sorted,
+                    mean_prediction_coupling - 1.96 * std_prediction_coupling,
+                    mean_prediction_coupling + 1.96 * std_prediction_coupling,
+                    alpha=0.2,
+                    label="Credible interval",
+                    facecolor='gray'
+                )
+        else:
+            decoupling_smooth = lowess(decoupling_array, time_array, frac=0.3)[:, 1]
+            coupling_smooth = lowess(coupling_array, time_array, frac=0.3)[:, 1]
+            decoupling_smooth_pos_idx = np.where(decoupling_smooth > 0)[0]
+            breaks = np.where(np.diff(decoupling_smooth_pos_idx) > 1)[0] + 1
+            if len(breaks) > 0:
+                decoupling_smooth_pos_idx = np.array_split(decoupling_smooth_pos_idx, breaks)
+                for i, x in enumerate(decoupling_smooth_pos_idx[:-1]):
+                    decoupling_smooth_pos_idx[i] = np.append(x, x[-1] + 1)
+                decoupling_smooth_pos_idx[-1] = np.append([decoupling_smooth_pos_idx[-1][0]-1], decoupling_smooth_pos_idx[-1])
+            else:
+                if len(decoupling_smooth_pos_idx) > 0 and np.min(decoupling_smooth_pos_idx) > 0:
+                    decoupling_smooth_pos_idx = np.append([decoupling_smooth_pos_idx[0]-1], decoupling_smooth_pos_idx)
+                if len(decoupling_smooth_pos_idx) > 0 and np.max(decoupling_smooth_pos_idx) < len(decoupling_smooth) - 1:
+                    decoupling_smooth_pos_idx = np.append(decoupling_smooth_pos_idx, [decoupling_smooth_pos_idx[-1] + 1])
+                decoupling_smooth_pos_idx = [decoupling_smooth_pos_idx]
+            coupling_smooth_pos_idx = np.where(coupling_smooth > 0)[0]
+            breaks = np.where(np.diff(coupling_smooth_pos_idx) > 1)[0] + 1
+            if len(breaks) > 0:
+                coupling_smooth_pos_idx = np.array_split(coupling_smooth_pos_idx, breaks)
+                for i, x in enumerate(coupling_smooth_pos_idx[:-1]):
+                    coupling_smooth_pos_idx[i] = np.append(x, x[-1] + 1)
+            else:
+                if len(coupling_smooth_pos_idx) > 0 and np.min(coupling_smooth_pos_idx) > 0:
+                    coupling_smooth_pos_idx = np.append([coupling_smooth_pos_idx[0]-1], coupling_smooth_pos_idx)
+                if len(coupling_smooth_pos_idx) > 0 and np.max(coupling_smooth_pos_idx) < len(coupling_smooth) - 1:
+                    coupling_smooth_pos_idx = np.append(coupling_smooth_pos_idx, [coupling_smooth_pos_idx[-1] + 1])
+                coupling_smooth_pos_idx = [coupling_smooth_pos_idx]
+            decoupling_smooth_neg_idx = np.where(decoupling_smooth < 0)[0]
+            breaks = np.where(np.diff(decoupling_smooth_neg_idx) > 1)[0] + 1
+            if len(breaks) > 0:
+                decoupling_smooth_neg_idx = np.array_split(decoupling_smooth_neg_idx, breaks)
+                for i, x in enumerate(decoupling_smooth_neg_idx[:-1]):
+                    decoupling_smooth_neg_idx[i] = np.append(x, x[-1] + 1)
+            else:
+                if len(decoupling_smooth_neg_idx) > 0 and np.min(decoupling_smooth_neg_idx) > 0:
+                    decoupling_smooth_neg_idx = np.append([decoupling_smooth_neg_idx[0]-1], decoupling_smooth_neg_idx)
+                if len(decoupling_smooth_neg_idx) > 0 and np.max(decoupling_smooth_neg_idx) < len(decoupling_smooth) - 1:
+                    decoupling_smooth_neg_idx = np.append(decoupling_smooth_neg_idx, [decoupling_smooth_neg_idx[-1] + 1])
+                decoupling_smooth_neg_idx = [decoupling_smooth_neg_idx]
+            coupling_smooth_neg_idx = np.where(coupling_smooth < 0)[0]
+            breaks = np.where(np.diff(coupling_smooth_neg_idx) > 1)[0] + 1
+            if len(breaks) > 0:
+                coupling_smooth_neg_idx = np.array_split(coupling_smooth_neg_idx, breaks)
+                for i, x in enumerate(coupling_smooth_neg_idx[:-1]):
+                    coupling_smooth_neg_idx[i] = np.append(x, x[-1] + 1)
+            else:
+                if len(coupling_smooth_neg_idx) > 0 and np.min(coupling_smooth_neg_idx) > 0:
+                    coupling_smooth_neg_idx = np.append([coupling_smooth_neg_idx[0]-1], coupling_smooth_neg_idx)
+                if len(coupling_smooth_neg_idx) > 0 and np.max(coupling_smooth_neg_idx) < len(coupling_smooth) - 1:
+                    coupling_smooth_neg_idx = np.append(coupling_smooth_neg_idx, [coupling_smooth_neg_idx[-1] + 1])
+                coupling_smooth_neg_idx = [coupling_smooth_neg_idx]
+
             if show_decoupling:
                 label_ = True
-                for arr in decoupling_smooth_neg_idx:
+                for arr in decoupling_smooth_pos_idx:
                     if label_:
-                        ax.plot(time_array[arr], decoupling_smooth[arr], label="Decoupled kc < rho", color='tab:green', linestyle='solid', linewidth=2)
+                        ax.plot(time_array[arr], decoupling_smooth[arr], label="Decoupled" if absolute else "Decoupled kc > rho", color='tab:blue', linestyle='solid', linewidth=2)
                     else:
-                        ax.plot(time_array[arr], decoupling_smooth[arr], label="", color='tab:green', linestyle='solid', linewidth=2)
+                        ax.plot(time_array[arr], decoupling_smooth[arr], label="", color='tab:blue', linestyle='solid', linewidth=2)
                     label_ = False
             if show_coupling:
                 label_ = True
-                for arr in coupling_smooth_neg_idx:
+                for arr in coupling_smooth_pos_idx:
                     if label_:
-                        ax.plot(time_array[arr], coupling_smooth[arr], label="Coupled repression", color='tab:red', linestyle='dashed', linewidth=2)
+                        ax.plot(time_array[arr], coupling_smooth[arr], label="Coupled" if absolute else "Coupled induction", color='tab:orange', linestyle='dashed', linewidth=2)
                     else:
-                        ax.plot(time_array[arr], coupling_smooth[arr], label="", color='tab:red', linestyle='dashed', linewidth=2)
+                        ax.plot(time_array[arr], coupling_smooth[arr], label="", color='tab:orange', linestyle='dashed', linewidth=2)
                     label_ = False
+            if not absolute:
+                if show_decoupling:
+                    label_ = True
+                    for arr in decoupling_smooth_neg_idx:
+                        if label_:
+                            ax.plot(time_array[arr], decoupling_smooth[arr], label="Decoupled kc < rho", color='tab:green', linestyle='solid', linewidth=2)
+                        else:
+                            ax.plot(time_array[arr], decoupling_smooth[arr], label="", color='tab:green', linestyle='solid', linewidth=2)
+                        label_ = False
+                if show_coupling:
+                    label_ = True
+                    for arr in coupling_smooth_neg_idx:
+                        if label_:
+                            ax.plot(time_array[arr], coupling_smooth[arr], label="Coupled repression", color='tab:red', linestyle='dashed', linewidth=2)
+                        else:
+                            ax.plot(time_array[arr], coupling_smooth[arr], label="", color='tab:red', linestyle='dashed', linewidth=2)
+                        label_ = False
 
         cell_filt = (cell_time >= np.min(time_array)) & (cell_time <= np.max(time_array))
         cell_time_ = cell_time[cell_filt]

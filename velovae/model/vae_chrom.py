@@ -28,11 +28,11 @@ class Encoder(nn.Module):
 
     This class encodes data (RNA counts and optionally chromatin accessibility) into
     latent representations. It maps input from the observation space to a distribution
-    over latent variables z (cell state) and t (pseudotime).
+    over latent variables z (cell state) and t (latent time).
 
     Attributes:
-        t_network (bool): Whether to use a neural network to model pseudotime as a vector.
-        split_enhancer (bool): Whether to separately encode enhancer data.
+        t_network: A neural network to model pseudotime as a vector.
+        split_enhancer: Whether to separately encode enhancer data (not tested).
         fc1, bn1, dpt1: First fully connected layer, batch norm, and dropout for main network.
         net: Sequential network combining first layer components.
         fc_mu_t, fc_std_t: Linear layers for latent time mean and standard deviation.
@@ -163,13 +163,13 @@ class Decoder(nn.Module):
     - c = chromatin accessibility
     - u = unspliced RNA
     - s = spliced RNA
-    - k_c, ρ are outputs of neural networks (regulatory parameters)
-    - α_c, α, β, γ are gene-specific parameters
+    - k_c, ρ are cell-gene specific chromatin and transcription states
+    - α_c, α, β, γ are gene-specific and sample-specific velocity parameters
 
     Attributes:
-        adata: AnnData object containing RNA data.
-        adata_atac: AnnData object containing chromatin accessibility data.
-        Many other attributes for model configuration and parameters.
+        adata: AnnData object containing RNA data
+        adata_atac: AnnData object containing chromatin accessibility data
+        Other attributes for model configuration and parameters
 
     Args:
         adata (AnnData):
@@ -826,14 +826,14 @@ class VAEChrom():
     through a variational autoencoder framework with a mechanistic ODE model.
 
     The model learns a low-dimensional latent representation of cell state,
-    a pseudotime for each cell, and the parameters of a gene regulatory model
-    that explains the observed data. It can handle batch effects and
-    RNA-only samples through a conditional VAE design.
+    a latent time for each cell, and the parameters of velocity ODE equations
+    that explain the observed data. It can handle batch effects through a
+    conditional VAE design. It can handle both multi-omic and RNA-only samples.
 
     The model consists of:
     1. An encoder that maps data to a distribution over latent variables
     2. A decoder that generates predictions using a mechanistic ODE model
-    3. Training procedures including KNN refinement for velocity inference
+    3. Training procedures including two-stage refinement
 
     Attributes:
         adata: AnnData object containing RNA data
@@ -841,7 +841,7 @@ class VAEChrom():
         encoder: Neural network encoder
         decoder: Neural network decoder with ODE model
         config: Dictionary containing model configuration and hyperparameters
-        Many other attributes for training and inference
+        Other attributes for training and inference
 
     Args:
         adata (AnnData):
@@ -900,6 +900,8 @@ class VAEChrom():
             Key in adata.obs for plot colors. Defaults to 'clusters'.
         figure_path (str, optional):
             Path to save figures. Defaults to 'figures'.
+        embed (str, optional):
+            Key in adata.obsm of 2D embedding (tsne, umap, etc.). Defaults to None.
         vram_constrained (bool, optional):
             Whether to enable VRAM-constrained mode. Defaults to False.
     """
@@ -3243,6 +3245,7 @@ class VAEChrom():
         self.adata.layers[f"{key}_uhat"] = uhat
         self.adata.layers[f"{key}_shat"] = shat
         self.adata.obs[f"{key}_time"] = t_
+        self.adata.layers[f"{key}_time"] = np.tile(self.adata.obs[f"{key}_time"].to_numpy()[:, None], self.adata.n_vars)
         self.adata.obsm[f"{key}_t"] = t
         self.adata.obsm[f"{key}_std_t"] = std_t
         self.adata.obsm[f"{key}_z"] = z
