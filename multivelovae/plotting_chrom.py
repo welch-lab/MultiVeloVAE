@@ -804,7 +804,8 @@ def dynamic_plot(adata,
         types = adata.obs[color_by].cat.categories
         colors = adata.uns[f'{color_by}_colors']
     else:
-        raise ValueError('Currently, color key must be a single string of either numerical or categorical available in adata obs, and the colors of categories can be found in adata uns.')
+        raise ValueError('Currently, color key must be a single string of either numerical or categorical available in adata obs, '
+                         'and the colors of categories can be found in adata uns.\nYou can use scvelo.pl.scatter directly for more comprehensive plots.')
 
     downsample = np.clip(int(downsample), 1, 10)
     genes = np.array(genes)
@@ -1019,13 +1020,14 @@ def scatter_plot(adata,
         types = adata.obs[color_by].cat.categories
         colors = adata.uns[f'{color_by}_colors']
     else:
-        raise ValueError('Currently, color key must be a single string of either numerical or categorical available in adata obs, and the colors of categories can be found in adata uns.')
+        raise ValueError('Currently, color key must be a single string of either numerical or categorical available in adata obs, '
+                         'and the colors of categories can be found in adata uns.\nYou can use scvelo.pl.scatter directly for more comprehensive plots.')
 
     downsample = np.clip(int(downsample), 1, 10)
     genes = np.array(genes)
     missing_genes = genes[~np.isin(genes, adata.var_names)]
     if len(missing_genes) > 0:
-        logger.warn(f'{missing_genes} not found')
+        logger.warning(f'{missing_genes} not found')
     genes = genes[np.isin(genes, adata.var_names)]
     gn = len(genes)
     if gn == 0:

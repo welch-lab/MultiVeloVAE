@@ -8,7 +8,7 @@ from .evaluation_util import velocity_consistency, inner_cluster_coh, cross_boun
 from .evaluation_util import get_err_scv, get_err_vanilla, get_err_velovae, get_err_brode, get_err_utv, get_err_dv, get_err_pv, get_err_velovi
 from .evaluation_util import get_pred_scv_demo, get_pred_vanilla_demo, get_pred_velovae_demo, get_pred_brode_demo, get_pred_utv_demo
 from .evaluation_util import time_score, cell_state
-from velovae.plotting import set_dpi, get_colors, plot_cluster, plot_phase_grid, plot_sig_grid, plot_time_grid
+from multivelovae.plotting import set_dpi, get_colors, plot_cluster, plot_phase_grid, plot_sig_grid, plot_time_grid
 from multiprocessing import cpu_count
 from scipy.stats import spearmanr
 
