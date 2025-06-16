@@ -1053,7 +1053,10 @@ def cluster_by_quantile(adata,
     perc_good = compute_quantile_scores(adata)
 
     n_clusters = int(n_clusters)
-    cluster = AgglomerativeClustering(n_clusters=n_clusters, affinity=affinity, linkage=linkage)
+    try:
+        cluster = AgglomerativeClustering(n_clusters=n_clusters, affinity=affinity, linkage=linkage)
+    except TypeError:
+        cluster = AgglomerativeClustering(n_clusters=n_clusters, metric=affinity, linkage=linkage)
     cluster = cluster.fit_predict(np.vstack((adata.layers['quantile_scores_1st_bit'],
                                              adata.layers['quantile_scores_2nd_bit'])).transpose())
     return cluster, perc_good
@@ -1490,7 +1493,7 @@ def aggregate_peaks_10x(adata_atac,
         non_zero = enhancer_mat.sum(0) > 0
         gene_mat.obsm['enhancer'] = csr_matrix(enhancer_mat[:, non_zero])
         gene_mat.uns['enhancer_names'] = adata_atac.var_names.to_numpy()[filt][non_zero]
-    gene_mat = gene_mat[:, gene_mat.X.sum(0) > 0]
+    gene_mat = gene_mat[:, gene_mat.X.sum(0) > 0].copy()
     if return_dict:
         return gene_mat, promoter_dict, enhancer_dict
     else:

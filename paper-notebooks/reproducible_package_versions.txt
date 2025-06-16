@@ -3,10 +3,11 @@ blas            3.9.0
 matplotlib-base 3.7.3
 multivelo       0.1.2
 numpy           1.23.5
+pandas          1.5.3
 python          3.10.8
-pytorch         2.0.0
 scanpy          1.9.3
 scikit-learn    1.2.2
 scipy           1.10.1
 scvelo          0.2.5
+torch           2.0.0
 umap-learn      0.5.3

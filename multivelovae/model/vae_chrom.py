@@ -2271,7 +2271,8 @@ class VAEChrom():
                                  condition)
 
             loss[0].backward()
-            torch.nn.utils.clip_grad_value_(self.encoder.parameters(), 1e7)
+            if not self.use_knn:
+                torch.nn.utils.clip_grad_value_(self.encoder.parameters(), 1e7)
             torch.nn.utils.clip_grad_value_(self.decoder.parameters(), 1e7)
             optimizer.step()
             if scheduler is not None:
