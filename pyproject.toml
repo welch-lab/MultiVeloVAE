@@ -5,7 +5,7 @@ requires      = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "MultiVeloVAE"
+name = "multivelovae"
 version = "0.1.0"
 authors = [
     {name = "Chen Li"},
@@ -15,13 +15,12 @@ maintainers = [
     {name = "Chen Li", email = "chlseven@umich.edu"},
 ]
 description = "Velocity inference from multi-lineage, multi-omic, and multi-sample single-cell data"
-readme = "README.md"
-license = {text = "BSD-3"}
+readme = {file = "README.md", content-type="text/markdown"}
+license = "BSD-3-Clause"
 requires-python = ">=3.8"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Natural Language :: English",
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: Microsoft :: Windows",
@@ -31,14 +30,19 @@ classifiers = [
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 keywords = [
     "bioinformatics",
+    "RNA velocity",
     "single-cell",
     "multi-omic",
+    "variational autoencoder",
+    "deep generative model",
     "batch correction",
+    "bayesian inference",
     "trajectory inference",
-    "RNA velocity",
+    "ordinary differential equation",
 ]
 dependencies = [
     "anndata>=0.8.0",
@@ -50,12 +54,10 @@ dependencies = [
     "matplotlib>=3.3.0",
     "multivelo>=0.1.2",
     "numpy>=1.17",
-    "pandas>=0.23".
-    "plotnine",
+    "pandas>=0.23",
     "scanpy>=1.5",
-    "scikit-learn>=0.20",
-    "scikit-misc",
-    "scipy>=1.13.0",
+    "scikit-learn>=1.2.2",
+    "scipy>=1.4.1",
     "scvelo>=0.2.3",
     "seaborn>=0.10.0",
     "torch>=1.8.0",
@@ -66,28 +68,25 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=6.0",
+    "sphinx>=5.1.1",
+    "ruff",
     "black",
     "flake8",
+    "isort",
+    "plotnine",
+    "scikit-misc",
 ]
 
 [project.urls]
 Homepage = "https://github.com/welch-lab/MultiVeloVAE"
 
-[tool.black]
-include = '\.pyi?$'
-exclude = '''
-/(
-    \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.nox
-  | \.tox
-  | \.venv
-  | \.ipynb_checkpoints
-  | _build
-  | buck-out
-  | build
-  | dist
-)/
-'''
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+exclude = [
+    "notebooks*",
+    "paper-notebooks*",
+    "*__pycache__*",
+]
+namespaces = false

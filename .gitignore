@@ -3,6 +3,8 @@ notebooks/
 checkpoints/
 data/
 figures/
+dist/
 __pycache__/
 .ipynb_checkpoints
 .vscode
+*.egg-info/

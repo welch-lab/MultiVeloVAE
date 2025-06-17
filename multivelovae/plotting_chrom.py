@@ -43,7 +43,7 @@ def get_colors(n, color_map=None):
             TAB40 = TAB20B+TAB20C
             return TAB40[:n]
         else:
-            logger.warn("Number of colors exceeds the maximum (40)! Use a continuous colormap (256) instead.")
+            logger.warning("Number of colors exceeds the maximum (40)! Use a continuous colormap (256) instead.")
             return RAINBOW[:n]
     else:
         color_map_obj = list(plt.get_cmap(color_map).colors)
@@ -60,7 +60,7 @@ def save_fig(fig, save, bbox_extra_artists=None):
             idx = save.find('.')
             fig.savefig(save, bbox_extra_artists=bbox_extra_artists, format=save[idx+1:], bbox_inches='tight')
         except FileNotFoundError:
-            logger.warn("Saving failed. File path doesn't exist!")
+            logger.warning("Saving failed. File path doesn't exist!")
         plt.close(fig)
 
 

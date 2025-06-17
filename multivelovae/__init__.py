@@ -34,3 +34,6 @@ from .plotting_chrom import (plot_sig_,
                              velocity_embedding_stream,
                              plot_train_loss_log,
                              plot_test_loss_log)
+
+from importlib.metadata import version
+__version__ = version(__name__)
