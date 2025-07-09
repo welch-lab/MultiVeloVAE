@@ -198,6 +198,8 @@ class Decoder(nn.Module):
             Whether pseudotime is encoded as a vector. Defaults to True.
         full_vb (bool, optional):
             Whether to use full variational Bayes for ODE parameters. Defaults to False.
+        basis (bool, optional):
+            Whether to enable BasisVAE. Defaults to False.
         global_std (bool, optional):
             Whether to use global std for noise model. Defaults to True.
         log_params (bool, optional):
@@ -239,6 +241,7 @@ class Decoder(nn.Module):
                  parallel_arch=True,
                  t_network=True,
                  full_vb=False,
+                 basis=False,
                  global_std=True,
                  log_params=False,
                  rna_only=False,
@@ -266,6 +269,7 @@ class Decoder(nn.Module):
         self.parallel_arch = parallel_arch
         self.t_network = t_network
         self.is_full_vb = full_vb
+        self.use_basis = basis
         self.global_std = global_std
         self.log_params = log_params
         self.rna_only = rna_only
@@ -428,8 +432,11 @@ class Decoder(nn.Module):
             w = assign_gene_mode_tprior(self.adata, self.init_key, self.train_idx)
             perc_good = 1
         else:
-            dyn_mask = (t > self.tmax*0.01) & (np.abs(t-toff) > self.tmax*0.01)
-            w = np.sum(((t < toff) & dyn_mask), 0) / (np.sum(dyn_mask, 0) + 1e-10)
+            if self.use_basis:
+                dyn_mask = (t > self.tmax*0.01) & (np.abs(t-toff) > self.tmax*0.01)
+                w = np.sum(((t < toff) & dyn_mask), 0) / (np.sum(dyn_mask, 0) + 1e-10)
+            else:
+                w = None
             w, perc_good = assign_gene_mode(self.adata, w, 'auto', 0.05, 0.1, 7)
             sigma_c = np.clip(sigma_c, 1e-3, None)
             sigma_u = np.clip(sigma_u, 1e-3, None)
@@ -446,15 +453,19 @@ class Decoder(nn.Module):
             mu_c = np.clip(mu_c, np.min(mu_c[self.adata.var['quantile_genes']]), np.max(mu_c[self.adata.var['quantile_genes']]))
             mu_u = np.clip(mu_u, np.min(mu_u[self.adata.var['quantile_genes']]), np.max(mu_u[self.adata.var['quantile_genes']]))
             mu_s = np.clip(mu_s, np.min(mu_s[self.adata.var['quantile_genes']]), np.max(mu_s[self.adata.var['quantile_genes']]))
-        print(f"Initial induction: {np.sum(w >= 0.5)}, repression: {np.sum(w < 0.5)} out of {G}.")
-        self.adata.var["w_init"] = w
+        if w is not None:
+            print(f"Initial induction: {np.sum(w >= 0.5)}, repression: {np.sum(w < 0.5)} out of {G}.")
+            self.adata.var["w_init"] = w
         self.perc_good = perc_good
-        logit_pw = 0.5*(np.log(w+1e-10) - np.log(1-w-1e-10))
-        if not self.rna_only:
-            logit_pw = np.stack([logit_pw, -0.5*logit_pw, 0.5*logit_pw, -logit_pw], 1)
+        if w is not None:
+            logit_pw = 0.5*(np.log(w+1e-10) - np.log(1-w-1e-10))
+            if not self.rna_only:
+                logit_pw = np.stack([logit_pw, -0.5*logit_pw, 0.5*logit_pw, -logit_pw], 1)
+            else:
+                logit_pw = np.stack([logit_pw, np.zeros_like(logit_pw), np.zeros_like(logit_pw), -logit_pw], 1)
+            self.logit_pw = nn.Parameter(torch.tensor(logit_pw))
         else:
-            logit_pw = np.stack([logit_pw, np.zeros_like(logit_pw), np.zeros_like(logit_pw), -logit_pw], 1)
-        self.logit_pw = nn.Parameter(torch.tensor(logit_pw))
+            self.logit_pw = None
 
         if self.init_method == "tprior":
             print("Reinitialization using prior time.")
@@ -1177,6 +1188,7 @@ class VAEChrom():
                                parallel_arch=parallel_arch,
                                t_network=self.config['t_network'],
                                full_vb=full_vb,
+                               basis=four_basis,
                                global_std=(not deming_std),
                                log_params=self.config["log_params"],
                                rna_only=rna_only,
@@ -1889,7 +1901,8 @@ class VAEChrom():
             if Nb*B < N:
                 Nb += 1
 
-            w_hard = F.one_hot(torch.argmax(self.decoder.logit_pw, 1), num_classes=4).T
+            if self.config['four_basis']:
+                w_hard = F.one_hot(torch.argmax(self.decoder.logit_pw, 1), num_classes=4).T
             for n in range(Nb):
                 i = n*B
                 j = min([(n+1)*B, N])
@@ -2769,7 +2782,8 @@ class VAEChrom():
 
                 if r == 0:
                     self.use_knn = True
-                    self.decoder.logit_pw.requires_grad = False
+                    if self.config['four_basis']:
+                        self.decoder.logit_pw.requires_grad = False
                     self.decoder.init_weights(reinit_t=False)
 
                 self.n_drop = 0
@@ -3197,7 +3211,8 @@ class VAEChrom():
         self.adata.var[f"{key}_mu_u"] = self.decoder.mu_u.detach().cpu().numpy()
         self.adata.var[f"{key}_mu_s"] = self.decoder.mu_s.detach().cpu().numpy()
         self.adata.var[f"{key}_ton"] = self.decoder.ton.detach().cpu().numpy()
-        self.adata.varm[f"{key}_basis"] = F.softmax(self.decoder.logit_pw, 1).detach().cpu().numpy()
+        if self.config['four_basis']:
+            self.adata.varm[f"{key}_basis"] = F.softmax(self.decoder.logit_pw, 1).detach().cpu().numpy()
 
         full_set = self.prepare_dataset(only_full=True)
         G = full_set.data.shape[1]//3

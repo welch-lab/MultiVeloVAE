@@ -1127,6 +1127,9 @@ def assign_gene_mode_auto(adata,
     y, p = cluster_by_quantile(adata, n_clusters=n_clusters)
     adata.var['quantile_cluster'] = y
 
+    if w_noisy is None:
+        return None, p
+
     # Sample weights from Dirichlet(mu=0.5, std=std_prior)
     alpha_neutral = find_dirichlet_param(0.5, std_prior)
     q_neutral = dirichlet.rvs(alpha_neutral, size=adata.n_vars)[:, 0]
