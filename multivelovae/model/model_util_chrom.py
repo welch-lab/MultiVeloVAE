@@ -10,7 +10,7 @@ import scvelo as scv
 from umap.umap_ import fuzzy_simplicial_set
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
-from sklearn.cluster import AgglomerativeClustering, SpectralClustering, KMeans
+from sklearn.cluster import AgglomerativeClustering, SpectralClustering, KMeans, MiniBatchKMeans
 from scipy.spatial import KDTree
 from scipy.sparse import csr_matrix, coo_matrix, diags, issparse
 from scipy.stats import dirichlet, bernoulli, kstest, linregress
@@ -1048,15 +1048,24 @@ def compute_quantile_scores(adata, n_pcs=30, n_neighbors=30):
 
 def cluster_by_quantile(adata,
                         n_clusters=7,
+                        w_noisy=None,
                         affinity='euclidean',
-                        linkage='ward'):
+                        linkage='ward',
+                        batch_size=1024,
+                        random_state=0):
     perc_good = compute_quantile_scores(adata)
 
+    if w_noisy is None:
+        return None, perc_good
+
     n_clusters = int(n_clusters)
-    try:
-        cluster = AgglomerativeClustering(n_clusters=n_clusters, affinity=affinity, linkage=linkage)
-    except TypeError:
-        cluster = AgglomerativeClustering(n_clusters=n_clusters, metric=affinity, linkage=linkage)
+    if adata.n_obs <= 4e4:
+        try:
+            cluster = AgglomerativeClustering(n_clusters=n_clusters, affinity=affinity, linkage=linkage)
+        except TypeError:
+            cluster = AgglomerativeClustering(n_clusters=n_clusters, metric=affinity, linkage=linkage)
+    else:
+        cluster = MiniBatchKMeans(n_clusters=n_clusters, batch_size=batch_size, random_state=random_state)
     cluster = cluster.fit_predict(np.vstack((adata.layers['quantile_scores_1st_bit'],
                                              adata.layers['quantile_scores_2nd_bit'])).transpose())
     return cluster, perc_good
@@ -1124,13 +1133,15 @@ def assign_gene_mode_auto(adata,
                           std_prior=0.1,
                           n_clusters=7):
     # Cluster by ellipse fit
-    y, p = cluster_by_quantile(adata, n_clusters=n_clusters)
-    adata.var['quantile_cluster'] = y
+    y, p = cluster_by_quantile(adata, n_clusters=n_clusters, w_noisy=w_noisy)
 
     if w_noisy is None:
         return None, p
 
+    adata.var['quantile_cluster'] = y
+
     # Sample weights from Dirichlet(mu=0.5, std=std_prior)
+    print('Computing basis.')
     alpha_neutral = find_dirichlet_param(0.5, std_prior)
     q_neutral = dirichlet.rvs(alpha_neutral, size=adata.n_vars)[:, 0]
     w = np.empty((adata.n_vars))
@@ -1209,8 +1220,7 @@ def assign_gene_mode(adata,
 
 def assign_gene_mode_tprior(adata, tkey, train_idx, std_prior=0.05, n_clusters=7):
     # Cluster by ellipse fit
-    y, p = cluster_by_quantile(adata, n_clusters=n_clusters)
-    adata.var['quantile_cluster'] = y
+    y, _ = cluster_by_quantile(adata, n_clusters=n_clusters, w_noisy=None)
 
     # Same as assign_gene_mode, but uses the informative time prior
     # to determine inductive and repressive genes

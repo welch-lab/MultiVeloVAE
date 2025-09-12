@@ -456,7 +456,6 @@ class Decoder(nn.Module):
         if w is not None:
             print(f"Initial induction: {np.sum(w >= 0.5)}, repression: {np.sum(w < 0.5)} out of {G}.")
             self.adata.var["w_init"] = w
-        self.perc_good = perc_good
         if w is not None:
             logit_pw = 0.5*(np.log(w+1e-10) - np.log(1-w-1e-10))
             if not self.rna_only:
@@ -2233,9 +2232,10 @@ class VAEChrom():
             if optimizer3 is not None:
                 optimizer3.zero_grad()
 
-            data_x, idx = data[0], data[1]
+            data_x = data[0] if not self.config['vram_constrained'] else data[0].to(self.device)
+            idx = data[1]
             if self.config['split_enhancer']:
-                data_e = data[2]
+                data_e = data[2] if not self.config['vram_constrained'] else data[2].to(self.device)
             else:
                 data_e = None
             cell_idx = self.train_idx[idx]
