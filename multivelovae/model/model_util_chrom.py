@@ -5,7 +5,6 @@ from anndata import AnnData
 import scanpy as sc
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import scvelo as scv
 from umap.umap_ import fuzzy_simplicial_set
 from sklearn.decomposition import PCA
@@ -586,30 +585,6 @@ def pred_steady(tau_s, alpha_c, alpha, beta, gamma):
     return c0, u0, s0
 
 
-def ode(t, alpha_c, alpha, beta, gamma, to, ts, neg_slope=0.0):
-    eps = 1e-6
-    o = (t <= ts).int()
-
-    tau_on = F.leaky_relu(t-to, negative_slope=neg_slope)
-    expac, expb, expg = torch.exp(-alpha_c*tau_on), torch.exp(-beta*tau_on), torch.exp(-gamma*tau_on)
-    expbd = torch.exp(-beta*tau_on)
-    chat_on = torch.tensor([1.0], device=alpha.device)-expac
-    uhat_on = alpha/(beta+eps)*(torch.tensor([1.0], device=alpha.device)-expbd) + alpha/(beta-alpha_c+eps)*(expbd-expac)
-    shat_on = alpha/(gamma+eps)*(torch.tensor([1.0], device=alpha.device)-expg)
-    shat_on += (alpha/beta-alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
-    shat_on += alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
-
-    c0_, u0_, s0_ = pred_steady(F.relu(ts-to), alpha_c, alpha, beta, gamma)
-
-    tau_off = F.leaky_relu(t-ts, negative_slope=neg_slope)
-    expac, expb, expg = torch.exp(-alpha_c*tau_off), torch.exp(-beta*tau_off), torch.exp(-gamma*tau_off)
-    expbd = torch.exp(-beta*tau_off)
-    chat_off = c0_*expac
-    uhat_off = u0_*expbd
-    shat_off = s0_*expg-u0_*beta/(gamma-beta+eps)*(expg-expb)
-    return (chat_on*o + chat_off*(1-o)), (uhat_on*o + uhat_off*(1-o)), (shat_on*o + shat_off*(1-o))
-
-
 def pred_steady_numpy(ts, alpha_c, alpha, beta, gamma):
     alpha_c_ = np.clip(alpha_c, a_min=0, a_max=None)
     alpha_ = np.clip(alpha, a_min=0, a_max=None)
@@ -623,48 +598,6 @@ def pred_steady_numpy(ts, alpha_c, alpha, beta, gamma):
     s0 = alpha_/(gamma_+eps)*(1.0-expg)+(alpha_/beta_-alpha_/(beta_-alpha_c_+eps))*beta_/(gamma_-beta_+eps)*(expg-expb)
     s0 += alpha_*beta_/(gamma_-alpha_c_+eps)/(beta_-alpha_c_+eps)*(expg-expac)
     return c0, u0, s0
-
-
-def ode_numpy(t, alpha_c, alpha, beta, gamma, to, ts, scaling_c=None, scaling_u=None, scaling_s=None, offset_c=None, offset_u=None, offset_s=None, k=10.0):
-    eps = 1e-6
-    o = (t <= ts).astype(int)
-
-    tau_on = F.softplus(torch.tensor(t-to), beta=k).numpy()
-    assert np.all(~np.isnan(tau_on))
-    expac, expb, expg = np.exp(-alpha_c*tau_on), np.exp(-beta*tau_on), np.exp(-gamma*tau_on)
-    expbd = np.exp(-beta*tau_on)
-    chat_on = 1.0-expac
-    uhat_on = alpha/(beta+eps)*(1.0-expbd) + alpha/(beta-alpha_c+eps)*(expbd-expac)
-    shat_on = alpha/(gamma+eps)*(1.0-expg) + (alpha/beta-alpha/(beta-alpha_c+eps))*beta/(gamma-beta+eps)*(expg-expb)
-    shat_on += alpha*beta/(gamma-alpha_c+eps)/(beta-alpha_c+eps)*(expg-expac)
-
-    c0_, u0_, s0_ = pred_steady_numpy(np.clip(ts-to, 0, None), alpha_c, alpha, beta, gamma)
-    if ts.ndim == 2 and to.ndim == 2:
-        c0_ = c0_.reshape(-1, 1)
-        u0_ = u0_.reshape(-1, 1)
-        s0_ = s0_.reshape(-1, 1)
-    tau_off = F.softplus(torch.tensor(t-ts), beta=k).numpy()
-    assert np.all(~np.isnan(tau_off))
-    expac, expb, expg = np.exp(-alpha_c*tau_off), np.exp(-beta*tau_off), np.exp(-gamma*tau_off)
-    expbd = np.exp(-beta*tau_off)
-    chat_off = c0_*expac
-    uhat_off = u0_*expbd
-    shat_off = s0_*expg-u0_*beta/(gamma-beta+eps)*(expg-expb)
-
-    chat, uhat, shat = (chat_on*o + chat_off*(1-o)), (uhat_on*o + uhat_off*(1-o)), (shat_on*o + shat_off*(1-o))
-    if scaling_c is not None:
-        chat *= scaling_c
-    if scaling_u is not None:
-        uhat *= scaling_u
-    if scaling_s is not None:
-        shat *= scaling_s
-    if offset_c is not None:
-        chat += offset_c
-    if offset_u is not None:
-        uhat += offset_u
-    if offset_s is not None:
-        shat += offset_s
-    return chat, uhat, shat
 
 
 def kl_gaussian(mu1, std1, mu2, std2):
