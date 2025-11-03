@@ -12,10 +12,11 @@ import multivelovae as vv
 ```
 
 ## Package Usage
-Please feel free to test this method on our previously published 10X Multiome datasets. See https://multivelo.readthedocs.io/en/latest/MultiVelo_Demo.html. The example of running the mouse brain dataset is located in [paper-notebooks](https://github.com/welch-lab/MultiVeloVAE/tree/main/paper-notebooks). Alternatively, you can apply the same training and analysis steps on our single-sample HSPC dataset for which we provide the AnnData objects directly in [figshare](https://multivelo.readthedocs.io/en/latest/MultiVelo_Fig5.html). Expected runtimes can be found inside each notebook.
+The example notebooks of running the mouse brain and HSPC datasets are located in [paper-notebooks](https://github.com/welch-lab/MultiVeloVAE/tree/main/paper-notebooks).
+Processed AnnData objects are shared directly through [figshare](https://figshare.com/articles/dataset/Post-processed_anndata_objects_for_MultiVeloVAE/30280333).
+Expected runtimes using RTX3060-level graphics cards can be found inside each notebook.
 
 [This file](https://github.com/welch-lab/MultiVeloVAE/blob/main/paper-notebooks/reproducible_package_versions.txt) lists the versions of packages used to generate manuscript figures.
 
 ## TODO
 bioconda
-readthedocs
