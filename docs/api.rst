@@ -9,7 +9,7 @@ Import MultiVeloVAE as::
 
 
 Preprocessing
-------------------
+-------------
 
 .. autosummary::
    :toctree: .
@@ -24,7 +24,7 @@ Preprocessing
    differential_dynamics
 
 Tools
-------------------
+-----
 
 .. autosummary::
    :toctree: .
@@ -34,7 +34,7 @@ Tools
    velocity_graph
 
 Plotting
-------------------
+--------
 
 .. autosummary::
    :toctree: .
@@ -43,7 +43,7 @@ Plotting
    scatter_plot
 
 Differential testing
-------------------
+--------------------
 
 .. autosummary::
    :toctree: .
