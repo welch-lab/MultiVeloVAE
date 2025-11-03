@@ -20,7 +20,7 @@ copyright = f'{datetime.now():%Y}, Welch Lab'
 author = 'Chen Li'
 
 release = '0.1'
-version = '0.1.1'
+version = '0.1.0'
 
 notebooks_url = "https://github.com/welch-lab/MultiVeloVAE/tree/main/paper-notebooks"
 
