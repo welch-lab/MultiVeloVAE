@@ -13,8 +13,8 @@ To use MultiVeloVAE, first install it using pip:
    $ pip install multivelovae
 
 
-Usage
-----
+Examples
+--------
 
 The example notebooks of running the mouse brain and HSPC datasets are located in `paper-notebooks <https://github.com/welch-lab/MultiVeloVAE/tree/main/paper-notebooks>`_.
 Processed AnnData objects are shared directly through `figshare <https://figshare.com/articles/dataset/Post-processed_anndata_objects_for_MultiVeloVAE/30280333>`_.
