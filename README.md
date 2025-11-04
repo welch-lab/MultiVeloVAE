@@ -12,7 +12,9 @@ import multivelovae as vv
 ```
 
 ## Package Usage
-The example notebooks of running the mouse brain and HSPC datasets are located in [paper-notebooks](https://github.com/welch-lab/MultiVeloVAE/tree/main/paper-notebooks).
+See our [ReadTheDocs](https://multivelovae.readthedocs.io/en/latest) page for details about API and notebooks.
+
+The example notebooks of running the mouse brain and HSPC/macrophage datasets are located in [paper-notebooks](https://github.com/welch-lab/MultiVeloVAE/tree/main/paper-notebooks).
 Processed AnnData objects are shared directly through [figshare](https://figshare.com/articles/dataset/Post-processed_anndata_objects_for_MultiVeloVAE/30280333).
 Expected runtimes using RTX3060-level graphics cards can be found inside each notebook.
 
