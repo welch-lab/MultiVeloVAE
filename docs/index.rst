@@ -1,7 +1,7 @@
 |Stars| |PyPI| |PyPIDownloads| |Docs|
 
 MultiVeloVAE - Velocity inference from multi-lineage, multi-omic, and multi-sample single-cell data
-===============================================================
+===================================================================================================
 
 Understanding how cells differentiate to their final specialized fates is a fundamental problem
 in biomedical science. Single-cell multi-omic profiling provides an opportunity to identify dynamic

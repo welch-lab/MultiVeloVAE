@@ -1232,7 +1232,7 @@ def aggregate_peaks_10x(adata_atac,
         verbose (bool, optional):
             Whether to print number of genes with promoter peaks. Defaults to False.
 
-    Returns
+    Returns:
         Tuple(:class:`anndata.AnnData`, dict, dict):
             if `return_dict`:
                 - A new ATAC anndata object which stores gene aggreagted peak counts.
@@ -1457,7 +1457,7 @@ def tfidf_norm(adata_atac, scale_factor=1e4, copy=False):
         copy (bool, optional):
             Whether to return a copy or modify `.X` directly. Defaults to False.
 
-    Returns
+    Returns:
         None:
             if not `copy`. Directly modifies `.X`.
         :class:`anndata.AnnData`:
@@ -1581,7 +1581,7 @@ def velocity_graph(adata, key='vae', xkey=None, batch_corrected=False, velocity_
             Whether to center the velocities of cells in the first `t_perc` percentile of latent time. Defaults to False.
         t_perc (float, optional):
             Percentile of latent time to center velocities. Defaults to 1.
-        **kwargs:
+        kwargs:
             Additional parameters passed to `scvelo.tl.velocity_graph`.
     """
     vkey = f'{key}_velocity'
@@ -1742,11 +1742,8 @@ def _regress_out_chunk(data):
 
 
 def regress_out(adata, keys, layer=None, n_jobs=8, copy=False, add_intercept=False):
-    """Regress out (mostly) unwanted sources of variation.
+    """Regress out (mostly) unwanted sources of variation and optionally add intercept back.
 
-    Uses simple linear regression. This is inspired by Seurat's `regressOut`
-    function in R [Satija15]. Note that this function tends to overcorrect
-    in certain circumstances as described in :issue:`526`.
 
     Args:
         adata (:class:`anndata.AnnData`):
@@ -1762,7 +1759,7 @@ def regress_out(adata, keys, layer=None, n_jobs=8, copy=False, add_intercept=Fal
         add_intercept (bool, optional):
             If True, regress_out will add intercept back to residuals in order to transform results back into gene-count space. Defaults to False.
 
-    Returns
+    Returns:
         None:
             if not `copy`. Directly modifies `adata` with corrected data matrix.
         :class:`anndata.AnnData`:
@@ -1998,7 +1995,7 @@ def filter_genes_dispersion(
             If an :class:`~anndata.AnnData` is passed, determines whether a copy
             is returned.
 
-    Returns
+    Returns:
         None:
             if not `copy`. Directly modifies `adata`.
         :class:`~anndata.AnnData`:

@@ -1883,7 +1883,7 @@ def velocity_embedding_stream(adata, key='vae', show=True, **kwargs):
             Key to find layers. Defaults to 'vae'.
         show (bool):
             Whether to show the plot. Defaults to True.
-        **kwargs:
+        kwargs:
             Additional parameters passed to `scvelo.pl.velocity_embedding_stream`.
 
     Returns
