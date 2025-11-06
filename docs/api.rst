@@ -22,7 +22,7 @@ Preprocessing
    filter_genes_dispersion
 
 Velocity inference
------
+------------------
 
 .. autosummary::
    :toctree: .
@@ -32,7 +32,7 @@ Velocity inference
    velocity_graph
 
 Differential test
---------------------
+-----------------
 
 .. autosummary::
    :toctree: .
