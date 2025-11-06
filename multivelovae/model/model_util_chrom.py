@@ -1605,6 +1605,7 @@ def velocity_graph(adata, key='vae', xkey=None, batch_corrected=False, velocity_
 # Modified from https://www.sc-best-practices.org/preprocessing_visualization/quality_control.html
 def is_outlier(adata, metric, lower_nmads=20, upper_nmads=20, plot=True):
     """Find outlier cells via median absolute deviations.
+       Modified from www.sc-best-practices.org/preprocessing_visualization/quality_control.html.
 
     Args:
         adata (:class:`anndata.AnnData`):
@@ -1743,7 +1744,8 @@ def _regress_out_chunk(data):
 
 def regress_out(adata, keys, layer=None, n_jobs=8, copy=False, add_intercept=False):
     """Regress out (mostly) unwanted sources of variation and optionally add intercept back.
-
+       Adapted from scanpy, with an option to add intercept back after regression.
+       See github.com/scverse/scanpy/pull/2731 for details.
 
     Args:
         adata (:class:`anndata.AnnData`):
@@ -1954,7 +1956,7 @@ def filter_genes_dispersion(
     subset=True,
     copy=False,
 ):
-    """Extract highly variable genes.
+    """Extract highly variable genes. Adapted from scVelo and made compatible with negative means.
 
     Expects non-logarithmized data.
     The normalized dispersion is obtained by scaling with the mean and standard

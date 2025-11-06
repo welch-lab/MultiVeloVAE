@@ -1580,7 +1580,7 @@ def decoupling_plot(adata,
                     frame_on=True,
                     title=True,
                     legend=True):
-    """Plot differential dynamics between two groups of cells.
+    """Plot decoupling or coupling dynamics between two groups of cells.
 
     Args:
         adata (:class:`anndata.AnnData`):

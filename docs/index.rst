@@ -39,7 +39,8 @@ Check out the :doc:`usage` section for further information.
    HSPC_Integration
    HSPC_Macrophage_Integration
    HSPC_scRNA_Multiome_Integration
-   Preprocessing_Example
+   Preprocessing_HSPC
+   Preprocessing_HSPC_Macrophage_Merge
 
 
 .. |Stars| image:: https://img.shields.io/github/stars/welch-lab/multivelovae?logo=GitHub&color=yellow
