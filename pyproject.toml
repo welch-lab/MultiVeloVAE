@@ -92,3 +92,13 @@ exclude = [
     "*__pycache__*",
 ]
 namespaces = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+xfail_strict = true
+filterwarnings = [
+    "ignore::scipy.sparse.SparseEfficiencyWarning",
+    "ignore::FutureWarning",
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]

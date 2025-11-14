@@ -1009,6 +1009,8 @@ class VAEChrom():
                 Key in adata.obs containing the cluster labels for plot colors. Defaults to 'clusters'.
             figure_path (str, optional):
                 Path to save the figures. Defaults to 'figures'.
+            embed (str, optional):
+                Key in adata.obsm of 2D embedding (tsne, umap, etc.). Defaults to None.
             vram_constrained (bool, optional):
                 Whether to enable VRAM-constrained mode. Defaults to False.
         """

@@ -201,7 +201,7 @@ def assign_time(c, u, s, c0_, u0_, s0_, alpha_c, alpha, beta, gamma, std_c_=None
     return t_latent, t_
 
 
-# From scVelo #
+### From scVelo
 def log(x, eps=1e-6):  # to avoid invalid values for log.
     return np.log(np.clip(x, eps, 1 - eps))
 
@@ -267,7 +267,7 @@ def test_bimodality(x, bins=30, kde=True):
     ]
 
     return t_stat, p_val, means  # ~ t_test (reject unimodality if t_stat > 3)
-# from scVelo #
+### From scVelo end
 
 
 def init_gene_rna(u, s, percent, fit_scaling=True, tmax=1):
